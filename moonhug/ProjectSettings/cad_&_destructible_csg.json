@@ -1,0 +1,16 @@
+{
+  "async_destruction_worker": true,
+  "default_chunk_size": 8.0,
+  "max_chunk_swaps_per_tick": 4,
+  "blast_jaggedness": 0.14,
+  "debris_count_per_blast": 0,
+  "debris_lifetime_sec": 6.0,
+  "drunken_sphere_com_offset": 0.38,
+  "drunken_sphere_ang_damp": 6.5,
+  "blast_fx_duration_sec": 0.44999999,
+  "enable_all_keybindings": true,
+  "enable_transform_tool_hotkeys": true,
+  "enable_subtool_number_hotkeys": true,
+  "enable_axis_lock_hotkeys": true,
+  "enable_modeling_op_hotkeys": true
+}

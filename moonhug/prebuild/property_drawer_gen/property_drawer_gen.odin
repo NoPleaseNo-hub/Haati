@@ -1,0 +1,221 @@
+package property_drawer_gen
+
+// property_drawer_gen: ECS prebuild module.
+//
+//   provide  - iterate the decls, recognise proc declarations carrying a
+//              @property_drawer attribute, add a PropertyDrawer_GenComp (carrying
+//              type_name / priority / proc_name / source_pkg).
+//   generate - iterate the {decls, property_drawers} join view, sort by
+//              priority, build property_drawer_generated.odin, emit it as a
+//              GeneratedFile.
+//
+// String-building output is identical to the previous collect/generate version.
+
+import "core:fmt"
+import "core:slice"
+import "core:strings"
+import db "../gen_db"
+import "../gen_facts"
+
+// PropertyDrawer_GenComp marks a DeclInfo entity as a property_drawer proc and
+// carries the facts the generator needs.
+PropertyDrawer_GenComp :: struct {
+	type_name:  string, // type expression for typeid_of(...), e.g. "f32" or "pkg.MyType"
+	priority:   int,    // lower first, higher later
+	proc_name:   string,
+	source_pkg:  string, // package where the procedure is defined; empty or same as output => use bare proc_name
+	source_path: string, // that package's scan path, for the import
+	// Where the drawer was declared, rendered by gen_facts.attr_origin. A
+	// drawer draws a whole field row, so debug tooltips show this on every row of
+	// the drawn type.
+	origin:      string,
+}
+
+
+@(init)
+_register :: proc "contextless" () {
+	db.provider("property_drawer/provide", provide)
+	db.generator("property_drawer/generate", generate)
+}
+
+
+provide :: proc(w: ^db.World) -> bool {
+	_property_drawers := db.get_or_create_comps(w, PropertyDrawer_GenComp)
+	decls := db.get_comps_DeclInfo()
+	procs := db.get_comps(w, gen_facts.Proc_GenComp)
+	attrs := db.get_comps(w, gen_facts.Attrs_GenComp)
+
+	m := db.all_of(db.r(decls), db.r(procs), db.r(attrs)); defer db.matcher_destroy(&m)
+	for entity in db.matched(w, &m) {
+		decl := db.get(decls, entity)
+		if decl.name == "" do continue
+		attr_set := db.get(attrs, entity)
+		args, found := gen_facts.attr_find(attr_set, "property_drawer")
+		if !found do continue
+		type_name := args.fields["type"]
+		if type_name == "" do continue
+		db.set(_property_drawers, entity, PropertyDrawer_GenComp{
+			type_name  = type_name,
+			priority   = gen_facts.attr_int(args, "priority"),
+			proc_name   = decl.name,
+			source_pkg  = decl.pkg.name,
+			source_path = decl.pkg_path,
+			origin      = gen_facts.attr_origin(args, gen_facts.decl_rel_path(decl), decl.decl.pos.line, decl.name),
+		})
+	}
+	return true
+}
+
+_PropertyDrawerRow :: struct {
+	type_name:   string,
+	priority:    int,
+	proc_name:   string,
+	source_pkg:  string,
+	source_path: string,
+	origin:      string,
+}
+
+// Import path for a package reached from `out_dir`. A package NAME cannot be
+// turned into a path (an editor subpackage is <pkg>/editor but declares
+// <pkg>_editor), so proc-side packages carry their scan path; type-side ones
+// only have the name, and resolve as a sibling of the editor tree.
+_relative_import_path :: proc(out_dir: string, source_path: string) -> string {
+	out_dir_slash := strings.concatenate({out_dir, "/"})
+	if strings.has_prefix(source_path, out_dir_slash) {
+		return source_path[len(out_dir_slash):]
+	}
+	out_parts := strings.split(out_dir, "/")
+	src_parts := strings.split(source_path, "/")
+	common := 0
+	for common < len(out_parts) && common < len(src_parts) && out_parts[common] == src_parts[common] {
+		common += 1
+	}
+	ups := len(out_parts) - common
+	b := strings.builder_make()
+	for _ in 0 ..< ups {
+		strings.write_string(&b, "../")
+	}
+	for i in common ..< len(src_parts) {
+		if i > common do strings.write_string(&b, "/")
+		strings.write_string(&b, src_parts[i])
+	}
+	return strings.to_string(b)
+}
+
+// _package_from_type_name returns the package prefix for qualified types (e.g. "app" from "app.A"), or "" if local/core type.
+_package_from_type_name :: proc(type_name: string) -> string {
+	s := type_name
+	for len(s) > 0 {
+		if s[0] == '^' {
+			s = s[1:]
+		} else if len(s) >= 2 && s[0] == '[' {
+			close := 0
+			for close < len(s) {
+				if s[close] == ']' { break }
+				close += 1
+			}
+			if close < len(s) {
+				s = s[close + 1:]
+			} else {
+				break
+			}
+		} else {
+			break
+		}
+	}
+	for i in 0 ..< len(s) {
+		if s[i] == '.' do return s[:i]
+	}
+	return ""
+}
+
+_OUT_DIR :: "moonhug/editor/inspector"
+
+generate :: proc(w: ^db.World) -> bool {
+	pkg_name := "inspector"
+
+	entries: [dynamic]_PropertyDrawerRow
+	defer delete(entries)
+
+	decls := db.get_comps_DeclInfo()
+	_property_drawers := db.get_comps(w, PropertyDrawer_GenComp)
+	m := db.all_of(db.r(decls), db.r(_property_drawers)); defer db.matcher_destroy(&m)
+	for entity in db.matched(w, &m) {
+		drawer := db.get(_property_drawers, entity)
+		append(&entries, _PropertyDrawerRow{
+			type_name   = drawer.type_name,
+			priority    = drawer.priority,
+			proc_name   = drawer.proc_name,
+			source_pkg  = drawer.source_pkg,
+			source_path = drawer.source_path,
+			origin      = drawer.origin,
+		})
+	}
+
+	// Preserve previous collect_finalize ordering: sort by priority (lower first, higher later).
+	// Total order — same-priority drawers must not depend on entity iteration
+	// order under an unstable sort, or the emitted file churns between builds.
+	slice.sort_by(entries[:], proc(a, b: _PropertyDrawerRow) -> bool {
+		if a.priority != b.priority do return a.priority < b.priority
+		if a.type_name != b.type_name do return a.type_name < b.type_name
+		return a.proc_name < b.proc_name
+	})
+
+	b := strings.builder_make()
+	defer strings.builder_destroy(&b)
+
+	// Collect external packages: from type names (typeid_of(pkg.T)) and from procedure locations (pkg.draw_proc).
+	packages_used: map[string]string // package name -> import path ("" = derive from name)
+	defer delete(packages_used)
+	for e in entries {
+		if pkg := _package_from_type_name(e.type_name); pkg != "" && pkg != pkg_name {
+			if pkg not_in packages_used do packages_used[pkg] = ""
+		}
+		if e.source_pkg != "" && e.source_pkg != pkg_name {
+			path := e.source_path != "" ? _relative_import_path(_OUT_DIR, e.source_path) : ""
+			if existing, ok := packages_used[e.source_pkg]; !ok || existing == "" {
+				packages_used[e.source_pkg] = path
+			}
+		}
+	}
+	import_pkgs: [dynamic]string
+	defer delete(import_pkgs)
+	for pkg in packages_used {
+		append(&import_pkgs, pkg)
+	}
+	slice.sort(import_pkgs[:])
+
+	strings.write_string(&b, "package ")
+	strings.write_string(&b, pkg_name)
+	strings.write_string(&b, "\n\n")
+	for pkg in import_pkgs {
+		if path := packages_used[pkg]; path != "" {
+			fmt.sbprintf(&b, "import %s \"%s\"\n", pkg, path)
+		} else if pkg == "engine" || pkg == "editor" {
+			// Editor-tree sibling.
+			fmt.sbprintf(&b, "import \"../../%s\"\n", pkg)
+		} else {
+			// Type-name-only package: an installed package.
+			fmt.sbprintf(&b, "import %s \"moonhug:packages/%s\"\n", pkg, pkg)
+		}
+	}
+	if len(packages_used) > 0 do strings.write_string(&b, "\n")
+	strings.write_string(&b, "// Code generated by property_drawer_gen. Do not edit.\n\n")
+	strings.write_string(&b, "init_property_drawer_map :: proc() {\n")
+
+	for e in entries {
+		rhs: string
+		if e.source_pkg != "" && e.source_pkg != pkg_name {
+			rhs = fmt.tprintf("%s.%s", e.source_pkg, e.proc_name)
+		} else {
+			rhs = e.proc_name
+		}
+		fmt.sbprintf(&b, "\tmapPropertyDrawer[typeid_of(%s)] = %s\n", e.type_name, rhs)
+		fmt.sbprintf(&b, "\tmapPropertyDrawerOrigin[typeid_of(%s)] = %q\n", e.type_name, e.origin)
+	}
+
+	strings.write_string(&b, "}\n")
+
+	db.emit(w, "moonhug/editor/inspector/property_drawer_generated.odin", strings.to_string(b))
+	return true
+}

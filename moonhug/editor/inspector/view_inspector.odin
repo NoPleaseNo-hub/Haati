@@ -1,0 +1,1215 @@
+package inspector
+
+import "base:runtime"
+import "core:fmt"
+import "core:mem"
+import "core:reflect"
+import "core:path/filepath"
+import "core:encoding/uuid"
+import strings "core:strings"
+import im "moonhug:external/odin-imgui"
+import "moonhug:editor/widgets"
+import ser "../../engine/serialization"
+import engine "../../engine"
+import "moonhug:engine_editor/asset_pipeline"
+import clip "../clipboard"
+import "../undo"
+import "moonhug:editor/icons"
+
+InspectorMode :: enum {
+    Asset,
+    ImportSettings,
+    Package,
+}
+
+mapPropertyDrawer: MapPropertyDrawer
+inspectorData: InspectorData
+inspector_changed: bool
+
+// Set by the inspector loop before invoking a property drawer, so drawers can
+// read field-level tags that aren't part of the (ptr, tid, label) signature.
+// Currently used by the Ref_Local / Ref pickers to read `ref:"TypeName"`.
+current_field_ref_target: string
+// `pick:"scene"` / `pick:"project"` limits which picker tabs are assignable
+// for engine.Ref fields (no tag = both).
+current_field_pick_mode: string
+// Comma-separated allowed extensions from the field's `ext:"..."` tag; limits
+// the Asset_GUID picker + drag-drop to matching files ("" = everything).
+current_field_ext_filter: string
+// `has:"..."` — the same list grammar as `ref:`, naming components an OBJECT
+// must carry to be offered. For a `ref:"Transform"` field this is the filter:
+// `ref:` says what is stored, `has:` says which objects qualify. Two tags,
+// because one cannot say both without being ambiguous about what to store.
+current_field_has_filter: string
+// `expand` — an Asset_GUID row (or each element of an array of them) gets a
+// foldout that opens the referenced asset's document right under it, edited
+// in place with the same undo and live preview the Project Inspector gives
+// it (asset_expand.odin). Opt-in per field: a material slot wants it, a mesh
+// slot does not. Not `inline`, which flattens a nested struct's rows.
+current_field_expand: bool
+// Width a row's caller will draw AFTER the value on the same line (an expand
+// arrow, an array element's remove button). A drawer that sizes its value to
+// the remaining width subtracts this, so trailing buttons eat the field's
+// space instead of adding to the row.
+current_field_trailing_w: f32
+
+// The tag variables above as one value, so a row drawn outside the generic
+// loop (a proxy row for another component's field) publishes the field's
+// tags the same way and puts the previous ones back.
+Field_Tags :: struct {
+    ref, pick, ext, has: string,
+    expand: bool,
+}
+
+// Publishes `tag`'s picker tags for the drawer about to run. Returns what was
+// there, for field_tags_restore.
+field_tags_set :: proc(tag: reflect.Struct_Tag) -> (prev: Field_Tags) {
+    prev = {current_field_ref_target, current_field_pick_mode, current_field_ext_filter, current_field_has_filter, current_field_expand}
+    current_field_ref_target, _ = reflect.struct_tag_lookup(tag, "ref")
+    current_field_pick_mode, _ = reflect.struct_tag_lookup(tag, "pick")
+    current_field_ext_filter, _ = reflect.struct_tag_lookup(tag, "ext")
+    current_field_has_filter, _ = reflect.struct_tag_lookup(tag, "has")
+    current_field_expand = _tag_has_flag(tag, "expand")
+    return prev
+}
+
+// A flag tag is a bare word: `ext:"mat" expand`. reflect.struct_tag_lookup
+// only reads key:"value" pairs, so the word is matched as its own token, and
+// the key:"" spelling is accepted as well.
+_tag_has_flag :: proc(tag: reflect.Struct_Tag, name: string) -> bool {
+    if _, has := reflect.struct_tag_lookup(tag, name); has do return true
+    for tok in strings.fields(string(tag), context.temp_allocator) {
+        if tok == name do return true
+    }
+    return false
+}
+
+field_tags_restore :: proc(prev: Field_Tags) {
+    current_field_ref_target = prev.ref
+    current_field_pick_mode = prev.pick
+    current_field_ext_filter = prev.ext
+    current_field_has_filter = prev.has
+    current_field_expand = prev.expand
+}
+
+InspectorData :: struct {
+    mode: InspectorMode,
+    filePath: string,
+    fileData: any,
+    doc: ^Asset_Doc, // .Asset mode: the registry document backing fileData
+    statusMessage: string,
+    settingsDoc: ^Asset_Doc, // .ImportSettings mode: the asset's import settings document (registry-owned)
+    packageName: string, // .Package mode (owned)
+    packageAssetCount: int,
+    packageManifest: Plugin_Manifest_View, // .Package mode (owned, plugin_manifest.odin)
+}
+
+MapPropertyDrawer :: map[typeid]proc(ptr: rawptr, tid: typeid, label: cstring)
+
+// The @(property_drawer) behind each entry of mapPropertyDrawer, with its file
+// and line, as rendered by the generator. A drawer owns the whole field row,
+// so debug tooltips show this while the row draws. Filled by
+// init_property_drawer_map; a hand-registered drawer has no entry.
+mapPropertyDrawerOrigin: map[typeid]string
+
+// Asset preview pane: package editor subpackages register a drawer per
+// source extension (lowercase, with dot). A matching drawer pins a Preview
+// section to the BOTTOM of the Project Inspector, below whatever the mode
+// draws (the audio Play/Stop buttons are the reference).
+mapAssetPreview: map[string]proc(path: string)
+
+// The selected sub-asset of `path` (0 = none), for Asset_Ctx.sub. The editor
+// installs it: the project selection lives there.
+selected_sub: proc(path: string) -> engine.Local_ID
+
+init :: proc() {
+    mapPropertyDrawer = make(MapPropertyDrawer)
+    mapPropertyDrawerOrigin = make(map[typeid]string)
+    mapAssetPreview = make(map[string]proc(path: string))
+    decorator_registry = make(DecoratorsMap)
+    decorator_origin_registry = make(map[typeid][]string)
+    init_property_drawer_map()
+    // Manual registration: the prebuild attribute parser takes plain type
+    // names, not container type expressions.
+    mapPropertyDrawer[typeid_of([dynamic]engine.Material_Property)] = draw_material_properties
+    mapPropertyDrawer[typeid_of([dynamic]engine.Material_Texture)] = draw_material_textures
+    init_decorators()
+    inspector_buttons = make(map[typeid][]Inspector_Button)
+    _register_inspector_buttons()
+    undo.set_asset_apply(asset_doc_apply_json)
+    undo.set_asset_doc_lookup(asset_doc_payload_ptr)
+}
+
+shutdown_registries :: proc() {
+    multi_shutdown()
+    delete(mapPropertyDrawer)
+    delete(mapPropertyDrawerOrigin)
+    delete(mapAssetPreview)
+    for _, v in decorator_registry {
+        delete(v)
+    }
+    delete(decorator_registry)
+    for _, v in decorator_origin_registry {
+        delete(v)
+    }
+    delete(decorator_origin_registry)
+    for _, v in inspector_buttons {
+        delete(v)
+    }
+    delete(inspector_buttons)
+    decorators_shutdown()
+    // The load procs pin the default allocator: the shown file outlives frames.
+    delete(inspectorData.filePath, runtime.default_allocator())
+    delete(inspectorData.packageName, runtime.default_allocator())
+    asset_docs_shutdown()
+}
+
+load_from_file :: proc(filepath: string){
+    context.allocator = runtime.default_allocator()
+    doc := asset_doc_get(filepath)
+    if doc != nil {
+        delete(inspectorData.filePath)
+        inspectorData.filePath = strings.clone(filepath)
+        inspectorData.fileData = doc.data
+        inspectorData.doc = doc
+        inspectorData.settingsDoc = nil
+        inspectorData.mode = .Asset
+        // No "loaded" status: the file row right below says which asset this
+        // is, and the load is logged. A status row here only pushes the path down.
+        _set_status("")
+    } else {
+        _set_status(fmt.tprintf("Failed to load %s", filepath))
+    }
+}
+
+// A file the inspector can NAME but not edit: a scene. It carries no document
+// — a scene is edited in the Hierarchy once opened — so the panel shows the
+// file row and, keyed off the same path, whatever Preview drawer its extension
+// registered. Without this a scene never reaches the inspector at all, and the
+// preview registered for `.scene` could never run.
+load_file_only :: proc(filepath: string) {
+    context.allocator = runtime.default_allocator()
+    delete(inspectorData.filePath)
+    inspectorData.filePath = strings.clone(filepath)
+    inspectorData.fileData = {}
+    inspectorData.doc = nil
+    inspectorData.settingsDoc = nil
+    inspectorData.mode = .Asset
+    _set_status("")
+}
+
+load_import_settings :: proc(filepath: string) {
+    context.allocator = runtime.default_allocator()
+    // The shared document (import_settings_docs.odin): unapplied edits survive
+    // clicking away and back, and the Sprite Editor edits the same one.
+    if doc := import_settings_doc_get(filepath); doc != nil {
+        delete(inspectorData.filePath)
+        inspectorData.filePath = strings.clone(filepath)
+        inspectorData.fileData = {}
+        inspectorData.doc = nil
+        inspectorData.settingsDoc = doc
+        inspectorData.mode = .ImportSettings
+        _set_status("")
+    } else {
+        _set_status(fmt.tprintf("No import settings for %s", filepath))
+    }
+}
+
+// Package selected in the project view's Packages section (docs/Plugins.md):
+// shows the package inspector instead of an asset document.
+load_package :: proc(name: string, assets_path: string, asset_count: int) {
+    context.allocator = runtime.default_allocator()
+    delete(inspectorData.filePath)
+    inspectorData.filePath = strings.clone(assets_path)
+    delete(inspectorData.packageName)
+    inspectorData.packageName = strings.clone(name)
+    inspectorData.packageAssetCount = asset_count
+    plugin_manifest_free(&inspectorData.packageManifest)
+    inspectorData.packageManifest = plugin_manifest_load(name)
+    inspectorData.fileData = {}
+    inspectorData.doc = nil
+    inspectorData.settingsDoc = nil
+    inspectorData.mode = .Package
+    _set_status("")
+}
+
+// Re-reads the shown package's manifest: its dependencies' installed marks
+// and its Used by change when a sample is installed or removed.
+package_manifest_reload :: proc() {
+    if inspectorData.mode != .Package do return
+    plugin_manifest_free(&inspectorData.packageManifest)
+    inspectorData.packageManifest = plugin_manifest_load(inspectorData.packageName)
+}
+
+// Shows nothing ("No file loaded"): the file the inspector showed left the
+// project, so there is nothing left to edit or save.
+unload :: proc() {
+    context.allocator = runtime.default_allocator()
+    delete(inspectorData.filePath)
+    inspectorData.filePath = ""
+    inspectorData.fileData = {}
+    inspectorData.doc = nil
+    inspectorData.settingsDoc = nil
+    delete(inspectorData.packageName)
+    inspectorData.packageName = ""
+    inspectorData.mode = .Asset
+    _set_status("")
+}
+
+// The status line's text, owned. It is read on LATER frames than the one that
+// set it, so it cannot be temp-allocated: the temp allocator resets at the end
+// of the frame, leaving a string whose length is non-zero and whose bytes are
+// gone — which drew as a blank row above the file path.
+_set_status :: proc(msg: string) {
+    delete(inspectorData.statusMessage, runtime.default_allocator())
+    inspectorData.statusMessage = msg == "" ? "" : strings.clone(msg, runtime.default_allocator())
+}
+
+get_file_path :: proc() -> string {
+    return inspectorData.filePath
+}
+
+// File/Save: the open document, then every other dirty document (an asset
+// edited through an `expand` foldout has no Save button of its own).
+//
+// Only FAILURES are reported. A save that worked is already visible — the
+// dirty star clears — so a success line would be one more thing to read and
+// then dismiss.
+save_to_file :: proc() {
+    // Only an ASSET has a document to write. A package folder (or an import
+    // settings view) leaves fileData as a nil `any`, and serializing that asks
+    // for the GUID of a nil typeid — which panics rather than failing softly.
+    failed_path := ""
+    if inspectorData.mode == .Asset && inspectorData.fileData.data != nil {
+        ok := inspectorData.doc != nil ? asset_doc_save(inspectorData.doc) : ser.save_to_file(inspectorData.filePath, inspectorData.fileData)
+        if !ok do failed_path = inspectorData.filePath
+    }
+    _, failed := asset_docs_save_dirty()
+    switch {
+    case failed_path != "": _set_status(fmt.tprintf("Failed to save %s", failed_path))
+    case failed > 0:        _set_status(fmt.tprintf("%d asset(s) failed to save", failed))
+    // Clears a failure left from an earlier attempt.
+    case:                   _set_status("")
+    }
+}
+
+// p_open: the editor's show flag, so the dock tab's X can close the window
+// (the menu package imports this one, so the flag is passed in).
+// Preview pane's share of the window height, dragged via the splitter
+// (the console/history splitter pattern).
+_preview_split_ratio: f32 = 0.3
+
+view_inspector_draw :: proc(p_open: ^bool) {
+    if im.Begin(icons.TITLE_PROJECT_INSPECTOR, p_open, {.NoCollapse}) {
+        // A registered preview pins to the window's bottom — the mode content
+        // scrolls in a child above it.
+        preview := _asset_preview_drawer()
+        avail := im.GetContentRegionAvail()
+        split_total := avail.y - widgets.SPLITTER_SIZE
+        MIN_PANE :: f32(60)
+        preview_h, body_h: f32
+        if preview != nil {
+            preview_h = split_total * _preview_split_ratio
+            if preview_h < MIN_PANE do preview_h = MIN_PANE
+            if preview_h > split_total - MIN_PANE do preview_h = split_total - MIN_PANE
+            body_h = split_total - preview_h
+            im.BeginChild("##inspector_body", {0, body_h})
+        }
+        switch inspectorData.mode {
+        case .Asset:
+            _draw_asset_inspector()
+        case .ImportSettings:
+            _draw_import_settings_inspector()
+        case .Package:
+            _draw_package_inspector()
+        }
+        if preview != nil {
+            im.EndChild()
+
+            if widgets.splitter("##preview_split", false, &body_h, &preview_h, MIN_PANE, MIN_PANE) {
+                _preview_split_ratio = preview_h / split_total
+            }
+
+            im.SeparatorText("Preview")
+            preview(inspectorData.filePath)
+        }
+    }
+    im.End()
+}
+
+_asset_preview_drawer :: proc() -> proc(path: string) {
+    if inspectorData.filePath == "" do return nil
+    ext := strings.to_lower(filepath.ext(inspectorData.filePath), context.temp_allocator)
+    return mapAssetPreview[ext] or_else nil
+}
+
+// Samples section hook, injected by the editor root at startup (the file ops
+// and dir cache live there, and this package can't import the editor root).
+package_samples_draw: proc(pkg_name: string)
+
+// Reveal a package in the project view, injected the same way: select=false
+// pings its row, select=true selects it.
+package_reveal: proc(pkg_name: string, select: bool)
+
+// Package inspector (docs/Plugins.md): shown when a package is selected in
+// the project view's Packages section (left-pane node or right-pane row).
+_draw_package_inspector :: proc() {
+    tc :: proc(s: string) -> cstring { return strings.clone_to_cstring(s, context.temp_allocator) }
+    im.Text(tc(fmt.tprintf("Package: %s", inspectorData.packageName)))
+    im.Separator()
+    im.Text(tc(fmt.tprintf("Assets: %d", inspectorData.packageAssetCount)))
+    _draw_package_manifest(&inspectorData.packageManifest)
+    if package_samples_draw != nil {
+        package_samples_draw(inspectorData.packageName)
+    }
+}
+
+// The manifest section (docs/Plugins.md, "Plugin manifest"): what `mh deps`
+// gathered as a table (name, and a dot under Compile, Tests or Content for
+// what needs it, none for a hand-written entry), and the installed plugins that use
+// this one. Two foldouts, open by default. A row pings its package in the
+// project view, a double click selects it.
+@(private = "file")
+_draw_package_manifest :: proc(m: ^Plugin_Manifest_View) {
+    tc :: proc(s: string) -> cstring { return strings.clone_to_cstring(s, context.temp_allocator) }
+    if !m.found {
+        im.TextDisabled(tc(fmt.tprintf("No mh_plugin.json (mh deps %s makes it)", inspectorData.packageName)))
+        return
+    }
+    if !m.ok {
+        im.TextColored({1, 0.4, 0.4, 1}, "mh_plugin.json does not parse")
+        return
+    }
+    if m.description != "" do im.TextWrapped(tc(m.description))
+    im.Spacing()
+
+    missing := 0
+    for d in m.dependencies do if !d.installed do missing += 1
+    im.SetNextItemOpen(true, .Once)
+    label := fmt.tprintf("Dependencies (%d)###pkg_deps", len(m.dependencies))
+    if missing > 0 do label = fmt.tprintf("%s Dependencies (%d, %d not installed)###pkg_deps", icons.ICON_MD_WARNING, len(m.dependencies), missing)
+    if im.CollapsingHeader(tc(label)) do _draw_dependency_table("##pkg_deps_table", m.dependencies)
+
+    im.SetNextItemOpen(true, .Once)
+    if im.CollapsingHeader(tc(fmt.tprintf("Used by (%d)###pkg_used_by", len(m.used_by)))) do _draw_dependency_table("##pkg_used_by_table", m.used_by)
+}
+
+// Name, Compile, Tests, Content: a dot under what needs the row's plugin,
+// the headers say what missing it costs. Headers sort, once per click
+// (imgui's sort specs).
+@(private = "file")
+_draw_dependency_table :: proc(id: cstring, rows: []Plugin_Dependency) {
+    tc :: proc(s: string) -> cstring { return strings.clone_to_cstring(s, context.temp_allocator) }
+    if len(rows) == 0 {
+        im.Indent()
+        im.TextDisabled("none")
+        im.Unindent()
+        return
+    }
+    if !im.BeginTable(id, 4, im.TableFlags_SizingFixedFit | im.TableFlags_RowBg | im.TableFlags_BordersInnerH | im.TableFlags_Sortable) do return
+    im.TableSetupColumn("Name", im.TableColumnFlags{.WidthStretch, .DefaultSort})
+    im.TableSetupColumn("Compile")
+    im.TableSetupColumn("Tests")
+    im.TableSetupColumn("Content")
+    // Headers by hand, so each carries its tooltip.
+    im.TableNextRow({.Headers})
+    im.TableSetColumnIndex(0)
+    im.TableHeader("Name")
+    im.TableSetColumnIndex(1)
+    im.TableHeader("Compile")
+    widgets.tooltip("An import from the plugin's code. The build stops without it.")
+    im.TableSetColumnIndex(2)
+    im.TableHeader("Tests")
+    widgets.tooltip("An import from tests/ only. The test build stops without it, the editor and the game are fine.")
+    im.TableSetColumnIndex(3)
+    im.TableHeader("Content")
+    widgets.tooltip("A guid the plugin owns, in an asset or in code. What uses it does not load without it, the build is fine.")
+    if specs := im.TableGetSortSpecs(); specs != nil && specs.SpecsDirty {
+        if specs.SpecsCount > 0 {
+            plugin_dependencies_sort(rows, int(specs.Specs.ColumnIndex), specs.Specs.SortDirection == .Descending)
+        }
+        specs.SpecsDirty = false
+    }
+    for d in rows {
+        im.TableNextRow()
+        im.TableNextColumn()
+        if d.installed {
+            // Click pings the package's row in the project view, double click
+            // selects it.
+            if im.Selectable(tc(fmt.tprintf("%s##dep_%s", d.name, d.name)), false, {.SpanAllColumns, .AllowDoubleClick}) && package_reveal != nil {
+                package_reveal(d.name, im.IsMouseDoubleClicked(.Left))
+            }
+        } else {
+            im.TextColored({1, 0.75, 0.3, 1}, tc(fmt.tprintf("%s %s", icons.ICON_MD_WARNING, d.name)))
+            widgets.tooltip("Not installed: what this plugin uses from it will not load. mh setup relinks every committed plugin.")
+        }
+        if !d.compile && !d.tests && !d.content do widgets.tooltip("Written by hand: nothing on disk needs it.")
+        im.TableNextColumn()
+        if d.compile do _dot()
+        im.TableNextColumn()
+        if d.tests do _dot()
+        im.TableNextColumn()
+        if d.content do _dot()
+    }
+    im.EndTable()
+}
+
+// A dot centered in its column.
+@(private = "file")
+_dot :: proc() {
+    DOT :: "\u2022"
+    w := im.CalcTextSize(DOT).x
+    im.SetCursorPosX(im.GetCursorPosX() + (im.GetContentRegionAvail().x - w) * 0.5)
+    im.Text(DOT)
+}
+
+// The open file, by NAME. The full path is a folder listing the project view
+// already shows, and at inspector width it wrapped or clipped — the name is
+// what identifies the asset. The path stays one hover away. A star marks
+// unsaved edits.
+_draw_file_row :: proc(dirty: bool) {
+    label := filepath_base(inspectorData.filePath)
+    if dirty do label = fmt.tprintf("%s *", label)
+    im.TextUnformatted(strings.clone_to_cstring(label, context.temp_allocator))
+    widgets.tooltip(strings.clone_to_cstring(inspectorData.filePath, context.temp_allocator), im.HoveredFlags_ForTooltip)
+}
+
+_draw_asset_inspector :: proc() {
+    // Undo may have swapped the document payload since last frame.
+    if inspectorData.doc != nil {
+        inspectorData.fileData = inspectorData.doc.data
+    }
+
+    // No Save button: File/Save (Ctrl+S) writes every dirty document and
+    // scene, and the star after the path is the pending mark.
+    if inspectorData.statusMessage != "" {
+        im.Text(strings.clone_to_cstring(inspectorData.statusMessage, context.temp_allocator))
+        im.Separator()
+    }
+
+    if inspectorData.filePath != "" {
+        _draw_file_row(inspectorData.doc != nil && inspectorData.doc.dirty)
+    } else {
+        im.TextColored(im.Vec4{1, 0, 0, 1}, "No file loaded")
+    }
+
+    im.Separator()
+
+    if inspectorData.doc != nil {
+        draw_asset_doc(inspectorData.doc)
+    } else if inspectorData.fileData.data != nil {
+        // No document behind the data (a package view): plain rows, no undo owner.
+        draw_inspector(inspectorData.fileData)
+    }
+}
+
+// The body of an asset document: its rows, whole-document undo, and the live
+// preview. Drawn by the Project Inspector for its open file and by an
+// `expand` foldout under a component's reference row (asset_expand.odin), so
+// both edit the same document and an unsaved change shows in both.
+draw_asset_doc :: proc(doc: ^Asset_Doc) {
+    if doc == nil || doc.data.data == nil do return
+    if doc.data.id == typeid_of(engine.Material) {
+        current_material = cast(^engine.Material)doc.data.data
+    }
+    // Whole-document undo: _undo_finalize_widget after each drawer snapshots
+    // and commits against this owner, exactly like the component inspector.
+    undo.push_asset_owner(doc.guid, doc.data.data, doc.data.id)
+    prev_changed := inspector_changed
+    inspector_changed = false
+    draw_inspector(doc.data)
+    if inspector_changed do doc.dirty = true
+    inspector_changed |= prev_changed
+    undo.pop_owner()
+    _material_live_preview(doc)
+    current_material = nil
+}
+
+// Material edits render live (Unity-style): the open .mat's values are
+// pushed into the engine material cache every frame, saved or not. Save
+// persists them to disk; unsaved edits revert on the next editor run.
+// Property rows for the assigned custom shader auto-populate from its
+// reflected UBO members, so names never have to be typed by hand.
+_material_live_preview :: proc(doc: ^Asset_Doc) {
+    if doc.data.id != typeid_of(engine.Material) do return
+    mat := cast(^engine.Material)doc.data.data
+    _ = engine.material_sync_properties(mat)
+    engine.material_preview(doc.guid, mat^)
+}
+
+_draw_import_settings_inspector :: proc() {
+    doc := inspectorData.settingsDoc
+    if doc == nil do return
+    doc.touched = true // shown this frame: import_settings_track looks at it
+    // Registered wrappers funnel the settings body (inspector_funnel.odin),
+    // keyed by the importer owning this asset's extension.
+    ext := strings.to_lower(filepath.ext(inspectorData.filePath), context.temp_allocator)
+    if chain, has := _asset_chain(asset_pipeline.importer_for_extension(ext)); has {
+        guid: engine.Asset_GUID
+        if g, ok := engine.asset_db_get_guid(inspectorData.filePath); ok {
+            guid = engine.Asset_GUID(g)
+        }
+        actx := Asset_Ctx{
+            path     = inspectorData.filePath,
+            guid     = guid,
+            sub      = selected_sub(inspectorData.filePath) if selected_sub != nil else 0,
+            settings = doc.data,
+            _chain   = chain,
+        }
+        _funnel_draw(&actx)
+        return
+    }
+    draw_default_import_settings()
+}
+
+// The asset funnel's base: Apply / Revert + file row + the reflected settings.
+// Apply and Revert are live only while the settings differ from the .meta.
+draw_default_import_settings :: proc() {
+    doc := inspectorData.settingsDoc
+    if doc == nil do return
+    im.BeginDisabled(!doc.dirty)
+    if im.Button("Apply", im.Vec2{60, 0}) {
+        if import_settings_apply(doc) {
+            _set_status(fmt.tprintf("Reimported %s", inspectorData.filePath))
+        } else {
+            _set_status(fmt.tprintf("Failed to save settings for %s", inspectorData.filePath))
+        }
+    }
+    im.SameLine()
+    if im.Button("Revert", im.Vec2{60, 0}) do import_settings_revert(doc)
+    im.EndDisabled()
+    im.SameLine()
+
+    if inspectorData.statusMessage != "" {
+        im.Text(strings.clone_to_cstring(inspectorData.statusMessage, context.temp_allocator))
+    }
+
+    im.Separator()
+
+    if inspectorData.filePath != "" {
+        _draw_file_row(doc.dirty)
+    }
+
+    im.Separator()
+
+    if doc.data.data != nil {
+        drawer := resolve_property_drawer(doc.data.id)
+        drawer(doc.data.data, doc.data.id, "Import Settings")
+    }
+
+}
+
+mark_inspector_changed :: proc() {
+    inspector_changed = true
+}
+
+consume_inspector_changed :: proc() -> bool {
+    changed := inspector_changed
+    inspector_changed = false
+    return changed
+}
+
+is_changed_flag_set :: proc() -> bool {
+    return inspector_changed
+}
+
+
+@(private)
+// Rows whose value lands from a popup with no gesture on the row itself:
+// asset and reference pickers, and enum combos.
+_is_picker_type :: proc(tid: typeid) -> bool {
+    return tid == typeid_of(engine.Asset_GUID) ||
+           tid == typeid_of(engine.Ref) ||
+           tid == typeid_of(engine.Ref_Local) ||
+           is_enum_type(tid)
+}
+
+// Text color of a field that a prefab instance overrides. One value for the
+// generic loop, custom rows and the hierarchy's own markers.
+OVERRIDE_TEXT_COLOR :: im.Vec4{0.4, 0.8, 1.0, 1.0}
+
+// The field a prefab override NAMES for a row. For most rows it is the row's
+// own value. For a row inside a dynamic-array element (a state in `layers`) no
+// dotted path reaches the value, so the override names the whole array — the
+// granularity the undo step records too — and Revert restores the array.
+Override_Field :: struct {
+    ptr:  rawptr,
+    tid:  typeid,
+    path: string,
+}
+
+// Tints the label when the ambient prefab context overrides `path`. Pair with
+// override_marker_pop.
+override_marker_push :: proc(path: string) -> bool {
+    host_tH := engine.inspector_get_nested_host()
+    nested_lid := engine.inspector_get_nested_local_id()
+    if host_tH == {} || nested_lid == 0 || path == "" do return false
+    w := engine.ctx_world()
+    ht := engine.pool_get(&w.transforms, engine.Handle(host_tH))
+    if ht == nil do return false
+    if !engine.nested_scene_has_root_override(ht.scene, host_tH, nested_lid, path) do return false
+    im.PushStyleColorImVec4(im.Col.Text, OVERRIDE_TEXT_COLOR)
+    return true
+}
+
+override_marker_pop :: proc(pushed: bool) {
+    if pushed do im.PopStyleColor(1)
+}
+
+// A value row the generic field loop does not draw — a custom tree's row, or a
+// PROXY row showing another component's field — with everything the loop puts
+// around a field: the override marker, the shared row transaction, the
+// override record on commit, and the right-click menu (Reset, Revert / Apply
+// on prefab content, Copy / Paste). A custom row that calls field_edit_row
+// alone records the override but shows no marker and offers no Revert, so the
+// user has to find the field elsewhere to see or undo what they did here.
+//
+// Offset is 0: custom trees clear the multi-edit peers around their rows.
+custom_field_row :: proc(
+    ptr: rawptr,
+    tid: typeid,
+    label: string,
+    drawer: proc(ptr: rawptr, tid: typeid, label: cstring),
+    draw_label: cstring,
+    record: Override_Field,
+) -> (finished: bool) {
+    pushed := override_marker_push(record.path)
+    finished = field_edit_row(ptr, tid, 0, label, drawer, draw_label)
+    record_nested_override(record.ptr, record.tid, record.path, finished)
+    draw_field_context_menu(ptr, tid, record.path, record)
+    override_marker_pop(pushed)
+    return finished
+}
+
+// The prefab-instance context of a component the inspector is NOT drawing — a
+// PROXY row, where a panel shows some other component's field (the timeline
+// animator's per-track binding rows). Push the pair before the row and restore
+// it after, the way the hierarchy inspector does for the component it owns.
+//
+// Both halves have to come from that component's own instance. The host decides
+// which prefab the override lands on, and a lid from another namespace does not
+// fail the lookup: nested_scene_locate_root_override projects it into the host's
+// namespace, where it names an unrelated object. So inheriting the drawn
+// component's context is silently wrong as soon as the two live in different
+// instances, and records nothing at all when only the proxy is prefab content.
+//
+// A component outside any instance yields a zero host, which makes
+// record_nested_override a no-op — the right outcome for plain scene content,
+// and for a component ADDED to an instance, which is not prefab content either.
+nested_context_for_comp :: proc(comp: engine.Handle) -> (host: engine.Transform_Handle, lid: engine.Local_ID) {
+    raw := engine.world_pool_get(engine.ctx_world(), comp)
+    if raw == nil do return {}, 0
+    base := cast(^engine.CompData)raw
+    if !base.nested_owned do return {}, 0
+    return engine.transform_immediate_nested_host(base.owner), base.local_id
+}
+
+// Records a prefab-instance override for a field whose edit just committed, so
+// the override marker / Revert / Apply light up immediately instead of after a
+// save. No-op for non-nested content.
+//
+// `committed` is the caller's commit signal, from Field_Commit (see
+// field_commit_state): the generic loop passes what _undo_finalize_widget
+// detected, the transform wrappers what their own commit branch decided.
+// Recording is a CONSEQUENCE of committing, never its own detection — that
+// split is what let the transform fields miss overrides.
+//
+// When the edit CREATED the override (as opposed to updating an existing one),
+// the undo step is told, so undo takes the record away with the value.
+record_nested_override :: proc(field_ptr: rawptr, field_tid: typeid, property_path: string, committed: bool) {
+    if !committed || property_path == "" || field_ptr == nil do return
+
+    host_tH := engine.inspector_get_nested_host()
+    nested_lid := engine.inspector_get_nested_local_id()
+    if host_tH == {} || nested_lid == 0 do return
+
+    w := engine.ctx_world()
+    ht := engine.pool_get(&w.transforms, engine.Handle(host_tH))
+    if ht == nil do return
+    created, ok := engine.nested_scene_record_override_for_host(ht.scene, host_tH, nested_lid, property_path, field_ptr, field_tid)
+    if ok && created {
+        undo.record_override_created(ht.scene, host_tH, nested_lid, property_path)
+    }
+}
+
+// THE commit predicate for an inspector field widget, in one place. Every
+// field-edit boundary is one of these two events:
+//
+//   Field_Commit.Drag_Released — the widget owned the edit and gave it back
+//     (imgui's IsItemDeactivatedAfterEdit: drag release, InputText Enter/blur).
+//   Field_Commit.Value_Applied — the value changed without the widget holding
+//     focus (typed digits applied inline, drawer wrote through immediately).
+//
+// The two are NOT interchangeable to callers: the rotation wrapper ends its
+// euler cache on a released drag and not on an inline write. Returning WHICH
+// event happened, rather than a bare bool, is what lets every wrapper share this
+// detection while keeping its own commit strategy — the duplication that
+// previously let one wrapper consume the changed flag another wrapper needed to
+// read.
+Field_Commit :: enum {
+    None,
+    Drag_Released,
+    Value_Applied,
+}
+
+// `changed`: did the value change this frame. Pass the caller's OWN signal —
+// a wrapper that consumed the package flag (the transform wrappers) has to,
+// since the flag reads false by then. field_commit_state() uses the package
+// flag and is what the generic field loop wants.
+field_commit_state_of :: proc(changed: bool) -> Field_Commit {
+    if im.IsItemDeactivatedAfterEdit() do return .Drag_Released
+    if changed && !im.IsItemActive() do return .Value_Applied
+    return .None
+}
+
+// Commit state from the package changed flag (generic field loop).
+field_commit_state :: proc() -> Field_Commit {
+    return field_commit_state_of(inspector_changed)
+}
+
+resolve_property_drawer :: proc(tid: typeid) -> proc(ptr: rawptr, tid: typeid, label: cstring) {
+    if drawer, ok := mapPropertyDrawer[tid]; ok {
+        return drawer
+    }
+    return draw_default_inspector
+}
+
+draw_default_inspector :: proc(ptr: rawptr, tid: typeid, label: cstring) {
+    a := any{ptr, tid}
+    draw_inspector(a, label, "")
+}
+
+@(private)
+_FieldMenuUndo :: struct {
+    active: bool,
+    sess:   undo.Edit_Session,
+}
+
+// Reset / Paste from the field's context menu. These write from a popup rather
+// than a drag, so the whole write is bracketed here in one call - the session
+// picks field or whole-owner granularity from where field_ptr lands.
+@(private)
+_field_menu_undo_begin :: proc(field_ptr: rawptr, field_tid: typeid, label: string) -> _FieldMenuUndo {
+    targets := make([dynamic]undo.Edit_Target, 0, multi_peer_count() + 1, context.temp_allocator)
+    if o, ok := undo.current_owner(); ok {
+        switch o.kind {
+        case .None:
+        case .Pooled:
+            append(&targets, undo.edit_target_pooled(o.handle, field_ptr, field_tid))
+        case .Asset:
+            append(&targets, undo.Edit_Target{
+                kind = .Asset, asset_guid = o.asset_guid, asset_tid = o.asset_tid,
+                field_ptr = field_ptr, field_tid = field_tid,
+            })
+        case .Raw:
+            append(&targets, undo.Edit_Target{
+                kind = .Raw, raw_ptr = o.base_ptr, raw_tid = o.raw_tid,
+                field_ptr = field_ptr, field_tid = field_tid,
+            })
+        }
+    }
+    if len(targets) == 0 do return {}
+    return _FieldMenuUndo{active = true, sess = undo.edit_session_begin(targets[:], label)}
+}
+
+@(private)
+_field_menu_undo_end :: proc(u: _FieldMenuUndo) {
+    if !u.active do return
+    s := u.sess
+    undo.edit_session_end(&s)
+}
+
+@(private)
+_draw_field_context_menu_reset :: proc(field_ptr: rawptr, field_tid: typeid, readonly: bool, record: Override_Field) -> bool {
+    full_ti := type_info_of(field_tid)
+    check_ti := runtime.type_info_base(full_ti)
+    check_tid := field_tid
+    if ptr_info, ok := check_ti.variant.(runtime.Type_Info_Pointer); ok {
+        check_tid = ptr_info.elem.id
+        full_ti = type_info_of(check_tid)
+        check_ti = runtime.type_info_base(full_ti)
+    }
+    fixed_count := 0
+    elem_size := 0
+    is_fixed_array := false
+    is_dyn_array := false
+    if info, ok := check_ti.variant.(runtime.Type_Info_Array); ok {
+        check_ti = runtime.type_info_base(info.elem)
+        check_tid = info.elem.id
+        fixed_count = info.count
+        elem_size = int(info.elem.size)
+        is_fixed_array = true
+    } else if info, ok := check_ti.variant.(runtime.Type_Info_Dynamic_Array); ok {
+        check_ti = runtime.type_info_base(info.elem)
+        check_tid = info.elem.id
+        elem_size = int(info.elem.size)
+        is_dyn_array = true
+    }
+    if key, ok := engine.get_type_key_by_typeid(check_tid); ok && engine.type_has_reset(key) {
+        if im.MenuItem("Reset", nil, false, !readonly) {
+            u := _field_menu_undo_begin(field_ptr, field_tid, "Reset")
+            if is_fixed_array {
+                for i in 0 ..< fixed_count {
+                    p := rawptr(uintptr(field_ptr) + uintptr(i * elem_size))
+                    engine.type_reset(key, p)
+                }
+            } else if is_dyn_array {
+                da := (^runtime.Raw_Dynamic_Array)(field_ptr)
+                for i in 0 ..< da.len {
+                    p := rawptr(uintptr(da.data) + uintptr(i * elem_size))
+                    engine.type_reset(key, p)
+                }
+            } else {
+                engine.type_reset(key, field_ptr)
+            }
+            _field_menu_undo_end(u)
+            // Reset is an ordinary value edit: on prefab-instance content it
+            // creates an override like typing a value would.
+            record_nested_override(record.ptr, record.tid, record.path, true)
+            mark_inspector_changed()
+        }
+        return true
+    }
+    if reflect.is_integer(check_ti) || reflect.is_float(check_ti) || reflect.is_boolean(check_ti) ||
+       reflect.is_enum(check_ti) {
+        if im.MenuItem("Reset", nil, false, !readonly) {
+            u := _field_menu_undo_begin(field_ptr, field_tid, "Reset")
+            if is_fixed_array {
+                if record.path == "scale" && check_tid == typeid_of(f32) && fixed_count == 3 {
+                    (cast(^[3]f32)(field_ptr))^ = {1, 1, 1}
+                } else if record.path == "rotation" && check_tid == typeid_of(f32) && fixed_count == 4 {
+                    (cast(^[4]f32)(field_ptr))^ = engine.QUAT_IDENTITY
+                } else {
+                    mem.zero(field_ptr, full_ti.size)
+                }
+            } else if is_dyn_array {
+                da := (^runtime.Raw_Dynamic_Array)(field_ptr)
+                if da.data != nil && da.len > 0 {
+                    mem.zero(da.data, da.len * elem_size)
+                }
+            } else {
+                mem.zero(field_ptr, full_ti.size)
+            }
+            _field_menu_undo_end(u)
+            // Reset is an ordinary value edit: on prefab-instance content it
+            // creates an override like typing a value would.
+            record_nested_override(record.ptr, record.tid, record.path, true)
+            mark_inspector_changed()
+        }
+        return true
+    }
+    return false
+}
+
+// `record` is the field a prefab override names when it is not the row's own
+// value (see Override_Field). Zero means the row itself.
+draw_field_context_menu :: proc(field_ptr: rawptr, field_tid: typeid, property_path: string = "", record := Override_Field{}) {
+    record := record
+    if record.ptr == nil do record = {field_ptr, field_tid, property_path}
+    popup_id := strings.clone_to_cstring(fmt.tprintf("##vcp_%x", uintptr(field_ptr)), context.temp_allocator)
+    im.OpenPopupOnItemClick(popup_id, im.PopupFlags_MouseButtonRight)
+    if im.BeginPopup(popup_id) {
+        readonly := engine.inspector_is_readonly()
+        if _draw_field_context_menu_reset(field_ptr, field_tid, readonly, record) {
+            im.Separator()
+        }
+
+        host_tH := engine.inspector_get_nested_host()
+        nested_lid := engine.inspector_get_nested_local_id()
+        if host_tH != {} && nested_lid != 0 && property_path != "" {
+            w := engine.ctx_world()
+            ht := engine.pool_get(&w.transforms, engine.Handle(host_tH))
+            if ht != nil {
+                // Per docs/PrefabsSpec.md §3.2, overrides live at the root scene
+                // level only. Walk up to the root native NS and look for the
+                // breadcrumb-keyed override that root holds for this field.
+                root_ns, root_target, ok := engine.nested_scene_locate_root_override(ht.scene, host_tH, nested_lid)
+                is_overridden := ok && engine.nested_scene_has_override(root_ns, root_target, property_path)
+                if is_overridden {
+	                if im.MenuItem("Revert", nil, false, is_overridden) {
+	                    // Snapshot the entries BEFORE the revert deletes them;
+	                    // they are attached to the undo step after it commits,
+	                    // so the record undoes together with the value.
+	                    snap := undo.override_removal_snapshot(root_ns, root_target, property_path)
+	                    u := _field_menu_undo_begin(record.ptr, record.tid, "Revert")
+	                    engine.nested_scene_revert_override(ht.scene, root_ns, root_target, property_path, record.ptr)
+	                    _field_menu_undo_end(u)
+	                    undo.record_override_removed(ht.scene, host_tH, nested_lid, property_path, snap)
+	                    mark_inspector_changed()
+	                }
+	                // Apply pushes the override into a prefab on the field's chain.
+	                // Unity-style: flat menu items (not a submenu), one per target,
+	                // ordered closest -> base. The last target is the file that
+	                // owns the row — applying there bakes the value in ("Apply to
+	                // Scene X"); every other target records an override in that
+	                // prefab ("Apply as Override in X"), variants included.
+	                targets := engine.nested_scene_apply_targets(ht.scene, root_ns, root_target)
+	                for tgt in targets {
+	                    name := "scene"
+	                    if p, pok := engine.asset_db_get_path(uuid.Identifier(tgt.guid)); pok {
+	                        name = filepath.stem(p)
+	                    }
+	                    text := tgt.is_owner \
+	                        ? fmt.tprintf("Apply to Scene '%s'", name) \
+	                        : fmt.tprintf("Apply as Override in '%s'", name)
+	                    label := strings.clone_to_cstring(text, context.temp_allocator)
+	                    if im.MenuItem(label, nil, false, true) {
+	                        entry := engine.Override_Entry{
+	                            kind          = .Modified_Property,
+	                            target        = root_target,
+	                            property_path = property_path,
+	                        }
+	                        root_host := engine.Transform_Handle(
+	                            engine.nested_scene_resolve_host_handle(ht.scene, root_ns))
+	                        undo.apply_to_prefab(ht.scene, root_host, tgt.guid, {entry})
+	                        mark_inspector_changed()
+	                    }
+	                }
+	                im.Separator()
+                }
+            }
+        }
+
+        if im.MenuItem("Copy") {
+            clip.copy(any{field_ptr, field_tid})
+        }
+        can := clip.can_paste(field_tid) && !readonly
+        if im.MenuItem("Paste", nil, false, can) {
+            clip.paste(any{field_ptr, field_tid})
+        }
+        im.EndPopup()
+    }
+}
+
+draw_inspector :: proc(a: any, label: cstring = "", path_prefix: string = "") {
+    xAny := a
+    ptr, tid := reflect.any_data(xAny)
+    tInfo := type_info_of(tid)
+
+    isPointer := reflect.is_pointer(tInfo)
+    if isPointer {
+        im.Indent(20)
+        draw_inspector(reflect.deref(xAny), "", path_prefix)
+        im.Unindent(20)
+        return
+    }
+
+    // Registered wrappers funnel this type's draw (inspector_funnel.odin).
+    // No registration: straight to the default drawing.
+    if chain, has := _component_chain(tid); has {
+        cctx := Component_Ctx{ptr = ptr, tid = tid, label = label, path_prefix = path_prefix, _chain = chain}
+        _funnel_draw(&cctx)
+        return
+    }
+    draw_inspector_default(ptr, tid, label, path_prefix)
+}
+
+// The funnel's end of chain: the type's custom drawer, or the reflected
+// field loop. Never re-enters the funnel — that is what makes wrapping
+// non-recursive.
+draw_inspector_default :: proc(ptr: rawptr, tid: typeid, label: cstring, path_prefix: string) {
+    if drawer, ok := mapPropertyDrawer[tid]; ok {
+        drawer(ptr, tid, label)
+        return
+    }
+
+    xAny := any{ptr, tid}
+    names := reflect.struct_field_names(tid)
+    types := reflect.struct_field_types(tid)
+    count := len(names)
+
+    // @(inspector_button) rows >= 0 frame this struct's draw from the TOP —
+    // wherever it appears (component, nested field, array element); buttons
+    // with show_in_array=false skip array elements.
+    draw_inspector_buttons(tid, ptr, above = true, element_ctx = _in_array_element)
+
+    for i in 0..<count {
+        if types[i].id == typeid_of(engine.CompData) {
+            continue
+        }
+        field_info := reflect.struct_field_at(tid, i)
+        inspect_val, has_inspect := reflect.struct_tag_lookup(field_info.tag, "inspect")
+        if has_inspect && inspect_val == "-" {
+            continue
+        }
+        json_val, has_json := reflect.struct_tag_lookup(field_info.tag, "json")
+        if !has_inspect && has_json && json_val == "-" {
+            continue
+        }
+
+        field_name := names[i]
+        c_field_name := strings.clone_to_cstring(field_name)
+        defer delete(c_field_name)
+        field_type := types[i]
+        field_val := reflect.struct_field_value(xAny, field_info)
+
+        field_ptr := rawptr(uintptr(ptr) + field_info.offset)
+
+        full_path := path_prefix == "" ? field_name : strings.concatenate({path_prefix, ".", field_name}, context.temp_allocator)
+
+        nested_lid := engine.inspector_get_nested_local_id()
+        host_tH := engine.inspector_get_nested_host()
+        is_field_overridden := false
+        if nested_lid != 0 && host_tH != {} {
+            w := engine.ctx_world()
+            ht := engine.pool_get(&w.transforms, engine.Handle(host_tH))
+            if ht != nil {
+                is_field_overridden = engine.nested_scene_has_root_override(ht.scene, host_tH, nested_lid, full_path)
+            }
+        }
+
+		ctx := DrawContext{is_visible = true, is_pre = true, field_ptr = field_ptr, field_type = field_type.id, field_label = c_field_name, owner_ptr = ptr, owner_type = tid}
+
+        im.PushID(c_field_name)
+        prev_changed_outside := inspector_changed
+        inspector_changed = false
+
+        if is_field_overridden {
+            im.PushStyleColorImVec4(im.Col.Text, OVERRIDE_TEXT_COLOR)
+        }
+
+        // A decorator that draws the row itself writes the value before the
+        // row's transaction can look at it, so the "before" is taken here.
+        // Only rows with a decorator pay for the snapshot.
+        pre_before: []byte
+        if decorators, has := decorator_registry[tid]; has && i < len(decorators) && decorators[i] != nil {
+            pre_before = undo.capture_json(field_ptr, field_type.id)
+        }
+        defer if pre_before != nil do delete(pre_before)
+
+        // Grouped for the same reason field_edit_row groups its drawer: a
+        // decorator that draws the row (color, range) may emit several items,
+        // and the row's transaction below must see them as one gesture.
+        im.BeginGroup()
+        run_field_decorators(tid, i, &ctx)
+        im.EndGroup()
+
+        row_popup_done := false
+
+        if ctx.is_visible {
+            // Field-level picker tags apply through EVERY drawer path — a
+            // [dynamic]Asset_GUID `ext:"mat"` field reaches the guid drawer
+            // via draw_inspector_array, and the elements must still filter.
+            prev_tags := field_tags_set(field_info.tag)
+            defer field_tags_restore(prev_tags)
+
+            if drawer, ok := mapPropertyDrawer[field_type.id]; ok {
+                // The drawer owns this row, so its @(property_drawer) is what
+                // debug tooltips name for anything the row hovers.
+                origin_prev := widgets.ui_origin_push(mapPropertyDrawerOrigin[field_type.id])
+                defer widgets.ui_origin_pop(origin_prev)
+
+                // Mixed-value display for the selection. Read by the drawer.
+                multi_offset := multi_offset_of(field_ptr, ptr)
+                multi_probe_field(field_ptr, field_type.id, multi_offset)
+
+                // Group the drawer's widgets so the field context menu below
+                // binds to the WHOLE row. A drawer can emit several items (e.g.
+                // Ref_Local: picker button + "X" clear) and OpenPopupOnItemClick
+                // only tests the last one — right-click would then work only on
+                // the tiny X (or only when no value meant no X).
+                expands := current_field_expand && field_type.id == typeid_of(engine.Asset_GUID)
+                if expands do current_field_trailing_w = EXPAND_BTN_W
+                im.BeginGroup()
+                // The whole transaction, shared with the array-element path so
+                // the two cannot drift — see field_edit_row.
+                // Peers record their overrides against their own instances, and
+                // the path names which field — see field_edit.odin.
+                prev_path := field_edit_set_path(full_path)
+                finished := field_edit_row(field_ptr, field_type.id, multi_offset,
+                                           field_name, drawer, c_field_name)
+                field_edit_set_path(prev_path)
+                im.EndGroup()
+                current_field_trailing_w = 0
+                record_nested_override(field_ptr, field_type.id, full_path, finished)
+                // The arrow sits in the space the row left for it, and the
+                // document draws below, outside the row's transaction: its
+                // rows must not read as edits of this reference field.
+                if expands {
+                    guid := (^engine.Asset_GUID)(field_ptr)^
+                    im.SameLine(0, 0)
+                    if expand_arrow(guid) do draw_expanded_asset(guid)
+                }
+            } else if is_array_type(field_type.id) {
+                // Elements multi-edit through their own rebased peer list —
+                // draw_inspector_array does that itself, since only it knows
+                // where the element storage is.
+                draw_inspector_array_multi(field_ptr, field_type.id, c_field_name, multi_offset_of(field_ptr, ptr))
+                row_popup_done = true
+            } else if is_union_type(field_type.id) {
+                // A union's payload type can differ per object, so the same
+                // bytes would mean different things — see multi_suspend.
+                mprev := multi_suspend()
+                draw_inspector_union(field_ptr, field_type.id, c_field_name)
+                multi_resume(mprev)
+                row_popup_done = true
+            } else if is_enum_type(field_type.id) {
+                // An enum row is a combo: the value lands from a popup, so the
+                // row brackets the change retroactively like the pickers
+                // (_is_picker_type). Opening a session up front would end any
+                // other row's gesture in flight on every frame this row draws.
+                multi_offset := multi_offset_of(field_ptr, ptr)
+                multi_probe_field(field_ptr, field_type.id, multi_offset)
+                prev_path := field_edit_set_path(full_path)
+                finished := field_edit_row(field_ptr, field_type.id, multi_offset,
+                                           field_name, draw_inspector_enum, c_field_name)
+                field_edit_set_path(prev_path)
+                record_nested_override(field_ptr, field_type.id, full_path, finished)
+                row_popup_done = true
+            } else if reflect.is_struct(field_type) || reflect.is_union(field_type) {
+                // Descending into a nested struct: the peers' matching fields
+                // sit at the same offset inside THEIR copy, so the recursion
+                // carries the accumulated offset rather than the raw pointer.
+                prev_off := multi_push_offset(uintptr(field_ptr) - uintptr(ptr))
+                defer multi_pop_offset(prev_off)
+                _, is_inline := reflect.struct_tag_lookup(field_info.tag, "inline")
+                if is_inline {
+                    draw_inspector(field_val, "", full_path)
+                    row_popup_done = true
+                } else {
+                    tree_open := im.TreeNode(c_field_name)
+                    draw_field_context_menu(field_ptr, field_type.id, full_path)
+                    row_popup_done = true
+                    if tree_open {
+                        draw_inspector(field_val, "", full_path)
+                        im.TreePop()
+                    }
+                }
+            } else if reflect.is_pointer(type_info_of(field_type.id)) {
+                draw_inspector(field_val, "", full_path)
+                row_popup_done = true
+            } else {
+                c_str := strings.clone_to_cstring(fmt.tprintf("%s: %v", field_name, field_val))
+                defer delete(c_str)
+                im.Text(c_str)
+            }
+            if !row_popup_done {
+                draw_field_context_menu(field_ptr, field_type.id, full_path)
+            }
+        } else if ctx.handled_draw {
+            // A decorator drew this field itself. It is still a VALUE edit, so
+            // it gets the same transaction every other row does — the drawer
+            // already ran, so the row is driven with a nil drawer.
+            multi_offset := multi_offset_of(field_ptr, ptr)
+            prev_path := field_edit_set_path(full_path)
+            finished := field_edit_row(field_ptr, field_type.id, multi_offset,
+                                       field_name, nil, c_field_name, pre_before)
+            field_edit_set_path(prev_path)
+            record_nested_override(field_ptr, field_type.id, full_path, finished)
+            draw_field_context_menu(field_ptr, field_type.id, full_path)
+        }
+
+        if is_field_overridden {
+            im.PopStyleColor(1)
+        }
+
+        if prev_changed_outside || inspector_changed do inspector_changed = true
+        im.PopID()
+
+        ctx.is_pre = false
+        run_field_decorators(tid, i, &ctx)
+    }
+
+    // @(inspector_button) rows < 0 close this struct's draw from the BOTTOM.
+    draw_inspector_buttons(tid, ptr, above = false, element_ctx = _in_array_element)
+}

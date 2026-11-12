@@ -1,0 +1,21 @@
+{
+  "__type_guid": "4d201ba5-2097-48bb-abd3-1a79e4f6f6f4",
+  "shader": 1,
+  "custom_shader": "00000000-0000-0000-0000-000000000000",
+  "texture": "01282080-295b-4695-8f03-887478a0946c",
+  "color": [
+    1.00000000,
+    1.00000000,
+    1.00000000,
+    1.00000000
+  ],
+  "properties": [
+
+  ],
+  "textures": [
+    {
+      "name": "_SourceAlbedo",
+      "texture": "59b4d8ef-26bb-46ac-b718-77f64dc96ec2"
+    }
+  ]
+}

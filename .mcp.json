@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "moonhug": {
+      "command": "odin",
+      "args": ["run", "tools/mh", "--", "mcp"]
+    }
+  }
+}

@@ -1,0 +1,33 @@
+# Haati Engine — Git Line Endings & Binary Asset Rules
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Standard Binary Assets (stored directly in Git so README images, glTF samples,
+# and vendored DLLs/libs work out-of-the-box without Git LFS bandwidth quotas)
+*.png binary
+*.PNG binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.ttf binary
+*.otf binary
+*.glb binary
+*.hdr binary
+*.exr binary
+*.tga binary
+*.dds binary
+*.wav binary
+*.ogg binary
+*.mp3 binary
+*.dll binary
+*.lib binary
+*.dylib binary
+*.so binary
+*.spv binary
+
+# Large Raw Authoring Formats -> Git LFS (for >50 MB .fbx / .blend scenes)
+*.fbx filter=lfs diff=lfs merge=lfs -text
+*.FBX filter=lfs diff=lfs merge=lfs -text
+*.blend filter=lfs diff=lfs merge=lfs -text

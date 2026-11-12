@@ -1,0 +1,701 @@
+package window
+
+// Plugin-openable editor windows (docs/Plugins.md). A window is DECLARED with
+// @(editor_window={id, title, width, height}) on its content-draw proc —
+// prebuild registers every declaration here — and OPENED by id, usually from a
+// @(menu_item) proc, the way Unity's [MenuItem] calls EditorWindow.GetWindow.
+//
+// State: the registry and open list live here for the process lifetime (reopen
+// from the menu after a restart). imgui.ini persists dock position and size by
+// title; width/height from the attribute apply only when imgui.ini has no
+// entry yet (Cond.FirstUseEver). Window CONTENTS live in the owning plugin.
+//
+// An editor subpackage like menu/inspector/undo: plugin editor/ packages import
+// it, the editor root draws it once per frame (draw_all).
+
+import "base:runtime"
+import "core:mem"
+import "core:strings"
+import "core:fmt"
+import "core:math"
+import im "moonhug:external/odin-imgui"
+import "moonhug:engine/log"
+import icons "moonhug:editor/icons"
+import widgets "moonhug:editor/widgets"
+
+Draw_Proc :: proc()
+
+_Registered :: struct {
+	id:           string,  // stable handle from the attribute
+	plain_title:  string,  // the title as declared, without icon or id
+	title:        cstring, // the imgui window name: "<icon> <title>###<id>"
+	draw:         Draw_Proc,
+	default_size: im.Vec2, // {} = imgui's default
+	// The @(editor_window) that declared it, with its file and line, as
+	// rendered by the generator. Shown on the tab's menu button with debug tooltips on.
+	origin:       string,
+}
+
+_Open :: struct {
+	reg:  int, // index into _registry
+	open: bool,
+}
+
+_registry: [dynamic]_Registered
+_open_windows: [dynamic]_Open
+_closed_window_ids: [dynamic]string // LIFO stack for Ctrl+Shift+T reopen closed tab
+_focus_request: int = -1 // registry index to focus next frame
+main_dockspace_id: im.ID
+main_central_dock_id: im.ID
+// Extendable telemetry hook (nil when Overwatch recorder is stopped -> 0ns overhead).
+on_window_event_hook: proc(action: string, id: string)
+
+// Records a closed window ID so Ctrl+Shift+T can reopen it in LIFO order.
+push_closed :: proc(id: string) {
+	if id == "" do return
+	context.allocator = runtime.default_allocator()
+	for i := len(_closed_window_ids) - 1; i >= 0; i -= 1 {
+		if _closed_window_ids[i] == id {
+			delete(_closed_window_ids[i])
+			ordered_remove(&_closed_window_ids, i)
+		}
+	}
+	if len(_closed_window_ids) >= 32 {
+		delete(_closed_window_ids[0])
+		ordered_remove(&_closed_window_ids, 0)
+	}
+	append(&_closed_window_ids, strings.clone(id))
+}
+
+reopen_last_closed :: proc() -> (reopened_id: string, ok: bool) {
+	for len(_closed_window_ids) > 0 {
+		idx := len(_closed_window_ids) - 1
+		id := _closed_window_ids[idx]
+		ordered_remove(&_closed_window_ids, idx)
+		if !is_open(id) {
+			open(id)
+			reopened_id = strings.clone(id, context.temp_allocator)
+			delete(id, runtime.default_allocator())
+			return reopened_id, true
+		}
+		delete(id, runtime.default_allocator())
+	}
+	return "", false
+}
+
+// Called by the generated _register_editor_windows (editor_window_gen). The
+// imgui window name is "<icon> <title>###<id>": the icon and title show, the
+// id stays the imgui id whatever they are.
+register :: proc(id: string, title: string, icon: string, draw: Draw_Proc, width, height: f32, origin := "") {
+	for &r in _registry {
+		if r.id == id {
+			log.errorf("editor_window: duplicate id %q (%s ignored)", id, title)
+			return
+		}
+	}
+	append(&_registry, _Registered{
+		id           = id,
+		plain_title  = title,
+		title        = strings.clone_to_cstring(fmt.tprintf("%s %s###%s", icon, title, id), runtime.default_allocator()),
+		draw         = draw,
+		default_size = {width, height},
+		origin       = origin,
+	})
+}
+
+// Every registered window's plain title and id, for imgui.ini migration
+// (the ini names a window "###<id>" now that titles carry icons).
+Title_Id :: struct {
+	title: string,
+	id:    string,
+}
+
+registered :: proc(allocator := context.temp_allocator) -> []Title_Id {
+	out := make([]Title_Id, len(_registry), allocator)
+	for r, i in _registry do out[i] = {r.plain_title, r.id}
+	return out
+}
+
+// The ids of every currently open window — the editor persists these in
+// editor_settings so a session reopens what was open (imgui.ini already
+// keeps position and size, but not whether the window existed).
+open_ids :: proc(allocator := context.temp_allocator) -> []string {
+	out := make([dynamic]string, 0, len(_open_windows), allocator)
+	for &e in _open_windows {
+		if e.open do append(&out, _registry[e.reg].id)
+	}
+	return out[:]
+}
+
+// Reopen the windows named by a previous open_ids — unknown ids (a package
+// that is no longer installed) are skipped quietly, unlike `open`.
+open_saved :: proc(ids: []string) {
+	for id in ids {
+		for &r, ri in _registry {
+			if r.id != id do continue
+			already := false
+			for &e in _open_windows do if e.reg == ri do already = true
+			if !already do append(&_open_windows, _Open{reg = ri, open = true})
+			break
+		}
+	}
+}
+
+// Show the window declared under `id`, or focus it if already open.
+open :: proc(id: string) {
+	for &r, ri in _registry {
+		if r.id != id do continue
+		for &e in _open_windows {
+			if e.reg == ri {
+				e.open = true
+				_focus_request = ri
+				if on_window_event_hook != nil do on_window_event_hook("Focus Window", id)
+				return
+			}
+		}
+		append(&_open_windows, _Open{reg = ri, open = true})
+		if on_window_event_hook != nil do on_window_event_hook("Open Window", id)
+		return
+	}
+	log.errorf("editor_window: unknown id %q (declare it with @(editor_window={{id=...}}))", id)
+}
+
+close :: proc(id: string) {
+	for &e in _open_windows {
+		if _registry[e.reg].id == id {
+			e.open = false
+			push_closed(id)
+			if on_window_event_hook != nil do on_window_event_hook("Close Window", id)
+		}
+	}
+}
+
+// The origin of the window declared under `id`, for debug tooltips. Unknown ids
+// (a built-in view, which is not a registered window) answer "".
+origin_of :: proc(id: string) -> string {
+	for &r in _registry {
+		if r.id == id do return r.origin
+	}
+	return ""
+}
+
+is_open :: proc(id: string) -> bool {
+	for &e in _open_windows {
+		if _registry[e.reg].id == id && e.open do return true
+	}
+	return false
+}
+
+// Main UI scale factor (1.0 = default 100%)
+main_scale: f32 = 1.0
+
+@(private = "file")
+_window_scales: map[string]f32
+
+get_main_scale :: proc() -> f32 {
+	return main_scale
+}
+
+set_main_scale :: proc(scale: f32) {
+	main_scale = math.clamp(scale, 0.6, 2.5)
+}
+
+get_window_scale :: proc(id: string) -> f32 {
+	if _window_scales == nil do return 1.0
+	s, ok := _window_scales[id]
+	if !ok || s <= 0.01 do return 1.0
+	return s
+}
+
+set_window_scale :: proc(id: string, scale: f32) {
+	if _window_scales == nil {
+		_window_scales = make(map[string]f32)
+	}
+	_window_scales[id] = math.clamp(scale, 0.6, 2.5)
+}
+
+reset_window_scale :: proc(id: string) {
+	if _window_scales != nil {
+		delete_key(&_window_scales, id)
+	}
+}
+
+reset_all_scales :: proc() {
+	main_scale = 1.0
+	if _window_scales != nil {
+		clear(&_window_scales)
+	}
+}
+
+get_all_window_scales :: proc(allocator := context.temp_allocator) -> map[string]f32 {
+	out := make(map[string]f32, len(_window_scales), allocator)
+	for k, v in _window_scales {
+		out[strings.clone(k, allocator)] = v
+	}
+	return out
+}
+
+set_all_window_scales :: proc(scales: map[string]f32) {
+	if _window_scales == nil {
+		_window_scales = make(map[string]f32)
+	}
+	clear(&_window_scales)
+	for k, v in scales {
+		if v > 0.01 {
+			_window_scales[strings.clone(k)] = v
+		}
+	}
+}
+
+get_effective_scale :: proc(id: string) -> f32 {
+	return main_scale * get_window_scale(id)
+}
+
+// ─────────────────────────────────────────────────────────────
+// CENTRALIZED MODAL DIALOGS (AUTORESIZING & ROOT SCALED)
+// ─────────────────────────────────────────────────────────────
+
+Confirm_Dialog :: struct {
+	open:          bool,
+	title:         string,
+	message:       string,
+	confirm_label: string,
+	cancel_label:  string,
+	is_danger:     bool,
+	on_confirm:    proc(),
+	on_cancel:     proc(),
+}
+
+@(private = "file")
+_active_dialog: Confirm_Dialog
+
+show_confirm_dialog :: proc(title: string, message: string, confirm_label: string = "Confirm", on_confirm: proc() = nil, is_danger: bool = true, cancel_label: string = "Cancel", on_cancel: proc() = nil) {
+	close_confirm_dialog()
+	_active_dialog = Confirm_Dialog{
+		open          = true,
+		title         = strings.clone(title),
+		message       = strings.clone(message),
+		confirm_label = strings.clone(confirm_label),
+		cancel_label  = strings.clone(cancel_label),
+		is_danger     = is_danger,
+		on_confirm    = on_confirm,
+		on_cancel     = on_cancel,
+	}
+}
+
+close_confirm_dialog :: proc() {
+	if _active_dialog.open {
+		delete(_active_dialog.title)
+		delete(_active_dialog.message)
+		delete(_active_dialog.confirm_label)
+		delete(_active_dialog.cancel_label)
+		_active_dialog.open = false
+	}
+}
+
+Rename_Dialog :: struct {
+	open:       bool,
+	title:      string,
+	buffer:     [256]u8,
+	focus:      bool,
+	on_apply:   proc(string),
+	on_cancel:  proc(),
+}
+
+@(private = "file")
+_active_rename: Rename_Dialog
+
+modal_scale: f32 = 1.0
+
+get_modal_scale :: proc() -> f32 {
+	return modal_scale
+}
+
+set_modal_scale :: proc(s: f32) {
+	modal_scale = math.clamp(s, 0.7, 2.0)
+}
+
+show_rename_dialog :: proc(title: string, current_name: string, on_apply: proc(string), on_cancel: proc() = nil) {
+	close_rename_dialog()
+	_active_rename = Rename_Dialog{
+		open      = true,
+		title     = strings.clone(title),
+		focus     = true,
+		on_apply  = on_apply,
+		on_cancel = on_cancel,
+	}
+	mem.zero(&_active_rename.buffer, len(_active_rename.buffer))
+	name_bytes := transmute([]u8)current_name
+	copy_len := min(len(name_bytes), len(_active_rename.buffer) - 1)
+	copy(_active_rename.buffer[:], name_bytes[:copy_len])
+}
+
+close_rename_dialog :: proc() {
+	if _active_rename.open {
+		delete(_active_rename.title)
+		_active_rename.open = false
+		_active_rename.on_apply = nil
+		_active_rename.on_cancel = nil
+	}
+}
+
+// One call per editor frame, after the built-in views. Removal happens here,
+// the frame after the close button flips `open`.
+draw_all :: proc() {
+	for i := len(_open_windows) - 1; i >= 0; i -= 1 {
+		e := &_open_windows[i]
+		if !e.open {
+			push_closed(_registry[e.reg].id)
+			ordered_remove(&_open_windows, i)
+			continue
+		}
+		r := &_registry[e.reg]
+		if r.default_size != {} {
+			im.SetNextWindowSize(r.default_size, .FirstUseEver)
+		}
+		if _focus_request == e.reg {
+			im.SetNextWindowFocus()
+			_focus_request = -1
+		}
+		// NoCollapse matches every built-in view — no collapse triangle when
+		// the window floats. Enable HorizontalScrollbar when zoomed up so narrow
+		// docked panes never clip right-hand content off-screen.
+		per_scale_pre := get_window_scale(r.id)
+		win_flags := im.WindowFlags{.NoCollapse}
+		if per_scale_pre > 1.05 {
+			win_flags += {.HorizontalScrollbar}
+		}
+		if begin(r.title, &e.open, win_flags) {
+			// Real-time Ctrl + Mouse Wheel zoom when hovering over this window
+			io := im.GetIO()
+			if io.KeyCtrl && io.MouseWheel != 0 && im.IsWindowHovered(im.HoveredFlags_RootWindow | im.HoveredFlags_ChildWindows) {
+				curr := get_window_scale(r.id)
+				new_scale := math.clamp(curr + io.MouseWheel * 0.05, 0.6, 2.5)
+				set_window_scale(r.id, new_scale)
+				io.MouseWheel = 0
+			}
+
+			per_scale := get_window_scale(r.id)
+			eff_scale := get_effective_scale(r.id)
+			has_per_scale := abs(per_scale - 1.0) > 0.01
+			has_eff_scale := abs(eff_scale - 1.0) > 0.01
+
+			st := im.GetStyle()
+			if has_per_scale {
+				im.PushFontFloat(nil, st.FontSizeBase * per_scale)
+			}
+			if has_eff_scale {
+				im.PushStyleVarImVec2(.FramePadding, {st.FramePadding.x * eff_scale, st.FramePadding.y * eff_scale})
+				im.PushStyleVarImVec2(.ItemSpacing, {st.ItemSpacing.x * eff_scale, st.ItemSpacing.y * eff_scale})
+				im.PushStyleVarImVec2(.ItemInnerSpacing, {st.ItemInnerSpacing.x * eff_scale, st.ItemInnerSpacing.y * eff_scale})
+				im.PushStyleVarImVec2(.CellPadding, {st.CellPadding.x * eff_scale, st.CellPadding.y * eff_scale})
+				im.PushStyleVar(.IndentSpacing, st.IndentSpacing * eff_scale)
+			}
+
+			r.draw()
+
+			if has_eff_scale {
+				im.PopStyleVar(5)
+			}
+			if has_per_scale {
+				im.PopFont()
+			}
+
+			// Title bar decorations for floating/undocked windows
+			decorate_floating_window(r.title, &e.open)
+		}
+		im.End()
+	}
+
+	// Draw centralized modal dialogs at root viewport level (independent scale, always auto-resizes, no clipping!)
+	st := im.GetStyle()
+	has_modal_font := abs(modal_scale - 1.0) > 0.01
+
+	if _active_dialog.open {
+		if has_modal_font do im.PushFontFloat(nil, st.FontSizeBase * modal_scale)
+		vp := im.GetMainViewport()
+		im.SetNextWindowPos(vp.Pos + vp.Size * 0.5, .Always, im.Vec2{0.5, 0.5})
+		modal_flags := im.WindowFlags{.AlwaysAutoResize, .NoSavedSettings}
+		modal_title := strings.clone_to_cstring(fmt.tprintf("%s###CentralModal", _active_dialog.title), context.temp_allocator)
+		im.OpenPopup(modal_title)
+
+		if im.BeginPopupModal(modal_title, &_active_dialog.open, modal_flags) {
+			io := im.GetIO()
+			if io.KeyCtrl && io.MouseWheel != 0 {
+				set_modal_scale(modal_scale + io.MouseWheel * 0.05)
+			}
+
+			if _active_dialog.is_danger {
+				im.TextColored({1.0, 0.35, 0.35, 1.0}, "Warning / Confirmation")
+			} else {
+				im.TextColored({0.35, 0.75, 1.0, 1.0}, "Confirmation")
+			}
+			im.Separator()
+			im.Spacing()
+
+			im.TextWrappedUnformatted(strings.clone_to_cstring(_active_dialog.message, context.temp_allocator))
+			im.Spacing()
+			im.Spacing()
+			im.Separator()
+			im.Spacing()
+
+			// Buttons
+			if _active_dialog.is_danger {
+				im.PushStyleColorImVec4(.Button, {0.75, 0.20, 0.20, 0.85})
+				im.PushStyleColorImVec4(.ButtonHovered, {0.90, 0.25, 0.25, 1.0})
+				im.PushStyleColorImVec4(.ButtonActive, {1.0, 0.15, 0.15, 1.0})
+			} else {
+				im.PushStyleColorImVec4(.Button, {0.20, 0.50, 0.85, 0.85})
+				im.PushStyleColorImVec4(.ButtonHovered, {0.25, 0.65, 1.0, 1.0})
+				im.PushStyleColorImVec4(.ButtonActive, {0.35, 0.75, 1.0, 1.0})
+			}
+
+			confirm_pressed := im.Button(strings.clone_to_cstring(_active_dialog.confirm_label, context.temp_allocator)) || im.IsKeyPressed(.Enter)
+			im.PopStyleColor(3)
+
+			im.SameLine(0, 15)
+			cancel_pressed := im.Button(strings.clone_to_cstring(_active_dialog.cancel_label, context.temp_allocator)) || im.IsKeyPressed(.Escape)
+
+			if confirm_pressed {
+				cb := _active_dialog.on_confirm
+				close_confirm_dialog()
+				im.CloseCurrentPopup()
+				if cb != nil do cb()
+			} else if cancel_pressed || !_active_dialog.open {
+				cb := _active_dialog.on_cancel
+				close_confirm_dialog()
+				im.CloseCurrentPopup()
+				if cb != nil do cb()
+			}
+
+			im.EndPopup()
+		}
+		if has_modal_font do im.PopFont()
+	}
+
+	// Centralized Rename Dialog (Auto-resizes cleanly at viewport root, independent scale)
+	if _active_rename.open {
+		if has_modal_font do im.PushFontFloat(nil, st.FontSizeBase * modal_scale)
+		vp := im.GetMainViewport()
+		im.SetNextWindowPos(vp.Pos + vp.Size * 0.5, .Always, im.Vec2{0.5, 0.5})
+		modal_flags := im.WindowFlags{.AlwaysAutoResize, .NoSavedSettings}
+		modal_title := strings.clone_to_cstring(fmt.tprintf("%s###CentralRenameModal", _active_rename.title), context.temp_allocator)
+		im.OpenPopup(modal_title)
+
+		if im.BeginPopupModal(modal_title, &_active_rename.open, modal_flags) {
+			io := im.GetIO()
+			if io.KeyCtrl && io.MouseWheel != 0 {
+				set_modal_scale(modal_scale + io.MouseWheel * 0.05)
+			}
+
+			im.TextColored({0.35, 0.75, 1.0, 1.0}, fmt.ctprintf("%s  %s", icons.ICON_MD_EDIT, _active_rename.title))
+			im.Separator()
+			im.Spacing()
+
+			im.Text("New Name:")
+			im.SetNextItemWidth(320.0)
+			if _active_rename.focus {
+				im.SetKeyboardFocusHere()
+				_active_rename.focus = false
+			}
+			enter_pressed := im.InputText("##CentralRenameInput", cstring(raw_data(_active_rename.buffer[:])), len(_active_rename.buffer), {.EnterReturnsTrue, .AutoSelectAll})
+
+			im.Spacing()
+			im.Separator()
+			im.Spacing()
+
+			if im.Button(fmt.ctprintf("%s  Apply", icons.ICON_MD_CHECK), {110, 30}) || enter_pressed {
+				name := strings.string_from_null_terminated_ptr(raw_data(_active_rename.buffer[:]), len(_active_rename.buffer))
+				cb := _active_rename.on_apply
+				close_rename_dialog()
+				im.CloseCurrentPopup()
+				if cb != nil do cb(name)
+			}
+			im.SameLine(0, 15)
+			if im.Button(fmt.ctprintf("%s  Cancel", icons.ICON_MD_CLOSE), {110, 30}) || im.IsKeyPressed(.Escape) || !_active_rename.open {
+				cb := _active_rename.on_cancel
+				close_rename_dialog()
+				im.CloseCurrentPopup()
+				if cb != nil do cb()
+			}
+			im.EndPopup()
+		}
+		if has_modal_font do im.PopFont()
+	}
+}
+
+shutdown :: proc() {
+	close_confirm_dialog()
+	close_rename_dialog()
+	delete(_registry)
+	_registry = nil
+	delete(_open_windows)
+	_open_windows = nil
+	for id in _closed_window_ids {
+		delete(id, runtime.default_allocator())
+	}
+	delete(_closed_window_ids)
+	_closed_window_ids = nil
+	if _window_scales != nil {
+		delete(_window_scales)
+		_window_scales = nil
+	}
+}
+
+_get_central_dock_target :: proc() -> im.ID {
+	if main_central_dock_id != 0 do return main_central_dock_id
+	if main_dockspace_id != 0 {
+		if central := im.DockBuilderGetCentralNode(main_dockspace_id); central != nil {
+			return central.ID_
+		}
+		return main_dockspace_id
+	}
+	return 0
+}
+
+toggle_window_dock :: proc(id: string) {
+	target_dock := _get_central_dock_target()
+	for &r in _registry {
+		if r.id == id {
+			if im.IsWindowDocked() {
+				im.DockBuilderDockWindow(r.title, 0)
+			} else if target_dock != 0 {
+				im.DockBuilderDockWindow(r.title, target_dock)
+				if main_dockspace_id != 0 do im.DockBuilderFinish(main_dockspace_id)
+			}
+			return
+		}
+	}
+	c_title := strings.clone_to_cstring(id, context.temp_allocator)
+	if im.IsWindowDocked() {
+		im.DockBuilderDockWindow(c_title, 0)
+	} else if target_dock != 0 {
+		im.DockBuilderDockWindow(c_title, target_dock)
+		if main_dockspace_id != 0 do im.DockBuilderFinish(main_dockspace_id)
+	}
+}
+
+decorate_floating_window :: proc(title: cstring, p_open: ^bool = nil) {
+	// Docked or not: pop-out bookkeeping (dock slot, rect, OS window) is
+	// recorded every frame so reunite knows where the panel came from.
+	_track_current(title)
+	if im.IsWindowDocked() do return
+
+	win_pos := im.GetWindowPos()
+	win_size := im.GetWindowSize()
+	style := im.GetStyle()
+	title_h := im.GetFrameHeight()
+	btn_w := max(title_h * 1.25, 28.0)
+	if win_size.x < btn_w * 2.5 do return
+
+	right_x := win_pos.x + win_size.x - style.WindowBorderSize
+
+	close_min := im.Vec2{right_x - btn_w, win_pos.y + style.WindowBorderSize}
+	close_max := im.Vec2{right_x, win_pos.y + title_h}
+
+	dock_min := im.Vec2{close_min.x - btn_w - 2.0, win_pos.y + style.WindowBorderSize}
+	dock_max := im.Vec2{close_min.x - 2.0, win_pos.y + title_h}
+
+	mouse_pos := im.GetMousePos()
+	in_close := mouse_pos.x >= close_min.x && mouse_pos.x <= close_max.x && mouse_pos.y >= close_min.y && mouse_pos.y <= close_max.y
+	in_dock := mouse_pos.x >= dock_min.x && mouse_pos.x <= dock_max.x && mouse_pos.y >= dock_min.y && mouse_pos.y <= dock_max.y
+
+	// AllowWhenBlockedByActiveItem allows hover and clicks to register even while the title bar dragging handler is active
+	is_win_hovered := im.IsWindowHovered(im.HoveredFlags_AllowWhenBlockedByActiveItem | im.HoveredFlags_RootAndChildWindows)
+	close_hovered := in_close && is_win_hovered
+	dock_hovered := in_dock && is_win_hovered
+
+	close_active := close_hovered && im.IsMouseDown(.Left)
+	dock_active := dock_hovered && im.IsMouseDown(.Left)
+
+	if close_hovered || dock_hovered {
+		im.SetMouseCursor(.Arrow)
+	}
+
+	// Pop-out button: inside the main window it lifts the panel into its own
+	// OS window; in its own OS window it brings it back (viewports.odin).
+	// Without multi-viewport support it keeps the old "dock back" meaning.
+	can_pop := viewports_enabled()
+	outside := can_pop && in_own_os_window(title)
+	glyph: cstring = icons.ICON_MD_DOCK
+	tip: cstring = "Dock Window Back into Workspace"
+	if can_pop {
+		glyph = outside ? icons.ICON_MD_DOCK : icons.ICON_MD_OPEN_IN_NEW
+		tip = outside ? "Return to Main Window (re-dock where it was)" : "Pop Out into a Separate OS Window"
+	}
+
+	// Handle clicks: respond immediately on mouse press or mouse release
+	if dock_hovered && (im.IsMouseClicked(.Left) || (dock_active && im.IsMouseReleased(.Left))) {
+		if !can_pop {
+			target_dock := _get_central_dock_target()
+			if target_dock != 0 {
+				im.DockBuilderDockWindow(title, target_dock)
+				if main_dockspace_id != 0 {
+					im.DockBuilderFinish(main_dockspace_id)
+				}
+			}
+		} else if outside {
+			reunite(title)
+		} else {
+			pop_out(title)
+		}
+	}
+
+	if close_hovered && (im.IsMouseClicked(.Left) || (close_active && im.IsMouseReleased(.Left))) {
+		if p_open != nil {
+			p_open^ = false
+		}
+		s := string(title)
+		if idx := strings.last_index(s, "###"); idx >= 0 {
+			close(s[idx + 3:])
+		} else {
+			close(s)
+		}
+	}
+
+	dl := im.GetWindowDrawList()
+	im.DrawList_PushClipRect(dl, win_pos, win_pos + win_size, false)
+
+	// 1. Pop-out / return button (clean, clear blue accent button so it never appears grayed out)
+	dock_bg := dock_active ? im.GetColorU32ImVec4(im.Vec4{0.15, 0.28, 0.45, 1.0}) : (dock_hovered ? im.GetColorU32ImVec4(im.Vec4{0.28, 0.50, 0.80, 1.0}) : im.GetColorU32ImVec4(im.Vec4{0.22, 0.32, 0.46, 0.85}))
+	im.DrawList_AddRectFilled(dl, dock_min, dock_max, dock_bg, 2.0)
+
+	glyph_sz := im.CalcTextSize(glyph, nil, false, -1)
+	glyph_pos := dock_min + (im.Vec2{btn_w, title_h - style.WindowBorderSize} - glyph_sz) * 0.5
+	text_col := dock_hovered ? im.GetColorU32ImVec4(im.Vec4{1.0, 1.0, 1.0, 1.0}) : im.GetColorU32ImVec4(im.Vec4{0.90, 0.94, 1.0, 0.95})
+	im.DrawList_AddText(dl, glyph_pos, text_col, glyph)
+
+	// 2. Red square Close button (distinct, high contrast red square with centered white X)
+	close_bg := close_active ? im.GetColorU32ImVec4(im.Vec4{0.60, 0.10, 0.10, 1.0}) : (close_hovered ? im.GetColorU32ImVec4(im.Vec4{0.96, 0.22, 0.22, 1.0}) : im.GetColorU32ImVec4(im.Vec4{0.80, 0.16, 0.16, 0.92}))
+	im.DrawList_AddRectFilled(dl, close_min, close_max, close_bg, 2.0)
+
+	// Crisp centered white cross 'X'
+	center := (close_min + close_max) * 0.5
+	cross_r := title_h * 0.20
+	white := im.GetColorU32ImVec4(im.Vec4{1.0, 1.0, 1.0, 1.0})
+	im.DrawList_AddLine(dl, {center.x - cross_r, center.y - cross_r}, {center.x + cross_r, center.y + cross_r}, white, 2.0)
+	im.DrawList_AddLine(dl, {center.x - cross_r, center.y + cross_r}, {center.x + cross_r, center.y - cross_r}, white, 2.0)
+
+	im.DrawList_PopClipRect(dl)
+
+	if dock_hovered do widgets.tooltip_unchecked(tip)
+	if close_hovered do widgets.tooltip_unchecked("Close Window")
+
+	// Allow Right-Click on a floating window's title bar to inspect its `.odin` source script!
+	in_title_bar := mouse_pos.x >= win_pos.x && mouse_pos.x < dock_min.x && mouse_pos.y >= win_pos.y && mouse_pos.y <= win_pos.y + title_h
+	if in_title_bar && is_win_hovered {
+		s := string(title)
+		win_id := s
+		disp := s
+		if idx := strings.last_index(s, "###"); idx >= 0 {
+			win_id = s[idx + 3:]
+			disp = s[:idx]
+		}
+		orig := origin_of(win_id)
+		if len(orig) > 0 {
+			prev_orig := widgets.ui_origin_push(orig)
+			widgets.tooltip_unchecked(strings.clone_to_cstring(disp, context.temp_allocator))
+			widgets.ui_origin_pop(prev_orig)
+		}
+	}
+}

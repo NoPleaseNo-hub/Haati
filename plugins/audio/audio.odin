@@ -1,0 +1,122 @@
+package audio
+
+// Audio import settings + PCM codec utilities (decode to float32, WAV
+// write). The importer registration and run proc live editor-side
+// (editor/audio_importer.odin); the settings type stays here so the catalog
+// pipeline materializes settings in game binaries too. Scene/meta records
+// key on the type guid below — never change it.
+
+import "core:os"
+import "core:strings"
+import sdl "vendor:sdl3"
+import mix "vendor:sdl3/mixer"
+
+@(typ_guid={guid="ec017cc2-7267-45b4-ae80-d6861094d27a"})
+AudioSettings :: struct {
+	// Gain baked into the artifact's PCM at import (1 = unchanged). Mastering
+	// knob — per-instance mixing volume lives on AudioSource.
+	volume: f32,
+	// Scale the decoded PCM so its peak hits 1 BEFORE volume applies.
+	normalize: bool,
+	// Stream directly from disk instead of predecoding the entire clip into RAM on the main thread.
+	stream_from_disk: bool,
+}
+
+reset_AudioSettings :: proc(p: ^AudioSettings) {
+	p.volume = 1.0
+}
+
+// Decode any supported source into interleaved float32 PCM at its native
+// channel count and sample rate. The caller owns the returned slice.
+decode_file_f32 :: proc(path: string, allocator := context.allocator) -> (pcm: []f32, spec: sdl.AudioSpec, ok: bool) {
+	_mix_lib_ensure()
+	cpath := strings.clone_to_cstring(path, context.temp_allocator)
+
+	// Fast/accurate path for WAV files: SDL_LoadWAV parses RIFF/fmt/data chunks
+	// directly, avoiding SDL3_mixer's MIX_DecodeAudio WAV offset bug (which reads
+	// from byte 0 of the file, including the RIFF header).
+	wav_spec: sdl.AudioSpec
+	wav_buf: [^]u8
+	wav_len: u32
+	if sdl.LoadWAV(cpath, &wav_spec, &wav_buf, &wav_len) {
+		defer sdl.free(wav_buf)
+		spec = sdl.AudioSpec{format = .F32, channels = wav_spec.channels, freq = wav_spec.freq}
+		if wav_spec.format == .F32 {
+			count := int(wav_len) / size_of(f32)
+			out := make([]f32, count, allocator)
+			if count > 0 {
+				copy(out, (cast([^]f32)wav_buf)[:count])
+			}
+			return out, spec, true
+		}
+		dst_buf: [^]u8
+		dst_len: i32
+		if sdl.ConvertAudioSamples(&wav_spec, wav_buf, i32(wav_len), &spec, &dst_buf, &dst_len) {
+			defer sdl.free(dst_buf)
+			count := int(dst_len) / size_of(f32)
+			out := make([]f32, count, allocator)
+			if count > 0 {
+				copy(out, (cast([^]f32)dst_buf)[:count])
+			}
+			return out, spec, true
+		}
+	}
+
+	dec := mix.CreateAudioDecoder(cpath, 0)
+	if dec == nil do return
+	defer mix.DestroyAudioDecoder(dec)
+
+	native: sdl.AudioSpec
+	if !mix.GetAudioDecoderFormat(dec, &native) do return
+	spec = sdl.AudioSpec{format = .F32, channels = native.channels, freq = native.freq}
+
+	buf := make([dynamic]f32, allocator)
+	chunk: [16384]f32
+	for {
+		n := mix.DecodeAudio(dec, raw_data(chunk[:]), i32(size_of(chunk)), spec)
+		if n <= 0 do break
+		append(&buf, ..chunk[:int(n) / size_of(f32)])
+	}
+	return buf[:], spec, true
+}
+
+// Minimal WAVE_FORMAT_IEEE_FLOAT writer (fmt + fact + data chunks).
+_write_wav_f32 :: proc(path: string, pcm: []f32, spec: sdl.AudioSpec) -> bool {
+	channels := u16(spec.channels)
+	rate := u32(spec.freq)
+	block_align := u32(channels) * size_of(f32)
+	data_size := u32(len(pcm) * size_of(f32))
+
+	out := make([dynamic]u8, 0, int(data_size) + 64, context.temp_allocator)
+	w_bytes :: proc(out: ^[dynamic]u8, s: string) { append(out, s) }
+	w_u16 :: proc(out: ^[dynamic]u8, v: u16) { append(out, u8(v), u8(v >> 8)) }
+	w_u32 :: proc(out: ^[dynamic]u8, v: u32) {
+		append(out, u8(v), u8(v >> 8), u8(v >> 16), u8(v >> 24))
+	}
+
+	w_bytes(&out, "RIFF")
+	w_u32(&out, 4 + (8 + 18) + (8 + 4) + (8 + data_size))
+	w_bytes(&out, "WAVE")
+
+	w_bytes(&out, "fmt ")
+	w_u32(&out, 18)
+	w_u16(&out, 3) // WAVE_FORMAT_IEEE_FLOAT
+	w_u16(&out, channels)
+	w_u32(&out, rate)
+	w_u32(&out, rate * block_align)
+	w_u16(&out, u16(block_align))
+	w_u16(&out, 32) // bits per sample
+	w_u16(&out, 0)  // cbSize
+
+	w_bytes(&out, "fact")
+	w_u32(&out, 4)
+	w_u32(&out, data_size / block_align) // frame count
+
+	w_bytes(&out, "data")
+	w_u32(&out, data_size)
+	if len(pcm) > 0 {
+		append(&out, ..(cast([^]u8)raw_data(pcm))[:data_size])
+	}
+
+	return os.write_entire_file(path, out[:]) == nil
+}

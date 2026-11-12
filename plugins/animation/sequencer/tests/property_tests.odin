@@ -1,0 +1,203 @@
+package animation_sequencer_tests
+
+// inspector.property (docs/InspectorProperty.md): a field addressed from an
+// owner and a dotted path. The resolver is what an MCP property write and the
+// timeline animator's proxy rows share, so the path grammar and the two
+// addresses — the value, and the array an override names — are pinned here.
+
+import "core:fmt"
+import "core:strings"
+import "core:testing"
+import "moonhug:engine"
+import "moonhug:editor/inspector"
+import "moonhug:editor/undo"
+import common "moonhug:tests/common"
+import anim_seq "moonhug:packages/animation/sequencer"
+
+@(private = "file")
+_animator_with_states :: proc() -> (^anim_seq.TimelineAnimator, engine.Handle) {
+	owner := engine.transform_new("Animator")
+	comp, ptr := engine.transform_add_comp(owner, .TimelineAnimator)
+	a := cast(^anim_seq.TimelineAnimator)ptr
+	a.layers = make([dynamic]anim_seq.Animator_Layer)
+	append(&a.layers, anim_seq.Animator_Layer{weight = 1, states = make([dynamic]anim_seq.Timeline_State)})
+	append(&a.layers[0].states, anim_seq.Timeline_State{id = 1, speed = 1})
+	append(&a.layers[0].states, anim_seq.Timeline_State{id = 2, speed = 2})
+	return a, comp.handle
+}
+
+@(test)
+test_property_plain_field_names_itself :: proc(t: ^testing.T) {
+	tc := new(common.TestCtx)
+	defer free(tc)
+	common.setup(tc, "")
+	context.user_ptr = &tc.uc
+	defer common.teardown(tc)
+
+	a, comp := _animator_with_states()
+	p, ok := inspector.inspect_comp(comp)
+	testing.expect(t, ok)
+	if !ok do return
+
+	w, err := inspector.property(p, "layers")
+	testing.expect_value(t, err, inspector.Resolve_Error.None)
+	testing.expect(t, w.ptr == rawptr(&a.layers), "the pointer is the field")
+	testing.expect(t, w.tid == typeid_of([dynamic]anim_seq.Animator_Layer))
+	testing.expect_value(t, w.record.path, "layers")
+	testing.expect(t, w.record.ptr == w.ptr, "a plain field's override is the field")
+	testing.expect(t, w.owner.handle == comp, "the owner is the component")
+	testing.expect_value(t, w.offset, uintptr(offset_of(anim_seq.TimelineAnimator, layers)))
+}
+
+// The two addresses: the VALUE is the element's field, the OVERRIDE stops at
+// the array, because an override is the whole array.
+@(test)
+test_property_array_index_keeps_override_on_the_array :: proc(t: ^testing.T) {
+	tc := new(common.TestCtx)
+	defer free(tc)
+	common.setup(tc, "")
+	context.user_ptr = &tc.uc
+	defer common.teardown(tc)
+
+	a, comp := _animator_with_states()
+	p, _ := inspector.inspect_comp(comp)
+
+	sp, err := inspector.property(p, "layers[0].states[1].speed")
+	testing.expect_value(t, err, inspector.Resolve_Error.None)
+	if err != .None do return
+	testing.expect(t, sp.ptr == rawptr(&a.layers[0].states[1].speed), "the value is the element's field")
+	testing.expect(t, sp.tid == typeid_of(f32))
+	testing.expect_value(t, sp.record.path, "layers")
+	testing.expect(t, sp.record.ptr == rawptr(&a.layers), "the override names the outer array")
+	testing.expect(t, sp.record.tid == typeid_of([dynamic]anim_seq.Animator_Layer))
+
+	// Chaining narrows the same way as one path.
+	l, _ := inspector.property(p, "layers[0]")
+	sp2, err2 := inspector.property(l, "states[1].speed")
+	testing.expect_value(t, err2, inspector.Resolve_Error.None)
+	testing.expect(t, sp2.ptr == sp.ptr && sp2.record.ptr == sp.record.ptr, "chained resolution equals the one-shot path")
+}
+
+@(test)
+test_property_errors_are_reported_not_fatal :: proc(t: ^testing.T) {
+	tc := new(common.TestCtx)
+	defer free(tc)
+	common.setup(tc, "")
+	context.user_ptr = &tc.uc
+	defer common.teardown(tc)
+
+	_, comp := _animator_with_states()
+	p, _ := inspector.inspect_comp(comp)
+
+	_, e1 := inspector.property(p, "no_such")
+	testing.expect_value(t, e1, inspector.Resolve_Error.No_Such_Field)
+	_, e2 := inspector.property(p, "layers[7]")
+	testing.expect_value(t, e2, inspector.Resolve_Error.Index_Out_Of_Range)
+	_, e3 := inspector.property(p, "layers[0].weight[0]")
+	testing.expect_value(t, e3, inspector.Resolve_Error.Not_Indexable)
+	_, e4 := inspector.property(p, "layers[0].weight.x")
+	testing.expect_value(t, e4, inspector.Resolve_Error.Not_A_Struct)
+	_, e5 := inspector.property(p, "layers[x]")
+	testing.expect_value(t, e5, inspector.Resolve_Error.Bad_Path)
+	_, e6 := inspector.property(p, "layers..states")
+	testing.expect_value(t, e6, inspector.Resolve_Error.Bad_Path)
+
+	// A dead handle is not an object.
+	_, ok := inspector.inspect_comp(engine.Handle{})
+	testing.expect(t, !ok, "a dead handle does not inspect")
+}
+
+// A fixed array is an array too: the override stays on it.
+@(test)
+test_property_fixed_array_index :: proc(t: ^testing.T) {
+	tc := new(common.TestCtx)
+	defer free(tc)
+	common.setup(tc, "")
+	context.user_ptr = &tc.uc
+	defer common.teardown(tc)
+
+	tH := engine.transform_new("T")
+	p, ok := inspector.inspect_transform(tH)
+	testing.expect(t, ok)
+	if !ok do return
+	tr := engine.pool_get(&tc.world.transforms, engine.Handle(tH))
+
+	y, err := inspector.property(p, "position[1]")
+	testing.expect_value(t, err, inspector.Resolve_Error.None)
+	testing.expect(t, y.ptr == rawptr(&tr.position[1]), "element pointer")
+	testing.expect(t, y.tid == typeid_of(f32))
+	testing.expect_value(t, y.record.path, "position")
+	testing.expect(t, y.record.ptr == rawptr(&tr.position), "override names the whole vector")
+	testing.expect(t, y.owner.handle == engine.Handle(tH), "the transform owns it")
+	testing.expect(t, y.nested_host == {}, "plain content has no prefab context")
+}
+
+// The wire path: a JSON write through the property is one undo step and lands
+// in the field, exactly as a row commit would.
+@(test)
+test_property_set_json_is_one_undo_step :: proc(t: ^testing.T) {
+	tc := new(common.TestCtx)
+	defer free(tc)
+	u := common.setup_undo(tc)
+	context.user_ptr = &tc.uc
+	defer common.teardown_undo(tc, u)
+
+	a, comp := _animator_with_states()
+	p, _ := inspector.inspect_comp(comp)
+	sp, err := inspector.property(p, "layers[0].states[1].speed")
+	testing.expect_value(t, err, inspector.Resolve_Error.None)
+	if err != .None do return
+
+	before := u.top
+	ok, _ := inspector.property_set_json(sp, transmute([]byte)string("7.5"), "Set speed")
+	testing.expect(t, ok, "write decodes")
+	testing.expect_value(t, a.layers[0].states[1].speed, f32(7.5))
+	testing.expect_value(t, u.top, before + 1)
+
+	testing.expect(t, undo.apply_undo(u), "undo applies")
+	testing.expect_value(t, a.layers[0].states[1].speed, f32(2))
+
+	bad, why := inspector.property_set_json(sp, transmute([]byte)string(`"words"`), "bad")
+	testing.expect(t, !bad && why != "", "a value of the wrong shape is refused with a reason")
+	testing.expect(t, u.top == before, "a refused write records no step")
+}
+
+// A reference field over the wire obeys its ref: tag the way the picker does:
+// the state's timeline admits a PlayableDirector and nothing else.
+@(test)
+test_property_set_json_enforces_ref_tag :: proc(t: ^testing.T) {
+	tc := new(common.TestCtx)
+	defer free(tc)
+	u := common.setup_undo(tc)
+	context.user_ptr = &tc.uc
+	defer common.teardown_undo(tc, u)
+
+	a, comp := _animator_with_states()
+	root := engine.Transform_Handle(tc.scene.root.handle)
+	tl := engine.transform_new("Timeline", root)
+	director, _ := engine.transform_add_comp(tl, .PlayableDirector)
+	body := engine.transform_new("Body", root)
+	animation, _ := engine.transform_add_comp(body, .Animation)
+
+	p, _ := inspector.inspect_comp(comp)
+	tp, err := inspector.property(p, "layers[0].states[0].timeline")
+	testing.expect_value(t, err, inspector.Resolve_Error.None)
+	if err != .None do return
+	steps := u.top
+
+	wrong := fmt.tprintf(`{{"local_id": %d}}`, animation.local_id)
+	ok, why := inspector.property_set_json(tp, transmute([]byte)wrong, "bad ref")
+	testing.expect(t, !ok, "an Animation is not a PlayableDirector")
+	testing.expect(t, strings.contains(why, "PlayableDirector"), "the reason names what the field admits")
+	testing.expect_value(t, a.layers[0].states[0].timeline.local_id, engine.Local_ID(0))
+	testing.expect(t, u.top == steps, "a refused reference records no step")
+
+	right := fmt.tprintf(`{{"local_id": %d}}`, director.local_id)
+	ok2, _ := inspector.property_set_json(tp, transmute([]byte)right, "good ref")
+	testing.expect(t, ok2, "a director is admitted")
+	testing.expect_value(t, a.layers[0].states[0].timeline.handle, director.handle)
+	testing.expect(t, u.top == steps + 1)
+
+	cleared, _ := inspector.property_set_json(tp, transmute([]byte)string(`{"local_id": 0}`), "clear")
+	testing.expect(t, cleared, "clearing a reference is always admitted")
+}

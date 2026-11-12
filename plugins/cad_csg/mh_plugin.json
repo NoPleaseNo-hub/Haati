@@ -1,0 +1,6 @@
+{
+  "name": "cad_csg",
+  "guid": "c4d8b102-7a91-4f58-8e12-65a30198f4d1",
+  "description": "AutoCAD Precision Blockout & Red Faction (Geo-Mod) Runtime Destructible CSG",
+  "dependencies": ["physics3d", "control_rig"]
+}

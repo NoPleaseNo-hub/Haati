@@ -1,0 +1,43 @@
+bin/**
+.idea/
+
+*.bin
+# glTF buffers are source assets, not build output - a .gltf without its .bin
+# is unusable, so sample and project assets keep theirs.
+!**/assets/**/*.bin
+
+*.o
+*.a
+imgui.ini
+editor_window.json
+/editor
+/library/
+moonhug/library/
+/moonhug/packages/
+.zed
+*.dSYM
+*_generated.odin
+builds/
+/logs/
+moonhug/logs/
+
+/mh
+/mh.exe
+/tools/mh
+/tools/mh.exe
+*.pdb
+*.exp
+*.ilk
+overwatch_recordings/
+
+/UserSettings/
+moonhug/UserSettings/
+moonhug/ProjectSettings/editor_settings.json
+moonhug/ProjectSettings/campawn_settings.json
+
+# Private game project plugin & game-specific audit/tests (exempt from public Haati engine repo)
+/plugins/void_odin/
+/plugins/void_odin
+/tests/
+/ENGINE_AUDIT.md
+/.agents/

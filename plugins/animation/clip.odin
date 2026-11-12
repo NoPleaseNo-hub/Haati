@@ -1,0 +1,424 @@
+package animation
+
+// AnimationClip asset: keyframe curves that animate transform
+// position/rotation/scale — or any POD component field via property channels
+// (clip_property.odin) — over time. Clips are JSON files under assets/
+// (".anim"), cached by guid like materials. The Animation component
+// (component_Animation.odin) plays one — a single-clip player, not
+// Mecanim: no state machines, no blending, script-level Play/Stop.
+//
+// Channels target transforms by NAME PATH relative to the Animation owner:
+// "" is the owner itself, "Body/Arm" walks children by name (the curve
+// binding paths). "Assets/Extract Assets" turns glTF animations into .anim
+// files whose paths mirror the glTF node hierarchy.
+
+import "base:runtime"
+import "core:encoding/json"
+import "moonhug:engine"
+import "core:encoding/uuid"
+import "core:math"
+import "core:math/linalg"
+import "core:os"
+import "core:strings"
+
+// Once clamps at length and stops; Loop wraps.
+Animation_Wrap :: enum u8 {
+	Once,
+	Loop,
+}
+
+// Which transform property a channel writes (glTF target paths; curves
+// bind arbitrary properties — transforms cover the imported set).
+Animation_Path :: enum u8 {
+	Position,
+	Rotation,
+	Scale,
+}
+
+// One curve: keyframe times plus values for a single target property.
+// Values pack into [4]f32 — xyz for position/scale, xyzw quat for rotation,
+// x (or the leading lanes) for property channels.
+//
+// A channel with a non-empty `component` is a PROPERTY channel (bound by
+// path + component type + property name): `component` is the
+// component's type guid, `field` a dotted path to a POD leaf on it
+// ("emission.rate.value_min"). The file stores untyped floats — the live
+// field's typeid at bind time is the single authority for how many lanes
+// apply, discrete vs continuous, and the write conversion (clip_property.odin).
+Animation_Channel :: struct {
+	target:    string, // name path relative to the playing owner ("" = owner)
+	path:      Animation_Path,
+	component: string, // component type guid, "" = transform channel
+	field:     string, // dotted field path on the component
+	step:      bool, // STEP interpolation: hold the previous key (else lerp/slerp)
+	times:     [dynamic]f32,
+	values:    [dynamic][4]f32,
+}
+
+// Whether the channel animates a component field instead of the transform.
+animation_channel_is_property :: proc(ch: ^Animation_Channel) -> bool {
+	return len(ch.component) > 0
+}
+
+// Authored timeline signal/event marker on an AnimationClip (e.g.
+// "spawn_flying_dagger", "set_limb_armor", "trigger_bone_pulse").
+// Fired when a playing clip's playhead crosses `time`.
+Animation_Event :: struct {
+	time:      f32,    // timestamp in seconds along the clip
+	name:      string, // signal/action identifier (e.g. "spawn_flying_dagger")
+	target:    string, // optional target limb/node/slot (e.g. "Right_Arm", "Right_Hand")
+	float_arg: f32,    // optional numeric payload (e.g. armor = 80.0, pulse_amp = 1.0)
+	int_arg:   i32,    // optional integer payload (e.g. drive_level = 3)
+}
+
+@(typ_guid={guid = "0a4f3b1c-8e57-4c2d-9b6a-5d1e7f2c8a90", menu_assets_create = {menu_name = "Animation", file_name = "New Animation.anim", order = -5}})
+AnimationClip :: struct {
+	length:   f32, // seconds; set from the last keyframe at import
+	// Baked from the .meta's Animation_Clip_Settings at import — authored
+	// there, never here. A source .anim carries only `length`, `channels`, and `events`.
+	//
+	// Frames per second the editor snaps keys and the playhead to. Authoring
+	// only — evaluation is continuous in seconds. 0 in a file predates the
+	// field, so readers go through animation_clip_frame_rate.
+	frame_rate: f32,
+	wrap:     Animation_Wrap,
+	cycle_offset: f32,
+	// Edited as a dopesheet in the Animation window, never as reflected rows —
+	// a clip has hundreds of channels each holding two parallel key arrays.
+	channels: [dynamic]Animation_Channel `inspect:"-"`,
+	// Timeline signal/event markers placed along the ruler in the Animation window.
+	events:   [dynamic]Animation_Event   `inspect:"-"`,
+}
+
+// The clip's authoring frame rate, defaulted for a clip saved before the
+// field existed (a zero would make every frame conversion divide by zero).
+ANIMATION_FRAME_RATE_DEFAULT :: f32(60)
+
+animation_clip_frame_rate :: proc(c: ^AnimationClip) -> f32 {
+	if c == nil || c.frame_rate <= 0 do return ANIMATION_FRAME_RATE_DEFAULT
+	return c.frame_rate
+}
+
+// `t` quantized to the clip's frame grid, so a key the editor places lands on
+// a frame boundary.
+animation_snap_to_frame :: proc(c: ^AnimationClip, t: f32) -> f32 {
+	fps := animation_clip_frame_rate(c)
+	if fps <= 0 do return t
+	return math.round(t * fps) / fps
+}
+
+// How far key `k` may move in time without passing a neighbour, which would
+// reorder the channel and corrupt it. A neighbour that is itself selected is
+// NOT a bound: it moves by the same delta, so a run of adjacent selected keys
+// slides as a block. `selected` is parallel to `times`.
+animation_key_bounds :: proc(times: []f32, selected: []bool, k: int, length: f32) -> (lo, hi: f32) {
+	lo, hi = 0, length
+	if k < 0 || k >= len(times) do return
+	for i := k - 1; i >= 0; i -= 1 {
+		if i < len(selected) && selected[i] do continue
+		lo = times[i]
+		break
+	}
+	for i := k + 1; i < len(times); i += 1 {
+		if i < len(selected) && selected[i] do continue
+		hi = times[i]
+		break
+	}
+	return
+}
+
+reset_AnimationClip :: proc(c: ^AnimationClip) {
+	cleanup_AnimationClip(c)
+	c.length = 1
+	c.frame_rate = ANIMATION_FRAME_RATE_DEFAULT
+}
+
+// --- Cache (mirrors material.odin) ------------------------------------------------
+
+animation_clip_cache: map[engine.Asset_GUID]AnimationClip
+_animation_clip_cache_ready: bool
+
+// ImportersInit is the asset-layer init phase both binaries run (the editor
+// via phase_editor_run, the app via app_init) — same slot the audio package
+// uses for its importer.
+@(phase={key=ImportersInit, order=2})
+animation_package_init :: proc() {
+	if !_animation_clip_cache_ready do animation_clip_cache_init()
+	engine.asset_db_add_path_changed_hook(animation_clip_path_changed)
+}
+
+animation_clip_cache_init :: proc() {
+	animation_clip_cache = make(map[engine.Asset_GUID]AnimationClip)
+	_animation_clip_cache_ready = true
+}
+
+animation_clip_cache_shutdown :: proc() {
+	for _, &clip in animation_clip_cache {
+		cleanup_AnimationClip(&clip)
+	}
+	delete(animation_clip_cache)
+	animation_clip_cache = nil
+	_animation_clip_cache_ready = false
+}
+
+// Clips hold no GPU resources — loads work headless in contexts that
+// initialized the cache.
+animation_clip_load :: proc(guid: engine.Asset_GUID) -> (^AnimationClip, bool) {
+	if clip, ok := &animation_clip_cache[guid]; ok {
+		return clip, true
+	}
+	if !_animation_clip_cache_ready do return nil, false
+
+	// A CACHE ENTRY OUTLIVES THE CALL, so it never borrows the caller's
+	// allocator. A clip first loaded under a temp allocator left the cache
+	// holding channels that the frame's free_all reclaimed, and every later
+	// load returned that dangling entry from the cache — the scrub preview
+	// then posed from freed memory and froze. The Playable Graph window builds
+	// the authored shape into temp memory, which is how it got reached.
+	// os.read_entire_file below asks for temp explicitly and is unaffected.
+	context.allocator = runtime.default_allocator()
+
+	// The ARTIFACT, not the source: the importer bakes the .meta's settings
+	// into it, so the runtime never opens a meta.
+	//
+	// A clip inside a model (engine.Mesh_Clip) has no artifact of its own:
+	// its bytes are the OWNER's _a<i>.bin fan-out, indexed by the clip's file
+	// order. Either way a missing artifact asks for an import, which is
+	// editor-only (asset_pipeline_request_import is nil in a game binary, so
+	// a missing artifact there is a load error).
+	path: string
+	path_ok: bool
+	if sub, is_sub := engine.asset_db_get_sub(guid); is_sub {
+		whole, wok := engine.asset_pipeline_artifact_path(sub.owner)
+		if !wok {
+			src, src_ok := engine.asset_db_get_path(uuid.Identifier(sub.owner))
+			if !src_ok do return nil, false
+			_ = engine.asset_pipeline_request_import(src, force = false)
+			whole, wok = engine.asset_pipeline_artifact_path(sub.owner)
+			if !wok do return nil, false
+		}
+		idx, iok := engine.mesh_clip_index(sub.owner, sub.id)
+		if !iok do return nil, false
+		path = engine.mesh_clip_artifact_path(whole, int(idx), context.temp_allocator)
+		path_ok = true
+	} else {
+		path, path_ok = engine.asset_pipeline_artifact_path(guid)
+		if !path_ok {
+			src, src_ok := engine.asset_db_get_path(uuid.Identifier(guid))
+			if !src_ok do return nil, false
+			_ = engine.asset_pipeline_request_import(src, force = false)
+			path, path_ok = engine.asset_pipeline_artifact_path(guid)
+			if !path_ok do return nil, false
+		}
+	}
+	data, read_err := os.read_entire_file(path, context.temp_allocator)
+	if read_err != nil do return nil, false
+
+	clip: AnimationClip
+	if json.unmarshal(data, &clip, .JSON, context.allocator) != nil {
+		cleanup_AnimationClip(&clip)
+		return nil, false
+	}
+	animation_clip_cache[guid] = clip
+	return &animation_clip_cache[guid], true
+}
+
+animation_clip_unload :: proc(guid: engine.Asset_GUID) {
+	if clip, ok := &animation_clip_cache[guid]; ok {
+		cleanup_AnimationClip(clip)
+		delete_key(&animation_clip_cache, guid)
+	}
+}
+
+// Replace the cached clip with a deep copy of `clip` — the editor's live
+// preview of unsaved asset-document edits (mirrors material_preview): the
+// scrub preview and any playing Animation component sample the edited values
+// immediately, while the file keeps the last saved state.
+animation_clip_preview :: proc(guid: engine.Asset_GUID, clip: AnimationClip) {
+	if !_animation_clip_cache_ready do return
+	// The deep copy below becomes a cache entry, so it owns its memory for the
+	// same reason animation_clip_load's does.
+	context.allocator = runtime.default_allocator()
+	// Settings are BAKED, so the edited document does not carry them: it holds
+	// length and channels, and wrap, frame rate and cycle offset came from the
+	// .meta at import. Keep the imported values rather than taking the
+	// document's zeros, or previewing an unsaved key edit would quietly turn a
+	// looping clip into a one-shot.
+	wrap, rate, offset := clip.wrap, clip.frame_rate, clip.cycle_offset
+	if old, ok := &animation_clip_cache[guid]; ok {
+		wrap, rate, offset = old.wrap, old.frame_rate, old.cycle_offset
+		cleanup_AnimationClip(old)
+	}
+	cp := AnimationClip{length = clip.length, wrap = wrap, frame_rate = rate, cycle_offset = offset}
+	cp.channels = make([dynamic]Animation_Channel, 0, len(clip.channels))
+	for &ch in clip.channels {
+		c := Animation_Channel{
+			target    = strings.clone(ch.target),
+			path      = ch.path,
+			component = strings.clone(ch.component),
+			field     = strings.clone(ch.field),
+			step      = ch.step,
+		}
+		c.times = make([dynamic]f32, len(ch.times))
+		copy(c.times[:], ch.times[:])
+		c.values = make([dynamic][4]f32, len(ch.values))
+		copy(c.values[:], ch.values[:])
+		append(&cp.channels, c)
+	}
+	if len(clip.events) > 0 {
+		cp.events = make([dynamic]Animation_Event, 0, len(clip.events))
+		for &ev in clip.events {
+			append(&cp.events, Animation_Event{
+				time      = ev.time,
+				name      = strings.clone(ev.name),
+				target    = strings.clone(ev.target),
+				float_arg = ev.float_arg,
+				int_arg   = ev.int_arg,
+			})
+		}
+	}
+	animation_clip_cache[guid] = cp
+}
+
+// Cache invalidation for external file changes, called from asset_db_refresh.
+animation_clip_path_changed :: proc(path: string) {
+	if !strings.has_suffix(path, ".anim") do return
+	if guid, ok := engine.asset_db_get_guid(path); ok {
+		animation_clip_unload(engine.Asset_GUID(guid))
+	}
+}
+
+// A reimported clip drops its cached copy, so the next load picks up the new
+// artifact — settings changed in the inspector apply without a restart.
+animation_clip_reimported :: proc(guid: engine.Asset_GUID) {
+	animation_clip_unload(guid)
+	// A reimported MODEL rebakes every clip it holds. Those are cached under
+	// their own guids, so the hook fires for the owner and the owned go too.
+	owned := make([dynamic]engine.Asset_GUID, context.temp_allocator)
+	for k in animation_clip_cache {
+		if sub, is_sub := engine.asset_db_get_sub(k); is_sub && sub.owner == guid do append(&owned, k)
+	}
+	for k in owned do animation_clip_unload(k)
+}
+
+// Frees what a clip owns and leaves it zeroed (docs/Components.md,
+// "Lifecycle procs").
+cleanup_AnimationClip :: proc(clip: ^AnimationClip) {
+	for &ch in clip.channels {
+		delete(ch.target)
+		delete(ch.component)
+		delete(ch.field)
+		delete(ch.times)
+		delete(ch.values)
+	}
+	delete(clip.channels)
+	for &ev in clip.events {
+		delete(ev.name)
+		delete(ev.target)
+	}
+	delete(clip.events)
+	clip^ = {}
+}
+
+// --- Sampling ---------------------------------------------------------------------
+
+// Write every channel's value at `time` into the owner's transform hierarchy
+// (and, for property channels, into the targeted component fields).
+// Channels whose target path doesn't resolve, or that hold no keys, are
+// skipped.
+animation_clip_apply :: proc(clip: ^AnimationClip, owner: engine.Transform_Handle, time: f32) {
+	w := engine.ctx_world()
+	for &ch in clip.channels {
+		// A channel with no keys has nothing to say: sampling it yields zeros,
+		// which would collapse a scale or snap a position to the origin. Same
+		// treatment as an unresolved target.
+		if len(ch.times) == 0 do continue
+		tH, ok := _animation_resolve_target(owner, ch.target)
+		if !ok do continue
+		v := _animation_channel_sample(&ch, time)
+		if animation_channel_is_property(&ch) {
+			ptr, kind, leaf_tid, pok := _prop_locate(tH, ch.component, ch.field)
+			if !pok do continue
+			_prop_write(ptr, kind, leaf_tid, v)
+			continue
+		}
+		t := engine.pool_get(&w.transforms, engine.Handle(tH))
+		if t == nil do continue
+		switch ch.path {
+		case .Position: t.position = v.xyz
+		case .Rotation: t.rotation = v
+		case .Scale:    t.scale = v.xyz
+		}
+	}
+}
+
+// Walk children by name along a "/"-separated path. Empty path = the owner.
+_animation_resolve_target :: proc(owner: engine.Transform_Handle, path: string) -> (engine.Transform_Handle, bool) {
+	w := engine.ctx_world()
+	cur := owner
+	if len(path) == 0 do return cur, engine.pool_valid(&w.transforms, engine.Handle(cur))
+	rest := path
+	for len(rest) > 0 {
+		name := rest
+		if slash := strings.index_byte(rest, '/'); slash >= 0 {
+			name = rest[:slash]
+			rest = rest[slash + 1:]
+		} else {
+			rest = ""
+		}
+		t := engine.pool_get(&w.transforms, engine.Handle(cur))
+		if t == nil do return {}, false
+		found := false
+		for child in t.children {
+			ct := engine.pool_get(&w.transforms, child.handle)
+			if ct != nil && ct.name == name {
+				cur = engine.Transform_Handle(child.handle)
+				found = true
+				break
+			}
+		}
+		if !found do return {}, false
+	}
+	return cur, true
+}
+
+// Value at `time`: clamped outside the key range, held (step) or
+// interpolated (lerp, slerp for rotations) between the bracketing keys.
+_animation_channel_sample :: proc(ch: ^Animation_Channel, time: f32) -> [4]f32 {
+	n := len(ch.times)
+	if n == 0 do return {}
+	if time <= ch.times[0] do return ch.values[0]
+	if time >= ch.times[n - 1] do return ch.values[n - 1]
+
+	// Binary search for the last key at or before `time`.
+	lo, hi := 0, n - 1
+	for lo + 1 < hi {
+		mid := (lo + hi) / 2
+		if ch.times[mid] <= time do lo = mid
+		else do hi = mid
+	}
+	if ch.step do return ch.values[lo]
+
+	span := ch.times[hi] - ch.times[lo]
+	k := span > 0 ? (time - ch.times[lo]) / span : 0
+	if ch.path == .Rotation {
+		a := engine.quat_to_native(ch.values[lo])
+		b := engine.quat_to_native(ch.values[hi])
+		return engine.quat_from_native(linalg.quaternion_slerp(a, b, k))
+	}
+	return linalg.lerp(ch.values[lo], ch.values[hi], k)
+}
+
+// Play position for a raw time per the wrap mode; done=true when a Once clip
+// ran past its length.
+animation_wrap_time :: proc(time, length: f32, wrap: Animation_Wrap) -> (t: f32, done: bool) {
+	if length <= 0 do return 0, wrap == .Once
+	switch wrap {
+	case .Loop:
+		return math.mod(time, length), false
+	case .Once:
+		if time >= length do return length, true
+		return time, false
+	}
+	return time, false
+}

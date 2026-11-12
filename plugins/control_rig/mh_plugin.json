@@ -1,0 +1,6 @@
+{
+  "name": "control_rig",
+  "guid": "81a21c0f-3252-4d1e-9e4b-325ef04d762f",
+  "description": "Procedural Animation & Control Rig Solvers (TwoBoneIK, LookAt, Gait Engine)",
+  "dependencies": ["physics3d", "cad_csg"]
+}

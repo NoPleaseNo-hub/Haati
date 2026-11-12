@@ -1,0 +1,1082 @@
+#+feature using-stmt
+package hot_scripts
+
+// =============================================================================
+// AUTO-TRANSPILED BY HAATI BLUEPRINT STUDIO (`hover_oscillator.bodin`)
+// =============================================================================
+// Flat Data-Oriented Odin struct + `@(hot_proc)` C-ABI machine code (0.00 ms VM tax!)
+
+@(require) import "core:math"
+@(require) import "core:math/linalg"
+import hot "moonhug:engine/hot_api"
+
+hover_oscillator_Blueprint_State :: struct {
+	amplitude: f32,
+	frequency: f32,
+	phase: f32,
+}
+
+_load_hover_oscillator_state :: #force_inline proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_Entity, frame: ^hot.Hot_Call_Frame) -> (st: hover_oscillator_Blueprint_State) {
+	if vp := hot.var_ptr(api, self, 0); vp != nil {
+		st.amplitude = (cast(^f32)vp)^
+	} else if frame != nil && frame.input_count > 0 {
+		st.amplitude = hot.slot_read_f32(&frame.inputs[0])
+	} else {
+		st.amplitude = f32(0.40000)
+	}
+	if vp := hot.var_ptr(api, self, 1); vp != nil {
+		st.frequency = (cast(^f32)vp)^
+	} else if frame != nil && frame.input_count > 1 {
+		st.frequency = hot.slot_read_f32(&frame.inputs[1])
+	} else {
+		st.frequency = f32(2.20000)
+	}
+	if vp := hot.var_ptr(api, self, 2); vp != nil {
+		st.phase = (cast(^f32)vp)^
+	} else if frame != nil && frame.input_count > 2 {
+		st.phase = hot.slot_read_f32(&frame.inputs[2])
+	} else {
+		st.phase = f32(0.00000)
+	}
+	_ = api; _ = self; _ = frame
+	return
+}
+
+_save_hover_oscillator_state :: #force_inline proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_Entity, frame: ^hot.Hot_Call_Frame, st: ^hover_oscillator_Blueprint_State) {
+	if vp := hot.var_ptr(api, self, 0); vp != nil { (cast(^f32)vp)^ = st.amplitude }
+	if vp := hot.var_ptr(api, self, 1); vp != nil { (cast(^f32)vp)^ = st.frequency }
+	if vp := hot.var_ptr(api, self, 2); vp != nil { (cast(^f32)vp)^ = st.phase }
+	if frame != nil && frame.input_count > 2 { if ap := hot.slot_ref_f32(&frame.inputs[2]); ap != nil { ap^ = st.phase } }
+	_ = api; _ = self; _ = frame; _ = st
+}
+
+// Scoped Odin Node #10: Harmonic Buoyancy (Odin)
+_node_hover_oscillator_10_body :: #force_inline proc "c" (
+	api: ^hot.Engine_Hot_API,
+	self: hot.Hot_Entity,
+	bp: ^hover_oscillator_Blueprint_State,
+	dt: f32,
+	amp: f32,
+	freq: f32,
+	phase: ^f32,
+	pos: ^[3]f32,
+) -> (wave_y: f32) {
+	// Mutate `pos^` by reference (`◆ ^Ref`) using `amp` & `phase^`!
+	phase^ += dt * freq * math.TAU
+	wave_y = math.sin(phase^) * amp
+	pos.y += wave_y * dt
+	_ = api; _ = self; _ = bp; _ = dt
+	_ = amp
+	_ = freq
+	_ = phase
+	_ = pos
+	return
+}
+
+@(hot_proc)
+_mhnode_hover_oscillator_10 :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_Entity, dt: f32, frame: ^hot.Hot_Call_Frame) {
+	if frame == nil do return
+	_bp := _load_hover_oscillator_state(api, self, frame)
+	defer _save_hover_oscillator_state(api, self, frame, &_bp)
+	_r0 := _node_hover_oscillator_10_body(api, self, &_bp, dt, hot.slot_read_f32(&frame.inputs[0]), hot.slot_read_f32(&frame.inputs[1]), hot.slot_ref_f32(&frame.inputs[2]), hot.slot_ref_vec3(&frame.inputs[3]))
+	frame.outputs[0] = {pin_type = .Float, val_f32 = _r0}
+	frame.output_count = 1
+}
+
+@(hot_proc)
+mhgraph_hover_oscillator__proc_On_Jump_Boost :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_Entity, raw_dt: f32, frame: ^hot.Hot_Call_Frame) {
+	dt := api != nil && api.get_object_dt != nil ? api.get_object_dt(self, raw_dt) : raw_dt
+	_dummy_pos := [3]f32{}
+	_dummy_f32 := f32(0)
+	_pos_ptr := hot.pos_ref(api, self)
+	if _pos_ptr == nil do _pos_ptr = &_dummy_pos
+	_payload_f32 := frame != nil && frame.input_count > 0 ? hot.slot_read_f32(&frame.inputs[0]) : f32(0)
+	_payload_v2  := frame != nil && frame.input_count > 1 ? hot.slot_read_vec2(&frame.inputs[1]) : [2]f32{}
+	_pressed     := frame != nil && frame.input_count > 2 ? hot.slot_read_bool(&frame.inputs[2]) : true
+	_bp := _load_hover_oscillator_state(api, self, frame)
+	defer _save_hover_oscillator_state(api, self, frame, &_bp)
+
+	hot.set_pos(api, self, [3]f32{0.0000, 2.0000, 0.0000})
+	_ = _payload_f32; _ = _payload_v2; _ = _pressed
+	_ = raw_dt; _ = dt; _ = _pos_ptr; _ = _dummy_f32; _ = frame; _ = _bp
+}
+
+@(hot_proc)
+mhgraph_hover_oscillator__on_init :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_Entity, raw_dt: f32, frame: ^hot.Hot_Call_Frame) {
+	dt := api != nil && api.get_object_dt != nil ? api.get_object_dt(self, raw_dt) : raw_dt
+	_dummy_pos := [3]f32{}
+	_dummy_f32 := f32(0)
+	_pos_ptr := hot.pos_ref(api, self)
+	if _pos_ptr == nil do _pos_ptr = &_dummy_pos
+	_bp := _load_hover_oscillator_state(api, self, frame)
+	defer _save_hover_oscillator_state(api, self, frame, &_bp)
+
+	hot.bind_action(api, self, "Jump", "mhgraph_hover_oscillator__proc_On_Jump_Boost", .Pressed, 10, false)
+	_ = raw_dt; _ = dt; _ = _pos_ptr; _ = _dummy_f32; _ = frame; _ = _bp
+}
+
+@(hot_proc)
+mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_Entity, raw_dt: f32, frame: ^hot.Hot_Call_Frame) {
+	dt := api != nil && api.get_object_dt != nil ? api.get_object_dt(self, raw_dt) : raw_dt
+	_dummy_pos := [3]f32{}
+	_dummy_f32 := f32(0)
+	_pos_ptr := hot.pos_ref(api, self)
+	if _pos_ptr == nil do _pos_ptr = &_dummy_pos
+	_bp := _load_hover_oscillator_state(api, self, frame)
+	defer _save_hover_oscillator_state(api, self, frame, &_bp)
+
+	_out_10_1 := _node_hover_oscillator_10_body(api, self, &_bp, dt, _bp.amplitude, _bp.frequency, &_bp.phase, _pos_ptr)
+	_ = _out_10_1
+	_ = raw_dt; _ = dt; _ = _pos_ptr; _ = _dummy_f32; _ = frame; _ = _bp
+}
+
+// @BODIN_GRAPH_V1
+// {
+//   "name": "hover_oscillator",
+//   "package_target": "moonhug/hot_scripts",
+//   "next_uid": 10,
+//   "using_spaces": [
+//     "self",
+//     "hot",
+//     "math",
+//     "linalg"
+//   ],
+//   "delegates": [
+//     "On_Boost_Pulse"
+//   ],
+//   "variables": [
+//     {
+//       "name": "amplitude",
+//       "pin_type": 3,
+//       "default_f32": 0.40000001,
+//       "default_int": 0,
+//       "default_bool": false,
+//       "default_vec2": [
+//         0.00000000,
+//         0.00000000
+//       ],
+//       "default_vec3": [
+//         0.00000000,
+//         0.00000000,
+//         0.00000000
+//       ],
+//       "instance_editable": true,
+//       "category": "Motion",
+//       "tooltip_text": "Oscillation vertical amplitude in meters",
+//       "slider_min": 0.00000000,
+//       "slider_max": 5.00000000
+//     },
+//     {
+//       "name": "frequency",
+//       "pin_type": 3,
+//       "default_f32": 2.20000005,
+//       "default_int": 0,
+//       "default_bool": false,
+//       "default_vec2": [
+//         0.00000000,
+//         0.00000000
+//       ],
+//       "default_vec3": [
+//         0.00000000,
+//         0.00000000,
+//         0.00000000
+//       ],
+//       "instance_editable": true,
+//       "category": "Motion",
+//       "tooltip_text": "Oscillation frequency in Hz",
+//       "slider_min": 0.10000000,
+//       "slider_max": 12.00000000
+//     },
+//     {
+//       "name": "phase",
+//       "pin_type": 3,
+//       "default_f32": 0.00000000,
+//       "default_int": 0,
+//       "default_bool": false,
+//       "default_vec2": [
+//         0.00000000,
+//         0.00000000
+//       ],
+//       "default_vec3": [
+//         0.00000000,
+//         0.00000000,
+//         0.00000000
+//       ],
+//       "instance_editable": false,
+//       "category": "Runtime",
+//       "tooltip_text": "",
+//       "slider_min": 0.00000000,
+//       "slider_max": 0.00000000
+//     }
+//   ],
+//   "nodes": [
+//     {
+//       "uid": 1,
+//       "kind": 11,
+//       "title": "Event: On Init (BeginPlay)",
+//       "pos": [
+//         40.00000000,
+//         -150.00000000
+//       ],
+//       "enabled": true,
+//       "var_name": "",
+//       "var_as_ref": false,
+//       "math_op": 0,
+//       "per_object_ts": false,
+//       "hot_proc_target": "",
+//       "odin_body": "",
+//       "action_name": "",
+//       "trigger_edge": 0,
+//       "input_priority": 10,
+//       "consume_input": false,
+//       "is_look_vector": false,
+//       "debug_key_code": 10,
+//       "delegate_name": "",
+//       "inputs": [
+// 
+//       ],
+//       "outputs": [
+//         {
+//           "name": "Exec",
+//           "pin_type": 0,
+//           "pass_mode": 0,
+//           "is_addressable": false,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         }
+//       ]
+//     },
+//     {
+//       "uid": 2,
+//       "kind": 13,
+//       "title": "On_Jump_Boost",
+//       "pos": [
+//         40.00000000,
+//         -30.00000000
+//       ],
+//       "enabled": true,
+//       "var_name": "",
+//       "var_as_ref": false,
+//       "math_op": 0,
+//       "per_object_ts": false,
+//       "hot_proc_target": "On_Jump_Boost",
+//       "odin_body": "",
+//       "action_name": "",
+//       "trigger_edge": 0,
+//       "input_priority": 10,
+//       "consume_input": false,
+//       "is_look_vector": false,
+//       "debug_key_code": 10,
+//       "delegate_name": "",
+//       "inputs": [
+// 
+//       ],
+//       "outputs": [
+//         {
+//           "name": "\u25c7 Delegate",
+//           "pin_type": 7,
+//           "pass_mode": 0,
+//           "is_addressable": false,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         },
+//         {
+//           "name": "Exec",
+//           "pin_type": 0,
+//           "pass_mode": 0,
+//           "is_addressable": false,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         },
+//         {
+//           "name": "Payload",
+//           "pin_type": 3,
+//           "pass_mode": 0,
+//           "is_addressable": false,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         },
+//         {
+//           "name": "Input Vec2",
+//           "pin_type": 8,
+//           "pass_mode": 0,
+//           "is_addressable": false,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         },
+//         {
+//           "name": "Pressed",
+//           "pin_type": 1,
+//           "pass_mode": 0,
+//           "is_addressable": false,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         }
+//       ]
+//     },
+//     {
+//       "uid": 3,
+//       "kind": 15,
+//       "title": "Bind Input: Jump",
+//       "pos": [
+//         420.00000000,
+//         -150.00000000
+//       ],
+//       "enabled": true,
+//       "var_name": "",
+//       "var_as_ref": false,
+//       "math_op": 0,
+//       "per_object_ts": false,
+//       "hot_proc_target": "",
+//       "odin_body": "",
+//       "action_name": "Jump",
+//       "trigger_edge": 0,
+//       "input_priority": 10,
+//       "consume_input": false,
+//       "is_look_vector": false,
+//       "debug_key_code": 10,
+//       "delegate_name": "",
+//       "inputs": [
+//         {
+//           "name": "Exec",
+//           "pin_type": 0,
+//           "pass_mode": 0,
+//           "is_addressable": false,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         },
+//         {
+//           "name": "\u25c7 Target Proc",
+//           "pin_type": 7,
+//           "pass_mode": 0,
+//           "is_addressable": false,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         }
+//       ],
+//       "outputs": [
+//         {
+//           "name": "Exec",
+//           "pin_type": 0,
+//           "pass_mode": 0,
+//           "is_addressable": false,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         }
+//       ]
+//     },
+//     {
+//       "uid": 4,
+//       "kind": 4,
+//       "title": "Set Transform Position",
+//       "pos": [
+//         780.00000000,
+//         -30.00000000
+//       ],
+//       "enabled": true,
+//       "var_name": "",
+//       "var_as_ref": false,
+//       "math_op": 0,
+//       "per_object_ts": false,
+//       "hot_proc_target": "",
+//       "odin_body": "",
+//       "action_name": "",
+//       "trigger_edge": 0,
+//       "input_priority": 10,
+//       "consume_input": false,
+//       "is_look_vector": false,
+//       "debug_key_code": 10,
+//       "delegate_name": "",
+//       "inputs": [
+//         {
+//           "name": "Exec",
+//           "pin_type": 0,
+//           "pass_mode": 0,
+//           "is_addressable": false,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         },
+//         {
+//           "name": "New Pos",
+//           "pin_type": 4,
+//           "pass_mode": 0,
+//           "is_addressable": false,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             2.00000000,
+//             0.00000000
+//           ]
+//         }
+//       ],
+//       "outputs": [
+//         {
+//           "name": "Exec",
+//           "pin_type": 0,
+//           "pass_mode": 0,
+//           "is_addressable": false,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         }
+//       ]
+//     },
+//     {
+//       "uid": 5,
+//       "kind": 0,
+//       "title": "Event: On Tick",
+//       "pos": [
+//         40.00000000,
+//         160.00000000
+//       ],
+//       "enabled": true,
+//       "var_name": "",
+//       "var_as_ref": false,
+//       "math_op": 0,
+//       "per_object_ts": false,
+//       "hot_proc_target": "",
+//       "odin_body": "",
+//       "action_name": "",
+//       "trigger_edge": 0,
+//       "input_priority": 10,
+//       "consume_input": false,
+//       "is_look_vector": false,
+//       "debug_key_code": 10,
+//       "delegate_name": "",
+//       "inputs": [
+// 
+//       ],
+//       "outputs": [
+//         {
+//           "name": "Exec",
+//           "pin_type": 0,
+//           "pass_mode": 0,
+//           "is_addressable": false,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         },
+//         {
+//           "name": "dt",
+//           "pin_type": 3,
+//           "pass_mode": 0,
+//           "is_addressable": false,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         },
+//         {
+//           "name": "Object dt",
+//           "pin_type": 3,
+//           "pass_mode": 0,
+//           "is_addressable": false,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         }
+//       ]
+//     },
+//     {
+//       "uid": 6,
+//       "kind": 1,
+//       "title": "Get amplitude",
+//       "pos": [
+//         40.00000000,
+//         310.00000000
+//       ],
+//       "enabled": true,
+//       "var_name": "amplitude",
+//       "var_as_ref": false,
+//       "math_op": 0,
+//       "per_object_ts": false,
+//       "hot_proc_target": "",
+//       "odin_body": "",
+//       "action_name": "",
+//       "trigger_edge": 0,
+//       "input_priority": 10,
+//       "consume_input": false,
+//       "is_look_vector": false,
+//       "debug_key_code": 10,
+//       "delegate_name": "",
+//       "inputs": [
+// 
+//       ],
+//       "outputs": [
+//         {
+//           "name": "Value (Copy)",
+//           "pin_type": 3,
+//           "pass_mode": 0,
+//           "is_addressable": false,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         },
+//         {
+//           "name": "Ref (^Ptr)",
+//           "pin_type": 3,
+//           "pass_mode": 1,
+//           "is_addressable": true,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         }
+//       ]
+//     },
+//     {
+//       "uid": 7,
+//       "kind": 1,
+//       "title": "Get frequency",
+//       "pos": [
+//         40.00000000,
+//         430.00000000
+//       ],
+//       "enabled": true,
+//       "var_name": "frequency",
+//       "var_as_ref": false,
+//       "math_op": 0,
+//       "per_object_ts": false,
+//       "hot_proc_target": "",
+//       "odin_body": "",
+//       "action_name": "",
+//       "trigger_edge": 0,
+//       "input_priority": 10,
+//       "consume_input": false,
+//       "is_look_vector": false,
+//       "debug_key_code": 10,
+//       "delegate_name": "",
+//       "inputs": [
+// 
+//       ],
+//       "outputs": [
+//         {
+//           "name": "Value (Copy)",
+//           "pin_type": 3,
+//           "pass_mode": 0,
+//           "is_addressable": false,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         },
+//         {
+//           "name": "Ref (^Ptr)",
+//           "pin_type": 3,
+//           "pass_mode": 1,
+//           "is_addressable": true,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         }
+//       ]
+//     },
+//     {
+//       "uid": 8,
+//       "kind": 1,
+//       "title": "Get phase",
+//       "pos": [
+//         40.00000000,
+//         550.00000000
+//       ],
+//       "enabled": true,
+//       "var_name": "phase",
+//       "var_as_ref": false,
+//       "math_op": 0,
+//       "per_object_ts": false,
+//       "hot_proc_target": "",
+//       "odin_body": "",
+//       "action_name": "",
+//       "trigger_edge": 0,
+//       "input_priority": 10,
+//       "consume_input": false,
+//       "is_look_vector": false,
+//       "debug_key_code": 10,
+//       "delegate_name": "",
+//       "inputs": [
+// 
+//       ],
+//       "outputs": [
+//         {
+//           "name": "Value (Copy)",
+//           "pin_type": 3,
+//           "pass_mode": 0,
+//           "is_addressable": false,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         },
+//         {
+//           "name": "Ref (^Ptr)",
+//           "pin_type": 3,
+//           "pass_mode": 1,
+//           "is_addressable": true,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         }
+//       ]
+//     },
+//     {
+//       "uid": 9,
+//       "kind": 3,
+//       "title": "Transform Position",
+//       "pos": [
+//         40.00000000,
+//         680.00000000
+//       ],
+//       "enabled": true,
+//       "var_name": "",
+//       "var_as_ref": false,
+//       "math_op": 0,
+//       "per_object_ts": false,
+//       "hot_proc_target": "",
+//       "odin_body": "",
+//       "action_name": "",
+//       "trigger_edge": 0,
+//       "input_priority": 10,
+//       "consume_input": false,
+//       "is_look_vector": false,
+//       "debug_key_code": 10,
+//       "delegate_name": "",
+//       "inputs": [
+// 
+//       ],
+//       "outputs": [
+//         {
+//           "name": "Pos (Copy)",
+//           "pin_type": 4,
+//           "pass_mode": 0,
+//           "is_addressable": false,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         },
+//         {
+//           "name": "Pos Ref (^Vec3)",
+//           "pin_type": 4,
+//           "pass_mode": 1,
+//           "is_addressable": true,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         }
+//       ]
+//     },
+//     {
+//       "uid": 10,
+//       "kind": 10,
+//       "title": "Harmonic Buoyancy (Odin)",
+//       "pos": [
+//         420.00000000,
+//         220.00000000
+//       ],
+//       "enabled": true,
+//       "var_name": "",
+//       "var_as_ref": false,
+//       "math_op": 0,
+//       "per_object_ts": false,
+//       "hot_proc_target": "_mhnode_10",
+//       "odin_body": "// Mutate `pos^` by reference (`\u25c6 ^Ref`) using `amp` & `phase^`!\nphase^ += dt * freq * math.TAU\nwave_y = math.sin(phase^) * amp\npos.y += wave_y * dt\n",
+//       "action_name": "",
+//       "trigger_edge": 0,
+//       "input_priority": 10,
+//       "consume_input": false,
+//       "is_look_vector": false,
+//       "debug_key_code": 10,
+//       "delegate_name": "",
+//       "inputs": [
+//         {
+//           "name": "Exec",
+//           "pin_type": 0,
+//           "pass_mode": 0,
+//           "is_addressable": false,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         },
+//         {
+//           "name": "amp",
+//           "pin_type": 3,
+//           "pass_mode": 0,
+//           "is_addressable": false,
+//           "default_f32": 0.34999999,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         },
+//         {
+//           "name": "freq",
+//           "pin_type": 3,
+//           "pass_mode": 0,
+//           "is_addressable": false,
+//           "default_f32": 2.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         },
+//         {
+//           "name": "phase",
+//           "pin_type": 3,
+//           "pass_mode": 1,
+//           "is_addressable": false,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         },
+//         {
+//           "name": "pos",
+//           "pin_type": 4,
+//           "pass_mode": 1,
+//           "is_addressable": false,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         }
+//       ],
+//       "outputs": [
+//         {
+//           "name": "Exec",
+//           "pin_type": 0,
+//           "pass_mode": 0,
+//           "is_addressable": false,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         },
+//         {
+//           "name": "wave_y",
+//           "pin_type": 3,
+//           "pass_mode": 0,
+//           "is_addressable": false,
+//           "default_f32": 0.00000000,
+//           "default_int": 0,
+//           "default_bool": false,
+//           "default_vec2": [
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_vec3": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ]
+//         }
+//       ]
+//     }
+//   ],
+//   "wires": [
+//     {
+//       "from_uid": 1,
+//       "from_pin": 0,
+//       "to_uid": 3,
+//       "to_pin": 0
+//     },
+//     {
+//       "from_uid": 2,
+//       "from_pin": 0,
+//       "to_uid": 3,
+//       "to_pin": 1
+//     },
+//     {
+//       "from_uid": 2,
+//       "from_pin": 1,
+//       "to_uid": 4,
+//       "to_pin": 0
+//     },
+//     {
+//       "from_uid": 5,
+//       "from_pin": 0,
+//       "to_uid": 10,
+//       "to_pin": 0
+//     },
+//     {
+//       "from_uid": 6,
+//       "from_pin": 0,
+//       "to_uid": 10,
+//       "to_pin": 1
+//     },
+//     {
+//       "from_uid": 7,
+//       "from_pin": 0,
+//       "to_uid": 10,
+//       "to_pin": 2
+//     },
+//     {
+//       "from_uid": 8,
+//       "from_pin": 1,
+//       "to_uid": 10,
+//       "to_pin": 3
+//     },
+//     {
+//       "from_uid": 9,
+//       "from_pin": 1,
+//       "to_uid": 10,
+//       "to_pin": 4
+//     }
+//   ]
+// }
+// @BODIN_GRAPH_END

@@ -1,0 +1,12 @@
+{
+  "default_gait_speed": 1.79999995,
+  "default_stride": 0.44999999,
+  "default_step_height": 0.12,
+  "default_gait_freq": 2.4000001,
+  "default_pelvis_bounce": 0.035,
+  "default_pelvis_sway": 0.03,
+  "default_arm_swing": 0.25,
+  "default_breath_speed": 1.5,
+  "default_breath_amount": 0.015,
+  "enable_procedural_ik": true
+}

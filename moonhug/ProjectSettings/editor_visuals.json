@@ -1,0 +1,13 @@
+{
+  "enable_ctrl_scroll_zoom": true,
+  "enable_folder_colors": true,
+  "outline_color": [
+    2.29999995,
+    4.0,
+    0.1,
+    1.0
+  ],
+  "outline_scale": 1.0,
+  "outline_thickness": 2.0,
+  "outline_cross_size": 0.80000001
+}

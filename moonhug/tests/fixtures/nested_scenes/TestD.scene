@@ -1,0 +1,76 @@
+{
+  "root": 1,
+  "next_local_id": 3,
+  "transforms": [
+    {
+      "local_id": 1,
+      "name": "RootD",
+      "is_active": true,
+      "position": [
+        4.0,
+        4.0,
+        4.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "render_layer": 1,
+      "parent": {
+        "pptr": {
+          "local_id": 0,
+          "guid": "00000000-0000-0000-0000-000000000000"
+        }
+      },
+      "children": [
+        {
+          "pptr": {
+            "local_id": 2,
+            "guid": "00000000-0000-0000-0000-000000000000"
+          }
+        }
+      ],
+      "components": []
+    },
+    {
+      "local_id": 2,
+      "name": "TransformD",
+      "is_active": true,
+      "position": [
+        100.0,
+        200.0,
+        300.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "render_layer": 1,
+      "parent": {
+        "pptr": {
+          "local_id": 1,
+          "guid": "00000000-0000-0000-0000-000000000000"
+        }
+      },
+      "children": [],
+      "components": []
+    }
+  ],
+  "nested_scenes": [],
+  "breadcrumbs": [],
+  "components": []
+}

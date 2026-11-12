@@ -1,0 +1,19 @@
+{
+  "async_multithreaded_solver": true,
+  "worker_threads": 0,
+  "fixed_framerate_hz": 60.0,
+  "fixed_update_interval_ms": 16.66666603,
+  "gravity": [
+    0.0,
+    -9.81000042,
+    0.0
+  ],
+  "collision_steps": 1,
+  "max_bodies": 10240,
+  "max_body_pairs": 65536,
+  "max_contact_constraints": 10240,
+  "contact_tolerance": 0.02,
+  "default_linear_damping": 0.05,
+  "default_angular_damping": 0.05,
+  "enable_continuous_cd": true
+}

@@ -1,0 +1,48 @@
+{
+  "bone_solid_shape": 1,
+  "bone_thickness": 1.21588361,
+  "bone_line_thickness": 10.0,
+  "joint_radius": 0.0247175,
+  "bone_pick_radius": 0.05,
+  "show_bone_labels": true,
+  "bone_label_scale": 2.00172424,
+  "draw_diamond_bones": true,
+  "draw_solid_bones": true,
+  "solid_bone_alpha": 0.68128592,
+  "bone_color_default": [
+    0.74966711,
+    0.7908985,
+    1.0,
+    1.0
+  ],
+  "bone_color_selected": [
+    1.0,
+    0.85000002,
+    1.39999998,
+    1.0
+  ],
+  "bone_color_ambient": [
+    0.0,
+    0.63952374,
+    0.97070575,
+    1.0
+  ],
+  "bone_joint_color": [
+    0.99201065,
+    0.79334855,
+    0.00396279,
+    1.0
+  ],
+  "bone_label_color": [
+    0.89999998,
+    0.89999998,
+    0.94999999,
+    1.0
+  ],
+  "bone_label_color_selected": [
+    1.0,
+    0.88,
+    0.25,
+    1.0
+  ]
+}

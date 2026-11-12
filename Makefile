@@ -1,0 +1,30 @@
+# Shortcuts for tools/mh. This file FORWARDS ONLY — every build decision lives
+# in tools/mh, so there is one definition of how this repo builds and nothing
+# here can drift from it.
+#
+# make is optional. Without it, run the same commands directly:
+#
+#   odin run tools/mh -- <command>
+#
+# make test NAME=pkg.test_name runs a single test. make deps NAME=<plugin>
+# gathers one plugin's dependencies.
+
+MH := odin run tools/mh --
+
+.PHONY: help setup run debug build check hot app test prebuild deps shaders mcp clean distclean
+
+help:      ; @$(MH) help
+setup:     ; @$(MH) setup
+run:       ; @$(MH) run
+debug:     ; @$(MH) debug
+build:     ; @$(MH) build
+check:     ; @$(MH) check
+hot:       ; @$(MH) hot
+app:       ; @$(MH) app
+prebuild:  ; @$(MH) prebuild
+deps:      ; @$(MH) deps $(NAME)
+shaders:   ; @$(MH) shaders
+mcp:       ; @$(MH) mcp
+clean:     ; @$(MH) clean
+distclean: ; @$(MH) clean --all
+test:      ; @$(MH) test $(if $(NAME),--name=$(NAME),)

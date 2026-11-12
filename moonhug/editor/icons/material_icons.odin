@@ -1,0 +1,165 @@
+package icons
+
+// Material Symbols Outlined icon codepoints, as UTF-8 string literals for use in
+// imgui text/labels (e.g. `im.Button(ICON_MD_FOLDER + " Assets")`).
+//
+// imgui does NOT do ligatures, so icons are addressed by their raw Private Use
+// Area codepoint (\uXXXX), NOT their ligature name. Values are generated from
+// external/fonts/material/MaterialSymbolsOutlined.codepoints; add more entries
+// from that file as needed. Font license: Apache-2.0 (see external/fonts/material).
+//
+// The merge range loaded by editor_fonts_init covers the PUA block these live
+// in, so any codepoint from the map works once added here.
+
+ICON_MD_MIN :: 0xe000   // Material Symbols PUA range (inclusive)
+ICON_MD_MAX :: 0xf8ff
+
+
+// Project / assets
+ICON_MD_FOLDER      :: "\ue2c7"   // folder
+ICON_MD_FOLDER_OPEN :: "\ue2c8"   // folder_open
+ICON_MD_FOLDER_LINK :: "\ue157"   // link: a symlinked folder (plugin links in packages/)
+ICON_MD_DESCRIPTION :: "\ue873"   // description
+ICON_MD_IMAGE       :: "\ue3f4"   // image
+ICON_MD_MOVIE       :: "\ue684"   // movie
+ICON_MD_MUSIC_NOTE  :: "\ue405"   // music_note
+
+// Scene / hierarchy
+ICON_MD_LAYERS         :: "\ue53b"   // layers
+ICON_MD_STAT_0         :: "\ue697"   // stat_0 (plain object row in hierarchy)
+ICON_MD_STACKS         :: "\uf720"   // stacks (scene/prefab)
+ICON_MD_STACKS_VARIANT :: "\uf569"   // scene variant (AssetDB root_info.is_variant)
+ICON_MD_WIDGETS        :: "\ue1bd"   // widgets
+ICON_MD_DEPLOYED_CODE  :: "\uf720"   // deployed_code
+ICON_MD_VISIBILITY     :: "\ue8f4"   // visibility
+ICON_MD_VISIBILITY_OFF :: "\ue8f5"   // visibility_off
+
+// Disclosure / navigation / arrows
+ICON_MD_CHEVRON_RIGHT   :: "\ue5cc"   // chevron_right
+ICON_MD_CHEVRON_LEFT    :: "\ue5cb"   // chevron_left
+ICON_MD_EXPAND_MORE     :: "\ue5cf"   // expand_more (chevron down)
+ICON_MD_EXPAND_LESS     :: "\ue5ce"   // expand_less (chevron up)
+ICON_MD_ARROW_RIGHT     :: "\ue5df"   // arrow_right
+ICON_MD_ARROW_LEFT      :: "\ue5de"   // arrow_left
+ICON_MD_ARROW_DROP_DOWN :: "\ue5c5"   // arrow_drop_down (filled triangle down ▾)
+ICON_MD_ARROW_DROP_UP   :: "\ue5c7"   // arrow_drop_up (filled triangle up ▴)
+
+// CAD / Drafting / Geometry / Level Blocking
+ICON_MD_ARCHITECTURE    :: "\uea3b"   // architecture (compass / drafting tool)
+ICON_MD_STRAIGHTEN      :: "\ue41c"   // straighten (ruler / measure)
+ICON_MD_POLYLINE        :: "\uebbb"   // polyline (vector / CAD path)
+ICON_MD_PENTAGON        :: "\ueb50"   // pentagon (polygon shape)
+ICON_MD_HEXAGON         :: "\ueb39"   // hexagon (prism / mesh primitive)
+ICON_MD_CATEGORY        :: "\ue72c"   // category (shapes / primitives)
+ICON_MD_VIEW_IN_AR      :: "\uefc9"   // view_in_ar (3D cube / volume)
+ICON_MD_3D_ROTATION     :: "\ue84d"   // 3d_rotation
+ICON_MD_GRID_4X4        :: "\uf016"   // grid_4x4 (precision CAD grid)
+ICON_MD_JOIN_FULL       :: "\uf84f"   // join_full (CSG union)
+ICON_MD_JOIN_INNER      :: "\ueaf4"   // join_inner (CSG intersect)
+ICON_MD_DIFFERENCE      :: "\ueb7d"   // difference (CSG subtract)
+ICON_MD_DRAW            :: "\ue746"   // draw (sketch / profile)
+ICON_MD_PAN_TOOL        :: "\ue925"   // pan_tool (hand / pan)
+ICON_MD_BACK_HAND       :: "\ue764"   // back_hand (hand pose)
+ICON_MD_VIDEOCAM        :: "\ue04b"   // videocam (camera)
+ICON_MD_CAMERASWITCH    :: "\uefeb"   // cameraswitch (view switch)
+ICON_MD_ADS_CLICK       :: "\ue762"   // ads_click (target / snap point)
+ICON_MD_DESELECT        :: "\uebb6"   // deselect
+
+// Log levels (console) & Help / Manual
+ICON_MD_INFO          :: "\uf52b"   // info
+ICON_MD_WARNING       :: "\uf083"   // warning
+ICON_MD_ERROR         :: "\uf8b6"   // error
+ICON_MD_HELP          :: "\ue8fd"   // help ('?' circle for toolbar & manual)
+ICON_MD_MENU_BOOK     :: "\uea19"   // menu_book (in-engine user manual)
+
+// Actions
+ICON_MD_CLOSE         :: "\ue5cd"   // close (clear search)
+ICON_MD_OPEN_IN_NEW   :: "\ue89e"   // open_in_new (pop out as floating external window)
+ICON_MD_DOCK          :: "\uf2e0"   // dock (re-dock floating window)
+ICON_MD_FOLDER_CHECK  :: "\uf3d7"   // folder_check (sample installed by copy)
+ICON_MD_LINK          :: "\ue250"   // link (sample installed by symlink)
+ICON_MD_SEARCH        :: "\uef7a"   // search (object picker button; also in inspector package)
+ICON_MD_PLAY_ARROW    :: "\ue037"   // play_arrow (Simulate resume)
+ICON_MD_PLAY_CIRCLE   :: "\ue1c4"   // play_circle (toolbar Simulate button)
+ICON_MD_PAUSE         :: "\ue034"   // pause (Simulate pause)
+ICON_MD_STOP          :: "\ue047"   // stop (Simulate stop)
+ICON_MD_SKIP_NEXT     :: "\ue044"   // skip_next (Simulate step one frame)
+ICON_MD_FIRST_PAGE    :: "\ue5dc"   // first_page (jump to the start of a clip)
+ICON_MD_LAST_PAGE     :: "\ue5dd"   // last_page (jump to the end of a clip)
+ICON_MD_PREV_KEY      :: "\ueac3"   // keyboard_double_arrow_left (previous keyframe)
+ICON_MD_NEXT_KEY      :: "\ueac9"   // keyboard_double_arrow_right (next keyframe)
+ICON_MD_RECORD        :: "\ue061"   // fiber_manual_record (arm keyframe recording)
+ICON_MD_KEYFRAME      :: "\uf51a"   // a keyframe
+ICON_MD_VOLUME_UP     :: "\ue050"   // volume_up (sequencer track audible)
+ICON_MD_VOLUME_OFF    :: "\ue04f"   // volume_off (sequencer track muted)
+ICON_MD_RUN_CONFIG    :: "\ue869"   // run/build config (toolbar Play button)
+ICON_MD_CONSTRUCTION  :: "\uea3c"   // construction (toolbar Build & Run with current scene)
+ICON_MD_SAVE          :: "\ue161"   // save
+ICON_MD_ADD           :: "\ue145"   // add
+ICON_MD_DELETE        :: "\ue92e"   // delete
+ICON_MD_CHECK         :: "\ue668"   // check
+ICON_MD_EDIT          :: "\uf097"   // edit
+ICON_MD_CONTENT_COPY  :: "\ue14d"   // content_copy
+ICON_MD_CONTENT_PASTE :: "\ue14f"   // content_paste
+ICON_MD_MORE_HORIZ    :: "\ue5d3"   // more_horiz
+ICON_MD_MENU          :: "\ue5d4"   // menu ("..." dropdown / overflow menu)
+ICON_MD_LOCK          :: "\ue897"   // lock (inspector pinned to its target)
+ICON_MD_LOCK_OPEN     :: "\ue898"   // lock_open (inspector follows the selection)
+ICON_MD_SETTINGS      :: "\ue8b8"   // settings
+ICON_MD_PALETTE       :: "\ue40a"   // palette (.mat material asset)
+ICON_MD_CODE          :: "\ue86f"   // code (.glsl shader asset)
+ICON_MD_REFRESH       :: "\ue5d5"   // refresh
+ICON_MD_ACCOUNT_TREE  :: "\ue97a"   // account_tree (node graph; also in app_editor's tween view)
+
+// Scene view overlays (dock.odin)
+ICON_MD_DRAG_INDICATOR :: "\ue945"   // drag_indicator (overlay grip handle, vertical dots)
+ICON_MD_DRAG_HANDLE    :: "\ue25d"   // drag_handle (overlay grip handle, horizontal bars)
+ICON_MD_OPEN_WITH      :: "\ue89f"   // open_with (move tool)
+ICON_MD_ROTATE_RIGHT   :: "\ue41a"   // rotate_right (rotate tool)
+ICON_MD_OPEN_IN_FULL   :: "\uf1ce"   // open_in_full (scale tool)
+ICON_MD_ARROW_SELECTOR :: "\uf82f"   // arrow_selector_tool (picker tool)
+ICON_MD_PUBLIC         :: "\ue80b"   // public/globe (global gizmo space)
+ICON_MD_GRID_ON        :: "\uf015"   // grid_on (grid settings overlay)
+ICON_MD_SNAP           :: "\uea49"   // square_foot (snap settings)
+ICON_MD_TRIP_ORIGIN    :: "\ue57b"   // trip_origin (gizmo at active pivot)
+ICON_MD_CENTER_FOCUS   :: "\ue3dc"   // filter_center_focus (gizmo at selection center)
+
+// Windows
+ICON_MD_LANDSCAPE      :: "\ue564" // landscape (Scene)
+ICON_MD_SPORTS_ESPORTS :: "\uea28" // sports_esports (Game)
+ICON_MD_TUNE           :: "\ue429" // tune (Inspector)
+ICON_MD_LIST_ALT       :: "\ue677" // list_alt (Console: a log list)
+ICON_MD_RECEIPT_LONG   :: "\uef6e" // receipt_long (Output)
+ICON_MD_HISTORY        :: "\ue8b3" // history (History)
+ICON_MD_ANIMATION      :: "\ue71c" // animation (Animation)
+ICON_MD_HUB            :: "\ue9f4" // hub (Playable Graph)
+ICON_MD_VIEW_TIMELINE  :: "\ueb85" // view_timeline (Sequencer)
+ICON_MD_SHOW_CHART     :: "\ue6e1" // show_chart (Tween Graph)
+ICON_MD_EXTENSION      :: "\ue87b" // extension (plugin windows without an icon of their own)
+ICON_MD_CROP           :: "\ue3be" // crop (Sprite Editor)
+ICON_MD_CROP_FREE      :: "\ue3c2" // crop_free (Handles tool)
+ICON_MD_KEYBOARD       :: "\ue312" // keyboard (Input Debug)
+ICON_MD_SCREEN_ROTATION :: "\ue1c1" // screen_rotation (Game view size flip)
+
+// The built-in views' window titles: icon, name, and the name again after
+// ###. imgui hashes only the text after ### and saves settings under it, so
+// the id is the plain name it always was and saved layouts carry over.
+// Every place that names a window (Begin, the dock layout, focus requests)
+// uses these.
+// Note: TITLE_SCENE was originally called "Scene" (" Scene###Scene"). Renamed to
+// "Scene3D" to clearly distinguish the 3D scene viewport window from "Scene 2D"
+// and from `.scene` level assets. Keeping "###Scene" preserves saved imgui.ini layouts.
+TITLE_SCENE             :: ICON_MD_LANDSCAPE + " Scene3D###Scene"
+TITLE_SCENE_2D          :: ICON_MD_GRID_4X4 + " Scene 2D###Scene 2D"
+TITLE_GAME              :: ICON_MD_SPORTS_ESPORTS + " Game###Game"
+TITLE_HIERARCHY         :: ICON_MD_ACCOUNT_TREE + " Hierarchy###Hierarchy"
+TITLE_INSPECTOR         :: ICON_MD_TUNE + " Inspector###Inspector"
+TITLE_PROJECT           :: ICON_MD_FOLDER + " Project###Project"
+TITLE_PROJECT_INSPECTOR :: ICON_MD_DESCRIPTION + " Project Inspector###Project Inspector"
+TITLE_CONSOLE           :: ICON_MD_LIST_ALT + " Console###Console"
+TITLE_OUTPUT            :: ICON_MD_RECEIPT_LONG + " Output###Output"
+TITLE_HISTORY           :: ICON_MD_HISTORY + " History###History"
+TITLE_ANIMATION         :: ICON_MD_ANIMATION + " Animation###Animation"
+TITLE_PLAYABLE_GRAPH    :: ICON_MD_HUB + " Playable Graph###Playable Graph"
+TITLE_INPUT_DEBUG       :: ICON_MD_KEYBOARD + " Input Debug###Input Debug"
+

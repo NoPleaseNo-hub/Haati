@@ -1,0 +1,6 @@
+{
+  "name": "editor_visuals",
+  "guid": "c4a179e8-8b92-4f33-8a5e-18e382d6b710",
+  "description": "Editor Visual Customization, Global Font Scaling with Ctrl+Scroll, and Folder Colors",
+  "dependencies": []
+}

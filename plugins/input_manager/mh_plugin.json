@@ -1,0 +1,6 @@
+{
+  "name": "input_manager",
+  "guid": "58b3d490-5718-480d-aca1-89cb5827c6e7",
+  "description": "Unreal-style Action and Axis Input Router with Priority Listeners",
+  "dependencies": []
+}

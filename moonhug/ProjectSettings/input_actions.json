@@ -1,0 +1,242 @@
+[
+  {
+    "name": "Move_Forward",
+    "mapping": {
+      "primary_key": 26,
+      "primary_mouse": false,
+      "primary_mbtn": 0,
+      "secondary_key": 82,
+      "secondary_mouse": false,
+      "secondary_mbtn": 0,
+      "gamepad_btn": 13,
+      "use_mouse_btn": false,
+      "mouse_btn": 0
+    },
+    "is_custom": true
+  },
+  {
+    "name": "Move_Back",
+    "mapping": {
+      "primary_key": 22,
+      "primary_mouse": false,
+      "primary_mbtn": 0,
+      "secondary_key": 81,
+      "secondary_mouse": false,
+      "secondary_mbtn": 0,
+      "gamepad_btn": 14,
+      "use_mouse_btn": false,
+      "mouse_btn": 0
+    },
+    "is_custom": true
+  },
+  {
+    "name": "Move_Left",
+    "mapping": {
+      "primary_key": 4,
+      "primary_mouse": false,
+      "primary_mbtn": 0,
+      "secondary_key": 80,
+      "secondary_mouse": false,
+      "secondary_mbtn": 0,
+      "gamepad_btn": 15,
+      "use_mouse_btn": false,
+      "mouse_btn": 0
+    },
+    "is_custom": true
+  },
+  {
+    "name": "Move_Right",
+    "mapping": {
+      "primary_key": 7,
+      "primary_mouse": false,
+      "primary_mbtn": 0,
+      "secondary_key": 79,
+      "secondary_mouse": false,
+      "secondary_mbtn": 0,
+      "gamepad_btn": 16,
+      "use_mouse_btn": false,
+      "mouse_btn": 0
+    },
+    "is_custom": true
+  },
+  {
+    "name": "Jump",
+    "mapping": {
+      "primary_key": 44,
+      "primary_mouse": false,
+      "primary_mbtn": 0,
+      "secondary_key": 0,
+      "secondary_mouse": false,
+      "secondary_mbtn": 0,
+      "gamepad_btn": 1,
+      "use_mouse_btn": false,
+      "mouse_btn": 0
+    },
+    "is_custom": true
+  },
+  {
+    "name": "Duck",
+    "mapping": {
+      "primary_key": 6,
+      "primary_mouse": false,
+      "primary_mbtn": 0,
+      "secondary_key": 224,
+      "secondary_mouse": false,
+      "secondary_mbtn": 0,
+      "gamepad_btn": 2,
+      "use_mouse_btn": false,
+      "mouse_btn": 0
+    },
+    "is_custom": true
+  },
+  {
+    "name": "Wheel_Up",
+    "mapping": {
+      "primary_key": 0,
+      "primary_mouse": true,
+      "primary_mbtn": 5,
+      "secondary_key": 0,
+      "secondary_mouse": false,
+      "secondary_mbtn": 0,
+      "gamepad_btn": 0,
+      "use_mouse_btn": true,
+      "mouse_btn": 5
+    },
+    "is_custom": true
+  },
+  {
+    "name": "Wheel_Down",
+    "mapping": {
+      "primary_key": 0,
+      "primary_mouse": true,
+      "primary_mbtn": 6,
+      "secondary_key": 0,
+      "secondary_mouse": false,
+      "secondary_mbtn": 0,
+      "gamepad_btn": 0,
+      "use_mouse_btn": true,
+      "mouse_btn": 6
+    },
+    "is_custom": true
+  },
+  {
+    "name": "ToggleMenu",
+    "mapping": {
+      "primary_key": 41,
+      "primary_mouse": false,
+      "primary_mbtn": 0,
+      "secondary_key": 43,
+      "secondary_mouse": false,
+      "secondary_mbtn": 0,
+      "gamepad_btn": 10,
+      "use_mouse_btn": false,
+      "mouse_btn": 0
+    },
+    "is_custom": true
+  },
+  {
+    "name": "Look_Left",
+    "mapping": {
+      "primary_key": 0,
+      "primary_mouse": false,
+      "primary_mbtn": 0,
+      "secondary_key": 0,
+      "secondary_mouse": false,
+      "secondary_mbtn": 0,
+      "gamepad_btn": 0,
+      "use_mouse_btn": false,
+      "mouse_btn": 0
+    },
+    "is_custom": true
+  },
+  {
+    "name": "Look_Right",
+    "mapping": {
+      "primary_key": 0,
+      "primary_mouse": false,
+      "primary_mbtn": 0,
+      "secondary_key": 0,
+      "secondary_mouse": false,
+      "secondary_mbtn": 0,
+      "gamepad_btn": 0,
+      "use_mouse_btn": false,
+      "mouse_btn": 0
+    },
+    "is_custom": true
+  },
+  {
+    "name": "Look_Up",
+    "mapping": {
+      "primary_key": 0,
+      "primary_mouse": false,
+      "primary_mbtn": 0,
+      "secondary_key": 0,
+      "secondary_mouse": false,
+      "secondary_mbtn": 0,
+      "gamepad_btn": 0,
+      "use_mouse_btn": false,
+      "mouse_btn": 0
+    },
+    "is_custom": true
+  },
+  {
+    "name": "Look_Down",
+    "mapping": {
+      "primary_key": 0,
+      "primary_mouse": false,
+      "primary_mbtn": 0,
+      "secondary_key": 0,
+      "secondary_mouse": false,
+      "secondary_mbtn": 0,
+      "gamepad_btn": 0,
+      "use_mouse_btn": false,
+      "mouse_btn": 0
+    },
+    "is_custom": true
+  },
+  {
+    "name": "Dash_Action",
+    "mapping": {
+      "primary_key": 225,
+      "primary_mouse": false,
+      "primary_mbtn": 0,
+      "secondary_key": 0,
+      "secondary_mouse": false,
+      "secondary_mbtn": 0,
+      "gamepad_btn": 5,
+      "use_mouse_btn": false,
+      "mouse_btn": 0
+    },
+    "is_custom": true
+  },
+  {
+    "name": "Walk_Action",
+    "mapping": {
+      "primary_key": 226,
+      "primary_mouse": false,
+      "primary_mbtn": 0,
+      "secondary_key": 0,
+      "secondary_mouse": false,
+      "secondary_mbtn": 0,
+      "gamepad_btn": 0,
+      "use_mouse_btn": false,
+      "mouse_btn": 0
+    },
+    "is_custom": true
+  },
+  {
+    "name": "Ability_A",
+    "mapping": {
+      "primary_key": 19,
+      "primary_mouse": false,
+      "primary_mbtn": 0,
+      "secondary_key": 0,
+      "secondary_mouse": false,
+      "secondary_mbtn": 0,
+      "gamepad_btn": 0,
+      "use_mouse_btn": false,
+      "mouse_btn": 0
+    },
+    "is_custom": true
+  }
+]

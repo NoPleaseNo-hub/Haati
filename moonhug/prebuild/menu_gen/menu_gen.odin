@@ -1,0 +1,314 @@
+package menu_gen
+
+// menu_gen: ECS prebuild module for menu_items_generated.odin.
+//
+//   provide  - query {DeclInfo}, recognise decls carrying @(menu_item) /
+//              @(menu_dynamic) (a proc that draws a submenu's items itself) /
+//              @(menu_separator) attributes, tag each with a Menu_GenComp
+//              carrying the per-entry MenuEntry data.
+//
+// ONE attribute, and what it is attached to says which kind it is: @(menu_item)
+// on a proc is an action, on a bool variable it is a toggle. The generator
+// already knows the difference, so the author does not have to name it.
+//   generate - query {DeclInfo, Menu_GenComp}, rebuild rows, sort + dedupe, build
+//              menu_items_generated.odin, emit it (gen_db writes it).
+//
+// String-building output is identical to the previous collect/generate version.
+
+import "core:fmt"
+import "core:strings"
+import "core:slice"
+import db "../gen_db"
+import "../gen_facts"
+
+// Fixed package name the old prebuild assigned (menu_data.pkg_name = "editor").
+_PKG_NAME :: "editor"
+
+MenuEntry :: struct {
+	kind:        enum { Item, Toggle, Separator, Dynamic },
+	path:        string,
+	name:        string,
+	shortcut:    string,
+	order:       int,
+	enabled:     string, // optional predicate proc name in the source package
+	checked:     string, // optional tick predicate, same form as enabled
+	source_pkg:  string,
+	source_path: string,
+	// Where the entry was declared, rendered by gen_facts.attr_origin. Emitted
+	// into the registration call and shown in the item's tooltip with debug tooltips on.
+	origin:      string,
+}
+
+// Menu_GenComp marks a DeclInfo entity as a menu declaration. A single declaration's
+// attributes may yield multiple entries, so the tag carries them all.
+Menu_GenComp :: struct {
+	entries: [dynamic]MenuEntry,
+}
+
+
+@(init)
+_register :: proc "contextless" () {
+	db.provider("menu/provide", provide)
+	db.generator("menu/generate", generate)
+}
+
+
+// Extract path, order, shortcut, enabled from a flattened attribute's fields.
+_extract_menu_item_comp :: proc(args: gen_facts.Attr_Args) -> (path: string, order: int, shortcut: string, enabled: string, checked: string) {
+	return args.fields["path"], gen_facts.attr_int(args, "order"), args.fields["shortcut"], args.fields["enabled"], args.fields["checked"]
+}
+
+_parent_path :: proc(path: string) -> string {
+	if i := strings.last_index(path, "/"); i >= 0 {
+		return path[:i]
+	}
+	return ""
+}
+
+// Sort key: same parent menu, then by order, then Separator before Item/Toggle so separator appears after same-order items above it
+_sort_key_order :: proc(e: MenuEntry) -> (parent: string, order: int, kind_rank: int) {
+	parent = _parent_path(e.path)
+	if parent == "" && e.path != "" do parent = e.path
+	order = e.order
+	kind_rank = 0
+	if e.kind == .Separator do kind_rank = 1
+	return
+}
+
+provide :: proc(w: ^db.World) -> bool {
+	_menus := db.get_or_create_comps(w, Menu_GenComp)
+	decls  := db.get_comps_DeclInfo()
+	procs  := db.get_comps(w, gen_facts.Proc_GenComp)
+	attrs  := db.get_comps(w, gen_facts.Attrs_GenComp)
+
+	m := db.all_of(db.r(decls), db.r(attrs)); defer db.matcher_destroy(&m)
+	for entity in db.matched(w, &m) {
+		decl := db.get(decls, entity)
+		ident_name := decl.name
+		if ident_name == "" do continue
+
+		is_proc := db.has(procs, entity)
+		attr_set := db.get(attrs, entity)
+
+		entries: [dynamic]MenuEntry
+
+		if is_proc {
+			// Iterate attributes in source order: a proc may carry several
+			// menu_item / menu_separator entries and their order matters.
+			for args in attr_set.attrs {
+				path, shortcut, enabled, checked, separator_path: string
+				menu_order: int = 0
+				separator_order: int = 0
+
+				if args.key == "menu_item" {
+					path, menu_order, shortcut, enabled, checked = _extract_menu_item_comp(args)
+				}
+				if args.key == "menu_separator" {
+					separator_path, separator_order, _, _, _ = _extract_menu_item_comp(args)
+				}
+				// A proc that DRAWS a submenu's items itself (menu.MenuEntryKind.Dynamic).
+				if args.key == "menu_dynamic" {
+					dpath, dorder, _, denabled, _ := _extract_menu_item_comp(args)
+					if dpath != "" {
+						origin := gen_facts.attr_origin(args, gen_facts.decl_rel_path(decl), decl.decl.pos.line, ident_name)
+						append(&entries, MenuEntry{.Dynamic, dpath, ident_name, "", dorder, denabled, "", decl.pkg.name, decl.pkg_path, origin})
+					}
+					continue
+				}
+
+				if path != "" && separator_path == "" {
+					origin := gen_facts.attr_origin(args, gen_facts.decl_rel_path(decl), decl.decl.pos.line, ident_name)
+					append(&entries, MenuEntry{.Item, path, ident_name, shortcut, menu_order, enabled, checked, decl.pkg.name, decl.pkg_path, origin})
+				} else if separator_path != "" {
+					// A separator has nothing to hover, so it carries no origin.
+					append(&entries, MenuEntry{.Separator, separator_path, "", "", separator_order, "", "", "", "", ""})
+				}
+			}
+		} else {
+			// A bool variable: the same attribute, drawn as a checkbox that
+			// writes straight into it.
+			for args in attr_set.attrs {
+				if args.key != "menu_item" do continue
+				path, menu_order, shortcut, _, _ := _extract_menu_item_comp(args)
+				if path != "" {
+					origin := gen_facts.attr_origin(args, gen_facts.decl_rel_path(decl), decl.decl.pos.line, ident_name)
+					append(&entries, MenuEntry{.Toggle, path, ident_name, shortcut, menu_order, "", "", decl.pkg.name, decl.pkg_path, origin})
+				}
+			}
+		}
+
+		if len(entries) > 0 {
+			db.set(_menus, entity, Menu_GenComp{entries = entries})
+		} else {
+			delete(entries)
+		}
+	}
+	return true
+}
+
+_qualified_ident :: proc(pkg_name: string, source_pkg: string, name: string) -> string {
+	if source_pkg != "" && source_pkg != pkg_name {
+		return fmt.tprintf("%s.%s", source_pkg, name)
+	}
+	return name
+}
+
+_qualified_name :: proc(pkg_name: string, e: MenuEntry) -> string {
+	return _qualified_ident(pkg_name, e.source_pkg, e.name)
+}
+
+_relative_import_path :: proc(out_dir: string, source_path: string) -> string {
+	out_dir_slash := strings.concatenate({out_dir, "/"})
+	if strings.has_prefix(source_path, out_dir_slash) {
+		return source_path[len(out_dir_slash):]
+	}
+	out_parts := strings.split(out_dir, "/")
+	src_parts := strings.split(source_path, "/")
+	common := 0
+	for common < len(out_parts) && common < len(src_parts) && out_parts[common] == src_parts[common] {
+		common += 1
+	}
+	ups := len(out_parts) - common
+	b := strings.builder_make()
+	for _ in 0 ..< ups {
+		strings.write_string(&b, "../")
+	}
+	for i in common ..< len(src_parts) {
+		if i > common do strings.write_string(&b, "/")
+		strings.write_string(&b, src_parts[i])
+	}
+	return strings.to_string(b)
+}
+
+generate :: proc(w: ^db.World) -> bool {
+	out_dir :: "moonhug/editor"
+
+	entries: [dynamic]MenuEntry
+	defer delete(entries)
+
+	decls := db.get_comps_DeclInfo()
+	_menus := db.get_comps(w, Menu_GenComp)
+	m := db.all_of(db.r(decls), db.r(_menus)); defer db.matcher_destroy(&m)
+	for entity in db.matched(w, &m) {
+		menu := db.get(_menus, entity)
+		for entry in menu.entries {
+			append(&entries, entry)
+		}
+	}
+
+	// Preserve previous collect_finalize ordering + dedupe. The path/name
+	// tiebreak makes this a TOTAL order: entries tied on parent+order+kind
+	// (same-order siblings, e.g. one submenu's items) would otherwise sort
+	// by entity iteration order under an unstable sort, and the emitted file
+	// would churn between builds.
+	slice.sort_by(entries[:], proc(a, b: MenuEntry) -> bool {
+		pa, oa, ka := _sort_key_order(a)
+		pb, ob, kb := _sort_key_order(b)
+		if pa != pb do return pa < pb
+		if oa != ob do return oa < ob
+		if ka != kb do return ka < kb
+		if a.path != b.path do return a.path < b.path
+		return a.name < b.name
+	})
+
+	i := 0
+	for j in 0 ..< len(entries) {
+		if j > 0 && entries[j].path == entries[j - 1].path && entries[j].name == entries[j - 1].name && entries[j].kind != .Separator {
+			continue
+		}
+		entries[i] = entries[j]
+		i += 1
+	}
+	resize(&entries, i)
+
+	// Two declarations at the same path resolve to the same node, and the
+	// later registration silently replaces the earlier one at runtime. Caught
+	// here, where every registration in the build is visible at once, rather
+	// than by whoever notices their menu item stopped working. Separators are
+	// exempt: several at one path is how sections are built.
+	for a, ai in entries {
+		if a.kind == .Separator do continue
+		for b in entries[ai + 1:] {
+			if b.kind == .Separator || a.path != b.path do continue
+			fmt.eprintf(
+				"menu_gen: two declarations both claim menu path %q — %s.%s and %s.%s. One would silently replace the other.\n",
+				a.path, a.source_pkg, a.name, b.source_pkg, b.name)
+			return false
+		}
+	}
+
+	b := strings.builder_make()
+	defer strings.builder_destroy(&b)
+
+	packages_used: map[string]string
+	defer delete(packages_used)
+	for e in entries {
+		if e.source_pkg != "" && e.source_pkg != _PKG_NAME {
+			if e.source_pkg not_in packages_used {
+				packages_used[e.source_pkg] = _relative_import_path(out_dir, e.source_path)
+			}
+		}
+	}
+	import_pkgs: [dynamic]string
+	defer delete(import_pkgs)
+	for pkg in packages_used {
+		append(&import_pkgs, pkg)
+	}
+	slice.sort(import_pkgs[:])
+
+	strings.write_string(&b, "package ")
+	strings.write_string(&b, _PKG_NAME)
+	strings.write_string(&b, "\n\n")
+	for pkg in import_pkgs {
+		// Aliased: the DECLARED package name can differ from the directory
+		// base (a plugin's editor/ folder declares "<name>_editor"), and the
+		// qualified calls below use the declared name.
+		fmt.sbprintf(&b, "import %s \"%s\"\n", pkg, packages_used[pkg])
+	}
+	if len(import_pkgs) > 0 do strings.write_string(&b, "\n")
+	strings.write_string(&b, "// Code generated by menu_gen. Do not edit.\n\n")
+	strings.write_string(&b, "_register_menu_items :: proc() {\n")
+	strings.write_string(&b, "\tmenu.init_menu()\n")
+
+	for e in entries {
+		switch e.kind {
+		case .Item:
+			strings.write_string(&b, "\tmenu.add_menu_item(\"")
+			strings.write_string(&b, e.path)
+			strings.write_string(&b, "\", \"")
+			strings.write_string(&b, e.shortcut)
+			strings.write_string(&b, "\", ")
+			strings.write_string(&b, _qualified_name(_PKG_NAME, e))
+			fmt.sbprintf(&b, ", %d", e.order)
+			if e.enabled != "" || e.checked != "" {
+				enabled := e.enabled != "" ? _qualified_ident(_PKG_NAME, e.source_pkg, e.enabled) : "nil"
+				fmt.sbprintf(&b, ", %s", enabled)
+			}
+			if e.checked != "" {
+				fmt.sbprintf(&b, ", %s", _qualified_ident(_PKG_NAME, e.source_pkg, e.checked))
+			}
+			// Named, so the optional arguments in between need no filler.
+			fmt.sbprintf(&b, ", origin = %q)\n", e.origin)
+		case .Toggle:
+			strings.write_string(&b, "\tmenu.add_menu_toggle(\"")
+			strings.write_string(&b, e.path)
+			strings.write_string(&b, "\", &")
+			strings.write_string(&b, _qualified_name(_PKG_NAME, e))
+			fmt.sbprintf(&b, ", %d", e.order)
+			if e.shortcut != "" {
+				fmt.sbprintf(&b, ", \"%s\"", e.shortcut)
+			}
+			fmt.sbprintf(&b, ", origin = %q)\n", e.origin)
+		case .Dynamic:
+			fmt.sbprintf(&b, "\tmenu.add_menu_dynamic(\"%s\", %s, %d, origin = %q)\n", e.path, _qualified_name(_PKG_NAME, e), e.order, e.origin)
+		case .Separator:
+			strings.write_string(&b, "\tmenu.add_menu_separator(\"")
+			strings.write_string(&b, e.path)
+			fmt.sbprintf(&b, "\", %d)\n", e.order)
+		}
+	}
+	strings.write_string(&b, "}\n")
+
+	db.emit(w, "moonhug/editor/menu_items_generated.odin", strings.to_string(b))
+	return true
+}

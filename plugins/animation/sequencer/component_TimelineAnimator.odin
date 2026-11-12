@@ -1,0 +1,762 @@
+package animation_sequencer
+
+// TimelineAnimator (docs/TimelineAnimator.md): an animation state machine one
+// level above clips, where a state plays a whole TIMELINE instead of a single
+// clip.
+//
+// This file is the component and its graph SKELETON. It owns ONE graph with
+// one output per bound target, a layer mixer at each output's root, and one
+// mixer per layer under that. States, cross-fade and the play API attach to
+// those layer mixers and land on top of this structure.
+//
+// One graph is the requirement everything rests on: weights blend only inside
+// a single evaluation, because a partial weight resolves against the
+// bind-time default pose. Two timelines evaluating and applying separately do
+// not cross-fade, the second write replaces the first.
+
+import "moonhug:engine"
+import seq "moonhug:packages/sequencer"
+import anim "moonhug:packages/animation"
+
+// One authored layer. Layer order is override order: a higher layer replaces a
+// lower one wherever it animates a channel, which is what
+// Playable_Layer_Mixer already does with its inputs.
+//
+// `weight` is zero-neutral like the director's `speed` — a layer added in the
+// inspector starts at full strength rather than silent.
+Animator_Layer :: struct {
+	name:   string,
+	weight: f32,
+	states: [dynamic]Timeline_State,
+}
+
+// One state: a whole timeline played as a unit.
+//
+// `timeline` names a PlayableDirector in the SAME FILE, adopted where it
+// stands and never destroyed by the animator. Sharing a state set between
+// objects is what putting this component in a prefab already does, and the
+// timelines travel inside that prefab with it — so a cross-asset timeline
+// reference buys nothing the file does not already give. Ref_Local says that
+// in the type. If a timeline ever does need to live in another asset, this
+// becomes an engine.Ref and _ta_state_root grows an instantiate branch back.
+Timeline_State :: struct {
+	// Minted on first build and never reused, so a held State_Id keeps naming
+	// the same state across edits that reorder or delete its siblings. 0 means
+	// not minted yet — an authored state added through the inspector's array
+	// rows starts that way and is filled in by _ta_ensure_ids.
+	id:       i32,
+	name:     string,
+	// The director itself, not the object carrying it. A reference type rather
+	// than a bare PPtr because the picker, the reference drawer, `ref:`
+	// filtering and the loader's handle resolution all key off it.
+	//
+	// The state binds NOTHING else. What its timeline's tracks drive is each
+	// track's own `target`, and the inspector draws those fields under the
+	// state (Track_Desc.binding) so they are edited here — but they live on
+	// the tracks, which is what lets the same timeline play standalone.
+	timeline: engine.Ref_Local `ref:"PlayableDirector"`,
+	speed:    f32, // 0 runs at 1
+	wrap:     seq.Timeline_Wrap,
+	fade:     f32, // default cross-fade duration INTO this state
+}
+
+// A layer's presence in the graph: one mixer per output, parallel to
+// `graph.outputs`. States attach to these.
+Animator_Layer_Runtime :: struct {
+	mixers: [dynamic]anim.Playable_Handle,
+	states: [dynamic]Animator_State_Runtime,
+}
+
+// A state's live half: the adopted timeline, the mixers its tracks hang under
+// (one per output), and its own playhead. The animator never owns the timeline
+// object — it is a scene object that outlives any rebuild.
+Animator_State_Runtime :: struct {
+	id:     i32,                     // the authored state's id, what State_Id names
+	root:   engine.Transform_Handle, // the timeline's root
+	dir:    engine.Handle,           // its PlayableDirector
+	mixers: [dynamic]anim.Playable_Handle, // parallel to graph.outputs
+	time:   f32,
+	weight: f32,
+	// Weight moves linearly from `fade_from` toward `fade_target` over
+	// `fade_dur` seconds of real time. 0 duration means not fading.
+	fade_from:   f32,
+	fade_target: f32,
+	fade_t:      f32,
+	fade_dur:    f32,
+	done:        bool, // a Once timeline ran past its end
+}
+
+@(component={menu="Animation/TimelineAnimator"})
+@(typ_guid={guid = "0959886b-dc83-491c-9843-df105c69e01d"})
+TimelineAnimator :: struct {
+	using base: engine.CompData `inspect:"-"`,
+
+	speed:   f32, // playback speed, 0 runs at 1
+	// Drawn by the States tree (editor/inspector_timeline_animator.odin), not by
+	// the reflected field loop — layers of states is the shape those rows draw
+	// worst.
+	layers:  [dynamic]Animator_Layer `inspect:"-"`,
+
+	// Runtime, built lazily by _ta_ensure_graph and guarded by graph_ready, so
+	// a component that never ticked owns nothing and cleanup frees nothing.
+	graph:       anim.Playable_Graph `json:"-" inspect:"-"`,
+	rt:          [dynamic]Animator_Layer_Runtime `json:"-" inspect:"-"`,
+	// Parallel to `graph.outputs`: the object each pose output writes to. An
+	// adopted track finds its output by the object it drives on its own.
+	out_object:  [dynamic]engine.Transform_Handle `json:"-" inspect:"-"`,
+	graph_ready: bool `json:"-" inspect:"-"`,
+}
+
+reset_TimelineAnimator :: proc(a: ^TimelineAnimator) {
+	cleanup_TimelineAnimator(a)
+	a.speed = 1
+}
+
+on_destroy_TimelineAnimator :: proc(a: ^TimelineAnimator) {
+	cleanup_TimelineAnimator(a)
+}
+
+// Reached two ways, and both matter: component destruction, and a value being
+// replaced under it — undo calls type_cleanup before unmarshalling a restored
+// value. comp_zero clears graph_ready along with every freed pointer, which is
+// what makes a second call safe.
+cleanup_TimelineAnimator :: proc(a: ^TimelineAnimator) {
+	if a.graph_ready {
+		// Hand every claimed target back first: a component destroyed while
+		// holding them would leave them suppressed forever.
+		_ta_claim_outputs(a, false)
+		anim.playable_graph_destroy(&a.graph)
+		for &l in a.rt {
+			for &st in l.states {
+				animation_director_unadopt(st.root)
+				delete(st.mixers)
+			}
+			delete(l.states)
+			delete(l.mixers)
+		}
+		delete(a.rt)
+		delete(a.out_object)
+	}
+	if a.layers != nil {
+		for &l in a.layers {
+			delete(l.name)
+			for &st in l.states do delete(st.name)
+			delete(l.states)
+		}
+		delete(a.layers)
+	}
+	engine.comp_zero(a)
+}
+
+// --- Graph skeleton -------------------------------------------------------------------
+
+// The index of the pose output writing to `tH`, or -1. This is how an adopted
+// track finds where its subtree hangs: it resolves the object it drives on its
+// own, and asks for that object's output.
+timeline_animator_output_index :: proc(a: ^TimelineAnimator, tH: engine.Transform_Handle) -> int {
+	for o, i in a.out_object do if o == tH do return i
+	return -1
+}
+
+// Every object the animator's timelines will pose: each animation track's own
+// root across every state, distinct, in first-seen order. Read from authored
+// data before any track builds, so the output set exists — and captures its
+// default poses — at one deterministic moment rather than as tracks arrive.
+@(private = "file")
+_ta_collect_pose_roots :: proc(a: ^TimelineAnimator) -> []engine.Transform_Handle {
+	w := engine.ctx_world()
+	out := make([dynamic]engine.Transform_Handle, context.temp_allocator)
+	for &l in a.layers {
+		for &desc in l.states {
+			director := _ta_state_root(a, &desc)
+			if director == {} do continue
+			_, d := engine.transform_get_comp(director, seq.PlayableDirector)
+			if d == nil do continue
+			for &tv in seq.director_tracks(d) {
+				if tv.kind != .TrackAnimation do continue
+				root := animation_track_root_at(tv.node, director)
+				if !engine.pool_valid(&w.transforms, engine.Handle(root)) do continue
+				seen := false
+				for have in out do if have == root { seen = true; break }
+				if !seen do append(&out, root)
+			}
+		}
+	}
+	return out[:]
+}
+
+@(private = "file")
+_ta_layer_weight :: proc(l: ^Animator_Layer) -> f32 {
+	return l.weight != 0 ? l.weight : 1
+}
+
+@(private = "file")
+_ta_ensure_graph :: proc(a: ^TimelineAnimator) {
+	if a.graph_ready do return
+	_ta_ensure_ids(a)
+	anim.playable_graph_init(&a.graph)
+	a.rt = make([dynamic]Animator_Layer_Runtime)
+	a.out_object = make([dynamic]engine.Transform_Handle)
+
+	// One pose output per object the timelines' animation tracks drive, read
+	// from the tracks' own targets across every state. Built here rather than
+	// as tracks arrive, so every binding captures its default pose at the same
+	// deterministic moment. A non-pose track (audio) needs no output — it
+	// plays through its own target and never enters the graph.
+	for root in _ta_collect_pose_roots(a) {
+		idx := anim.graph_output_add(&a.graph, root)
+		mixer := anim.playable_add(&a.graph, anim.Playable_Layer_Mixer{})
+		anim.graph_output(&a.graph, idx).root = mixer
+		append(&a.out_object, root)
+	}
+
+	// Every layer gets a mixer under every output's layer mixer. Input order
+	// IS layer order, so a later layer overrides an earlier one.
+	for &l in a.layers {
+		lr := Animator_Layer_Runtime{
+			mixers = make([dynamic]anim.Playable_Handle, 0, len(a.graph.outputs)),
+		}
+		for oi in 0 ..< len(a.graph.outputs) {
+			m := anim.playable_add(&a.graph, anim.Playable_Mixer{})
+			anim.playable_connect(&a.graph, anim.graph_output(&a.graph, oi).root, m, _ta_layer_weight(&l))
+			append(&lr.mixers, m)
+		}
+		lr.states = make([dynamic]Animator_State_Runtime, 0, len(l.states))
+		for &stateDesc in l.states {
+			append(&lr.states, _ta_build_state(a, &stateDesc, lr.mixers[:]))
+		}
+		append(&a.rt, lr)
+	}
+	a.graph_ready = true
+}
+
+// Instantiate a state's timeline and wire it in:
+//   * one mixer per output, under this layer's mixer, starting at weight 0,
+//   * the prefab instanced as a child of the animator,
+//   * its director adopted, so its tracks build into THIS graph under those
+//     mixers and it stops ticking itself.
+// An empty or unloadable timeline yields a state with no instance, which stays
+// silent rather than failing the build.
+@(private = "file")
+_ta_build_state :: proc(a: ^TimelineAnimator, desc: ^Timeline_State, layer_mixers: []anim.Playable_Handle) -> Animator_State_Runtime {
+	st := Animator_State_Runtime{
+		id     = desc.id,
+		mixers = make([dynamic]anim.Playable_Handle, 0, len(layer_mixers)),
+	}
+	for lm in layer_mixers {
+		m := anim.playable_add(&a.graph, anim.Playable_Mixer{})
+		anim.playable_connect(&a.graph, lm, m, 0)
+		append(&st.mixers, m)
+	}
+	st.root = _ta_state_root(a, desc)
+	if st.root == {} do return st
+	if dh, d := engine.transform_get_comp(st.root, seq.PlayableDirector); d != nil {
+		st.dir = dh.handle
+	}
+	animation_director_adopt(st.root, a, st.mixers[:])
+	return st
+}
+
+// The timeline's root for a state: the owner of the director it names. The
+// handle is resolved by the scene loader like every Ref_Local. An unbound or
+// dead reference yields no root, and the state poses nothing.
+@(private = "file")
+_ta_state_root :: proc(a: ^TimelineAnimator, desc: ^Timeline_State) -> engine.Transform_Handle {
+	w := engine.ctx_world()
+	if !engine.world_pool_valid(w, desc.timeline.handle) do return {}
+	base := cast(^engine.CompData)engine.world_pool_get(w, desc.timeline.handle)
+	if base == nil do return {}
+	if !engine.pool_valid(&w.transforms, engine.Handle(base.owner)) do return {}
+	return base.owner
+}
+
+// Drop the graph so the next tick rebuilds it — for an outputs or layers edit,
+// which changes the output set and the mixer shape.
+timeline_animator_rebuild :: proc(a: ^TimelineAnimator) {
+	if !a.graph_ready do return
+	anim.playable_graph_destroy(&a.graph)
+	for &l in a.rt {
+		for &st in l.states {
+			animation_director_unadopt(st.root)
+			delete(st.mixers)
+		}
+		delete(l.states)
+		delete(l.mixers)
+	}
+	delete(a.rt)
+	delete(a.out_object)
+	a.rt = nil
+	a.out_object = nil
+	a.graph_ready = false
+}
+
+// The mixer a state on `layer` attaches to for `output`.
+timeline_animator_layer_mixer :: proc(a: ^TimelineAnimator, layer, output: int) -> anim.Playable_Handle {
+	if layer < 0 || layer >= len(a.rt) do return {}
+	lr := &a.rt[layer]
+	if output < 0 || output >= len(lr.mixers) do return {}
+	return lr.mixers[output]
+}
+
+// Whether any state carries weight. An animator holding states that are all
+// silent applies nothing: the graph would evaluate to an empty pose, and
+// writing that every frame would push bind-time defaults over whatever else
+// poses the target. Having states is not the same as playing one.
+@(private = "file")
+_ta_has_content :: proc(a: ^TimelineAnimator) -> bool {
+	for &lr in a.rt {
+		for &st in lr.states do if st.weight > anim.PLAYABLE_WEIGHT_EPS do return true
+	}
+	return false
+}
+
+// Layer weights are authored data and can change between frames, so they are
+// pushed every tick rather than only at build.
+@(private = "file")
+_ta_sync_layer_weights :: proc(a: ^TimelineAnimator) {
+	for &l, li in a.layers {
+		if li >= len(a.rt) do break
+		w := _ta_layer_weight(&l)
+		for m, oi in a.rt[li].mixers {
+			o := anim.graph_output(&a.graph, oi)
+			if o == nil do continue
+			anim.playable_set_input_weight(&a.graph, o.root, m, w)
+		}
+	}
+}
+
+// An Animation bound as a target stops driving itself for as long as this
+// animator has something to play — the higher level overriding the lower one.
+//
+// An IDLE animator releases it instead. Claiming unconditionally would mean
+// that adding a TimelineAnimator and binding a target silently freezes the
+// object until states exist, and every level is supposed to work with nothing
+// above it configured.
+@(private = "file")
+_ta_claim_outputs :: proc(a: ^TimelineAnimator, claim: bool) {
+	w := engine.ctx_world()
+	if w == nil do return
+	for tH in a.out_object {
+		if !engine.pool_valid(&w.transforms, engine.Handle(tH)) do continue
+		// The Animation on the posed object, when it has one — a track driving
+		// a bare transform claims nothing.
+		if _, comp := engine.transform_get_comp(tH, anim.Animation); comp != nil {
+			comp.timeline_driven = claim
+		}
+	}
+}
+
+// Advance every playing state and push its time into its timeline.
+//
+// The director is evaluated directly rather than ticked: director_run skips it
+// (the animation package registers a drive check for adopted directors), so
+// the animator owns its time the way a control track owns a nested timeline's.
+// Evaluating makes its tracks set weights and times in THIS graph, and nothing
+// is applied until the animator flushes.
+@(private = "file")
+_ta_advance_states :: proc(a: ^TimelineAnimator, dt: f32, mode: seq.Track_Mode) {
+	w := engine.ctx_world()
+	speed := a.speed != 0 ? a.speed : 1
+	for &lr, li in a.rt {
+		if li >= len(a.layers) do continue
+		for &st, si in lr.states {
+			if si >= len(a.layers[li].states) do continue
+			desc := &a.layers[li].states[si]
+			if st.weight <= anim.PLAYABLE_WEIGHT_EPS do continue
+			if st.root == {} do continue
+			if !engine.world_pool_valid(w, st.dir) do continue
+			d := cast(^seq.PlayableDirector)engine.world_pool_get(w, st.dir)
+			if d == nil do continue
+
+			st.time += dt * speed * (desc.speed != 0 ? desc.speed : 1)
+			length := seq.director_duration(d, seq.director_tracks(d))
+			if length > 0 {
+				switch desc.wrap {
+				case .Loop:
+					for st.time >= length do st.time -= length
+				case .Once:
+					// A Once state reports done at its end and stays there, so
+					// gameplay can hand back to whatever should follow it. It
+					// keeps evaluating: the driver decides when to leave, not
+					// the state.
+					if st.time >= length {
+						st.time = length
+						st.done = true
+					}
+				}
+			}
+			seq.director_evaluate_at(d, st.time, mode)
+		}
+	}
+}
+
+// One animator's frame. The runtime tick calls it per animator; the editor's
+// state preview calls it for the one animator it previews, so a previewed
+// state advances, fades and poses through exactly the code that runs in play
+// mode. A preview that reimplemented this would drift from it silently.
+//
+// `mode` is how the timelines read the advance: .Play at runtime,
+// .Preview_Play for the editor, where crossings and audio are real but game
+// scripts stay silent (docs/Sequencer.md, Track_Mode).
+timeline_animator_step :: proc(a: ^TimelineAnimator, dt: f32, mode := seq.Track_Mode.Play) {
+	if !a.enabled {
+		// A disabled animator owns nothing, so whatever it held plays
+		// itself again.
+		if a.graph_ready do _ta_claim_outputs(a, false)
+		return
+	}
+	_ta_ensure_graph(a)
+	_ta_sync_layer_weights(a)
+	// Fades advance BEFORE the content check, or a fade starting from
+	// weight 0 would never get a first frame: it would read as idle, the
+	// tick would skip, and the fade would sit at 0 forever.
+	_ta_advance_fades(a, dt)
+	active := _ta_has_content(a)
+	_ta_claim_outputs(a, active)
+	if !active do return
+	_ta_advance_states(a, dt, mode)
+	anim.playable_graph_tick(&a.graph)
+}
+
+@(update={order=2})
+timeline_animator_tick :: proc(dt: f32) {
+	w := engine.ctx_world()
+	it := engine.pool_iterator(timeline_animators(w))
+	for a, _ in engine.pool_next(&it) {
+		if !engine.pool_valid(&w.transforms, engine.Handle(a.owner)) do continue
+		timeline_animator_step(a, dt)
+	}
+}
+
+// --- Editor preview support -----------------------------------------------------------
+//
+// An edit-mode preview poses the world for the scene render and puts it back
+// after (docs/PlayableGraph.md step 5), so it needs the graph built before it
+// can capture what to put back, and the bindings of EVERY output — one
+// animator poses as many objects as its timelines drive.
+
+timeline_animator_ensure_graph :: proc(a: ^TimelineAnimator) {
+	_ta_ensure_graph(a)
+}
+
+// Re-reads each output's default pose from the live transforms, so a preview
+// restores what the object holds NOW rather than what it held when the graph
+// was built and the user has since edited.
+timeline_animator_refresh_defaults :: proc(a: ^TimelineAnimator) {
+	if !a.graph_ready do return
+	for &o in a.graph.outputs do anim.animation_binding_refresh_defaults(&o.binding)
+}
+
+timeline_animator_write_defaults :: proc(a: ^TimelineAnimator) {
+	if !a.graph_ready do return
+	for &o in a.graph.outputs do anim.animation_binding_write_defaults(&o.binding)
+}
+
+// Hands every posed object back to itself. A preview that just stopped must
+// release its claim, or the Animation components it drove stay flagged as
+// timeline-driven and refuse to play themselves.
+timeline_animator_release :: proc(a: ^TimelineAnimator) {
+	if !a.graph_ready do return
+	_ta_claim_outputs(a, false)
+}
+
+// --- Weight and cross-fade ------------------------------------------------------------
+//
+// A state has ONE weight, written to one mixer input per output it reaches.
+// Nothing multiplies weights by hand: a mixer input weight propagates down the
+// whole subtree during evaluation, so setting it scales every track and every
+// clip inside that state's timeline.
+//
+// Fades are weight-continuous, the rule component_Animation already uses:
+// cross-fading to C in the middle of an A to B fade retargets A and B toward 0
+// FROM THEIR CURRENT WEIGHTS while C rises. Weights that summed to 1 still sum
+// to 1, and interruption needs no snapshot machinery.
+
+// A state's minted id (Timeline_State.id), not a position. An index-based
+// handle silently repoints when an authored state is deleted or reordered,
+// which is the one thing a handle held across an edit must not do. Same
+// convention Animation_Entry uses in component_Animation.odin: ids start at 1, so 0
+// is "no state" and a zero value is inert.
+State_Id :: distinct i32
+STATE_ID_NONE :: State_Id(0)
+
+// The id a newly authored state takes. The inspector mints here rather than
+// leaving 0 for _ta_ensure_ids to fill: a state added in the editor is a row
+// immediately, and two rows both holding 0 would collide as widget ids and as
+// the key of anything that addresses a state before the first build.
+animator_state_next_id :: proc(a: ^TimelineAnimator) -> i32 {
+	top := i32(0)
+	for &l in a.layers {
+		for &st in l.states do if st.id > top do top = st.id
+	}
+	return top + 1
+}
+
+// Give every authored state an id. Runs before the graph is built, so the
+// runtime states copy ids that already exist. Ids are unique across the whole
+// component, not per layer, so one id names one state.
+@(private = "file")
+_ta_ensure_ids :: proc(a: ^TimelineAnimator) {
+	top := i32(0)
+	for &l in a.layers {
+		for &st in l.states do if st.id > top do top = st.id
+	}
+	for &l in a.layers {
+		for &st in l.states {
+			if st.id != 0 do continue
+			top += 1
+			st.id = top
+		}
+	}
+}
+
+// The runtime state with this id, and the layer it sits on.
+@(private = "file")
+_ta_state_rt :: proc(a: ^TimelineAnimator, id: State_Id) -> (layer: int, st: ^Animator_State_Runtime) {
+	if id == STATE_ID_NONE do return -1, nil
+	for &lr, li in a.rt {
+		for &s in lr.states {
+			if s.id == i32(id) do return li, &s
+		}
+	}
+	return -1, nil
+}
+
+// The authored state with this id, and its position, for the fields the
+// runtime does not copy (fade, speed, wrap).
+@(private = "file")
+_ta_state_desc :: proc(a: ^TimelineAnimator, id: State_Id) -> (layer: int, index: int, desc: ^Timeline_State) {
+	if id == STATE_ID_NONE do return -1, -1, nil
+	for &l, li in a.layers {
+		for &st, si in l.states {
+			if st.id == i32(id) do return li, si, &st
+		}
+	}
+	return -1, -1, nil
+}
+
+@(private = "file")
+_ta_fade_start :: proc(st: ^Animator_State_Runtime, target, duration: f32) {
+	st.fade_from = st.weight
+	st.fade_target = target
+	st.fade_t = 0
+	st.fade_dur = duration
+}
+
+// Push a state's weight into the graph: the same number on every output it
+// reaches, so one fade moves the whole performance.
+@(private = "file")
+_ta_push_weight :: proc(a: ^TimelineAnimator, li: int, st: ^Animator_State_Runtime) {
+	if li < 0 || li >= len(a.rt) do return
+	lr := &a.rt[li]
+	for m, oi in st.mixers {
+		if oi >= len(lr.mixers) do break
+		anim.playable_set_input_weight(&a.graph, lr.mixers[oi], m, st.weight)
+	}
+}
+
+@(private = "file")
+_ta_advance_fades :: proc(a: ^TimelineAnimator, dt: f32) {
+	for &lr, li in a.rt {
+		for &st in lr.states {
+			if st.fade_dur > 0 {
+				st.fade_t += dt
+				k := st.fade_t / st.fade_dur
+				if k >= 1 {
+					k = 1
+					st.fade_dur = 0
+				}
+				st.weight = st.fade_from + (st.fade_target - st.fade_from) * k
+			}
+			_ta_push_weight(a, li, &st)
+		}
+	}
+}
+
+// --- API ------------------------------------------------------------------------------
+
+// Resolve a state name once, then use the handle. Names are per layer, and the
+// first match wins when two layers use the same name.
+animator_find :: proc(a: ^TimelineAnimator, name: string) -> (State_Id, bool) {
+	// Ids are minted with the graph, and gameplay may ask before the first
+	// tick — mint here too rather than handing back a 0 that never resolves.
+	_ta_ensure_ids(a)
+	for &l in a.layers {
+		for &st in l.states do if st.name == name do return State_Id(st.id), true
+	}
+	return STATE_ID_NONE, false
+}
+
+// Play `s` on its layer, fading every other state there out from its CURRENT
+// weight. `fade` of -1 takes the state's authored duration, which is the point
+// of authoring one, and anything at or below 0 is a hard cut.
+//
+// The target ALWAYS starts from time 0. Play means play, and a finished
+// one-shot that resumed where it stopped would report done again on the next
+// tick and never be seen. Resuming mid-state would be a separate argument if
+// anything ever needs it.
+//
+// There is no separate cross-fade entry point: a cut is a fade of length 0.
+animator_play :: proc(a: ^TimelineAnimator, s: State_Id, fade: f32 = -1) {
+	_ta_ensure_graph(a)
+	li, si, desc := _ta_state_desc(a, s)
+	if desc == nil || li >= len(a.rt) do return
+	lr := &a.rt[li]
+	if si >= len(lr.states) do return
+
+	dur := fade
+	if dur < 0 do dur = desc.fade
+	if dur <= 0 {
+		for &st, i in lr.states {
+			st.fade_dur = 0
+			st.fade_target = i == si ? 1 : 0
+			st.weight = st.fade_target
+			if i == si {
+				st.time = 0
+				st.done = false
+			}
+			_ta_push_weight(a, li, &st)
+		}
+		return
+	}
+	for &st, i in lr.states {
+		_ta_fade_start(&st, i == si ? 1 : 0, dur)
+		if i != si do continue
+		st.time = 0
+		st.done = false
+	}
+}
+
+// Silence every state. Timelines keep their playheads, and whatever was posed
+// last stays posed — nothing rewinds and nothing is destroyed.
+animator_stop :: proc(a: ^TimelineAnimator) {
+	if !a.graph_ready do return
+	for &lr, li in a.rt {
+		for &st in lr.states {
+			st.fade_dur = 0
+			st.fade_target = 0
+			st.weight = 0
+			_ta_push_weight(a, li, &st)
+		}
+	}
+}
+
+// The leading state on a layer: the one carrying the most weight, its playhead
+// as a fraction of its timeline, and whether a Once timeline has finished.
+animator_state :: proc(a: ^TimelineAnimator, layer := 0) -> (s: State_Id, normalized: f32, done: bool) {
+	s = STATE_ID_NONE
+	if layer < 0 || layer >= len(a.rt) do return
+	lr := &a.rt[layer]
+	best := f32(0)
+	bi := -1
+	for &st, i in lr.states {
+		if st.weight > best {
+			best = st.weight
+			bi = i
+		}
+	}
+	if bi < 0 do return
+	st := &lr.states[bi]
+	s = State_Id(st.id)
+	done = st.done
+	if length := _ta_state_length(st); length > 0 do normalized = st.time / length
+	return
+}
+
+// A layer's weight, applied to every output. Authored `weight` is the default
+// this overrides until the next rebuild.
+animator_layer_weight :: proc(a: ^TimelineAnimator, layer: int, w: f32) {
+	if layer < 0 || layer >= len(a.rt) do return
+	lr := &a.rt[layer]
+	for m, oi in lr.mixers {
+		o := anim.graph_output(&a.graph, oi)
+		if o == nil do continue
+		anim.playable_set_input_weight(&a.graph, o.root, m, w)
+	}
+	if layer < len(a.layers) do a.layers[layer].weight = w
+}
+
+// The state's timeline length, or 0 when it has no live director.
+@(private = "file")
+_ta_state_length :: proc(st: ^Animator_State_Runtime) -> f32 {
+	w := engine.ctx_world()
+	if w == nil || !engine.world_pool_valid(w, st.dir) do return 0
+	d := cast(^seq.PlayableDirector)engine.world_pool_get(w, st.dir)
+	if d == nil do return 0
+	return seq.director_duration(d, seq.director_tracks(d))
+}
+
+// --- Authoring validation -------------------------------------------------------------
+//
+// Found once when the graph is built, not per frame. Authored data being wrong
+// is not an invariant violation, so these are reported rather than fatal — but
+// they are reported EARLY, because the alternative is a character that silently
+// never moves.
+
+Animator_Problem_Kind :: enum u8 {
+	Overlapping_Pose, // two tracks pose objects whose hierarchies overlap
+}
+
+Animator_Problem :: struct {
+	kind:   Animator_Problem_Kind,
+	object: engine.Transform_Handle, // the inner of the two overlapping objects
+}
+
+// Whether `anc` is `h` or an ancestor of it.
+@(private = "file")
+_ta_is_ancestor :: proc(anc, h: engine.Transform_Handle) -> bool {
+	w := engine.ctx_world()
+	cur := h
+	for i := 0; i < 256; i += 1 {
+		if cur == anc do return true
+		t := engine.pool_get(&w.transforms, engine.Handle(cur))
+		if t == nil || t.parent.handle == {} do return false
+		cur = engine.Transform_Handle(t.parent.handle)
+	}
+	return false
+}
+
+// Every pair of pose outputs that would clobber each other. Allocates into
+// `allocator`.
+timeline_animator_problems :: proc(a: ^TimelineAnimator, allocator := context.temp_allocator) -> []Animator_Problem {
+	out := make([dynamic]Animator_Problem, allocator)
+
+	// Two pose outputs whose subtrees overlap write the same transforms, and
+	// the later apply wins. Reported against the inner object, which is the
+	// one an author would move or untarget.
+	for i in 0 ..< len(a.out_object) {
+		for j in i + 1 ..< len(a.out_object) {
+			oi, oj := a.out_object[i], a.out_object[j]
+			if _ta_is_ancestor(oi, oj) {
+				append(&out, Animator_Problem{kind = .Overlapping_Pose, object = oj})
+			} else if _ta_is_ancestor(oj, oi) {
+				append(&out, Animator_Problem{kind = .Overlapping_Pose, object = oi})
+			}
+		}
+	}
+	return out[:]
+}
+
+// The graphs this folder owns, for the Playable Graph window
+// (anim.playable_graph_for_object).
+@(phase={key=ImportersInit, order=5})
+animation_sequencer_graph_providers_init :: proc() {
+	@(static) done := false
+	if done do return
+	done = true
+
+	// A TimelineAnimator outranks an Animation on the same object (order 20):
+	// it is the more concrete driver, so it is the one actually posing.
+	anim.playable_graph_register_provider(10, proc(owner: engine.Transform_Handle) -> (anim.Graph_Source, bool) {
+		_, a := get_comp(owner, TimelineAnimator)
+		if a == nil || !a.graph_ready do return {}, false
+		return {graph = &a.graph, label = "TimelineAnimator (live)", live = true}, true
+	})
+	// A director's animation tracks share one arena, which is where a
+	// standalone timeline's blending actually happens.
+	anim.playable_graph_register_provider(30, proc(owner: engine.Transform_Handle) -> (anim.Graph_Source, bool) {
+		g := animation_director_graph(owner)
+		if g == nil do return {}, false
+		return {graph = g, label = "timeline tracks (live)", live = true}, true
+	})
+}
