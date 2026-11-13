@@ -3,12 +3,12 @@ package control_rig_tests
 import "core:math/linalg"
 import "core:testing"
 import "core:encoding/uuid"
-import engine "moonhug:engine"
-import "moonhug:editor/handles"
-import physics3d "moonhug:packages/physics3d"
-import crig "moonhug:packages/control_rig"
-import crig_editor "moonhug:packages/control_rig/editor"
-import common "moonhug:tests/common"
+import engine "haati:engine"
+import "haati:editor/handles"
+import physics3d "haati:packages/physics3d"
+import crig "haati:packages/control_rig"
+import crig_editor "haati:packages/control_rig/editor"
+import common "haati:tests/common"
 
 @(test)
 test_control_rig_pose_presets :: proc(t: ^testing.T) {

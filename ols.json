@@ -1,10 +1,11 @@
 {
     "$schema": "https://raw.githubusercontent.com/DanielGavin/ols/master/misc/ols.schema.json",
     "collections": [
-        { "name": "moonhug", "path": "moonhug" },
-        { "name": "packages", "path": "moonhug/packages" }
+        { "name": "haati", "path": "haati" },
+        { "name": "moonhug", "path": "haati" },
+        { "name": "packages", "path": "haati/packages" }
     ],
-    "checker_args": "-collection:moonhug=moonhug -ignore-unknown-attributes",
+    "checker_args": "-collection:haati=haati -collection:moonhug=haati -ignore-unknown-attributes",
     "enable_checker_only_saved": true,
     "enable_document_symbols": true,
     "enable_hover": true,

@@ -1,17 +1,12 @@
-# Shortcuts for tools/mh. This file FORWARDS ONLY — every build decision lives
-# in tools/mh, so there is one definition of how this repo builds and nothing
-# here can drift from it.
+# Shortcuts for tools/mh (also callable via tools/haati). This file FORWARDS ONLY —
+# every build decision lives in tools/mh so there is one definition of how Haati builds.
 #
-# make is optional. Without it, run the same commands directly:
-#
+#   odin run tools/haati -- <command>
 #   odin run tools/mh -- <command>
-#
-# make test NAME=pkg.test_name runs a single test. make deps NAME=<plugin>
-# gathers one plugin's dependencies.
 
 MH := odin run tools/mh --
 
-.PHONY: help setup run debug build check hot app test prebuild deps shaders mcp clean distclean
+.PHONY: help setup run debug build check hot overwatch app package test prebuild deps shaders mcp clean distclean
 
 help:      ; @$(MH) help
 setup:     ; @$(MH) setup
@@ -20,7 +15,9 @@ debug:     ; @$(MH) debug
 build:     ; @$(MH) build
 check:     ; @$(MH) check
 hot:       ; @$(MH) hot
+overwatch: ; @$(MH) overwatch
 app:       ; @$(MH) app
+package:   ; @$(MH) package
 prebuild:  ; @$(MH) prebuild
 deps:      ; @$(MH) deps $(NAME)
 shaders:   ; @$(MH) shaders

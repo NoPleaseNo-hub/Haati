@@ -9,9 +9,9 @@ package text_tests
 import "core:testing"
 import "core:math/linalg"
 import "core:strings"
-import "moonhug:engine"
-import text "moonhug:packages/text"
-import common "moonhug:tests/common"
+import "haati:engine"
+import text "haati:packages/text"
+import common "haati:tests/common"
 
 @(private = "file")
 _fake_metrics :: proc(font: engine.Asset_GUID, size_px: f32) -> (text.Line_Metrics, bool) {

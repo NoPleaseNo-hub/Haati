@@ -23,14 +23,14 @@ package sequencer_editor
 import "core:fmt"
 import "core:math"
 import "core:strings"
-import im "moonhug:external/odin-imgui"
-import engine "moonhug:engine"
-import seq "moonhug:packages/sequencer"
-import "moonhug:editor/inspector"
-import "moonhug:editor/undo"
-import wnd "moonhug:editor/window"
-import "moonhug:editor/widgets"
-import "moonhug:editor/preview"
+import im "haati:external/odin-imgui"
+import engine "haati:engine"
+import seq "haati:packages/sequencer"
+import "haati:editor/inspector"
+import "haati:editor/undo"
+import wnd "haati:editor/window"
+import "haati:editor/widgets"
+import "haati:editor/preview"
 
 // Material icon codepoints, declared locally like the inspector package does
 // — editor/material_icons.odin lives in the editor ROOT, which packages do

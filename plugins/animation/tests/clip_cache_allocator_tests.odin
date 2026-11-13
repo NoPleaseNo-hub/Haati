@@ -21,8 +21,8 @@ package animation_tests
 
 import "core:mem"
 import "core:testing"
-import anim "moonhug:packages/animation"
-import common "moonhug:tests/common"
+import anim "haati:packages/animation"
+import common "haati:tests/common"
 
 @(test)
 test_clip_cache_does_not_borrow_caller_allocator :: proc(t: ^testing.T) {

@@ -10,9 +10,9 @@ import "core:math/linalg"
 import "core:os"
 import "core:strings"
 import "core:testing"
-import "moonhug:engine"
-import particles "moonhug:packages/particles"
-import common "moonhug:tests/common"
+import "haati:engine"
+import particles "haati:packages/particles"
+import common "haati:tests/common"
 _make_system :: proc(tc: ^common.TestCtx) -> ^particles.ParticleSystem {
 	tH := engine.transform_new("Emitter")
 	engine.scene_set_root(tc.scene, tH)
@@ -341,7 +341,7 @@ test_particles_nested_scene_save :: proc(t: ^testing.T) {
 	PREFAB_GUID :: "aaaaaaa1-bbb2-4cc3-8dd4-eeeeeeeeeef7"
 	PS_TYPE_GUID :: "e5a7c2d1-4b3f-4c89-9a16-7d02e8b5f4a3"
 
-	dir := "moonhug/tests/_tmp_particles_nested"
+	dir := "haati/tests/_tmp_particles_nested"
 	mkerr := os.make_directory(dir)
 	testing.expect(t, mkerr == nil || os.exists(dir), fmt.tprintf("temp dir: %v", mkerr))
 
@@ -436,11 +436,11 @@ test_particles_museum_nested_save :: proc(t: ^testing.T) {
 	context.user_ptr = &tc_mem.uc
 	defer common.teardown(tc_mem)
 
-	engine.asset_db_init("moonhug/packages/particles/samples/particles_sample/assets")
+	engine.asset_db_init("haati/packages/particles/samples/particles_sample/assets")
 	defer engine.asset_db_shutdown()
 	defer engine.scene_lib_shutdown()
 
-	host_path := "moonhug/tests/_tmp_museum_host.scene"
+	host_path := "haati/tests/_tmp_museum_host.scene"
 	defer os.remove(host_path)
 
 	museum_guid, gerr := uuid.read("5d2e9c81-7a46-4f03-b1c8-92e05a4d7f36")

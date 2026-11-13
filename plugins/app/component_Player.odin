@@ -4,8 +4,8 @@ package app
 // animations wired by setup_player_animations). App-level: scene records live
 // in ext_components keyed by the type guid below — never change it.
 
-import "moonhug:engine"
-import tween "moonhug:packages/tween"
+import "haati:engine"
+import tween "haati:packages/tween"
 
 @(component={max=10, menu="Demo/Player"})
 @(typ_guid={guid = "d3f1a2b4-7e8c-4d5f-9a0b-1c2e3f4a5b6c"})

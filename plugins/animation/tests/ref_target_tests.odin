@@ -8,9 +8,9 @@ package animation_tests
 // attribute -> components_gen -> Component_Desc.ref_tags -> registry -> picker.
 
 import "core:testing"
-import "moonhug:editor/inspector"
-import "moonhug:engine"
-import common "moonhug:tests/common"
+import "haati:editor/inspector"
+import "haati:engine"
+import common "haati:tests/common"
 
 @(private = "file")
 _has :: proc(keys: []engine.TypeKey, k: engine.TypeKey) -> bool {

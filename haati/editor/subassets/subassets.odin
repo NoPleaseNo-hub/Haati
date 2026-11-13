@@ -1,0 +1,65 @@
+package subassets
+
+// Sub-asset providers for the project window (Unity's expandable assets: a
+// sliced texture unfolds to its sprites, a model to its meshes). A package's
+// editor half registers a provider for its extensions at EditorInit; the
+// project view asks the registry, so the editor root never imports the
+// package. A sub-asset is addressed as PPtr{asset guid, local_id} — the id
+// comes from the provider (persistent, minted by the asset's importer). The
+// clip sampler below is the same kind of seam for a model's clips.
+
+import "base:runtime"
+import "core:fmt"
+import "haati:engine"
+
+Sub_Asset :: struct {
+	id:   engine.Local_ID,
+	name: string, // borrowed from the provider's cache — use within the frame
+	// Optional grid-cell preview: an imgui texture id plus this sub-asset's
+	// uv rect within it, and its pixel size for aspect-fit. nil image = the
+	// project view draws the type glyph.
+	image:    rawptr,
+	uv0, uv1: [2]f32,
+	size:     [2]f32,
+}
+
+Provider :: struct {
+	// Sub-assets of `path`, on `allocator` (names borrowed). Empty = the
+	// asset has none right now (no fold arrow).
+	list: proc(path: string, allocator: runtime.Allocator) -> []Sub_Asset,
+	// Double-click on a sub-asset row (open the owning editor on it).
+	open: proc(path: string, guid: engine.Asset_GUID, id: engine.Local_ID),
+}
+
+// Extension (lowercase, with dot: ".png") -> provider.
+_providers: map[string]Provider
+
+// One provider per extension. A second registration used to replace the
+// first silently, so two packages each listing a model's sub-assets meant one
+// list vanished with no trace of why. It is a wiring error, so it stops the
+// editor where it happens.
+register :: proc(ext: string, p: Provider) {
+	// Registry state never borrows the caller's allocator.
+	context.allocator = runtime.default_allocator()
+	if _providers == nil do _providers = make(map[string]Provider)
+	if ext in _providers {
+		fmt.panicf("subassets: a provider for %q is already registered — extend it instead of registering a second one", ext)
+	}
+	_providers[ext] = p
+}
+
+find :: proc(ext: string) -> (Provider, bool) {
+	p, ok := _providers[ext]
+	return p, ok
+}
+
+// --- Model clips ------------------------------------------------------------------
+
+// Poses the node hierarchy under `root` by the clip asset `clip` at `t`
+// seconds and returns the clip's length. The Preview pane and the thumbnail
+// of a clip inside a model pose the model's rig with it. The animation
+// package installs it at EditorInit. nil: a model's clips have no preview and
+// no thumbnail.
+Clip_Sampler :: proc(root: engine.Transform_Handle, clip: engine.Asset_GUID, t: f32) -> (length: f32, ok: bool)
+
+clip_sampler: Clip_Sampler

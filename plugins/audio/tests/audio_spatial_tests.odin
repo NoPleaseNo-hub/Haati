@@ -6,8 +6,8 @@ package audio_tests
 
 import "core:math"
 import "core:testing"
-import "moonhug:engine"
-import audio "moonhug:packages/audio"
+import "haati:engine"
+import audio "haati:packages/audio"
 
 _close :: proc(a, b: f32) -> bool { return abs(a - b) < 0.001 }
 

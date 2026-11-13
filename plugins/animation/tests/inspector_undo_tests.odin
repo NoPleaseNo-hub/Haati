@@ -18,10 +18,10 @@ package animation_tests
 // an entry.
 
 import "core:testing"
-import undo "moonhug:editor/undo"
-import "moonhug:engine"
-import anim "moonhug:packages/animation"
-import common "moonhug:tests/common"
+import undo "haati:editor/undo"
+import "haati:engine"
+import anim "haati:packages/animation"
+import common "haati:tests/common"
 
 @(private = "file")
 _comp_handle :: proc(owner: engine.Transform_Handle, key: engine.TypeKey) -> engine.Handle {

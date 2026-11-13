@@ -4,7 +4,7 @@ package node_graph_tests
 // needs an imgui context, so it is not covered here -- these pin the arithmetic
 // that decides WHERE things land, which is where node canvases usually go wrong.
 
-import ng "moonhug:packages/node_graph"
+import ng "haati:packages/node_graph"
 
 import "core:testing"
 

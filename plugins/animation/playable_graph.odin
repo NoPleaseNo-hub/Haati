@@ -20,7 +20,7 @@ package animation
 // is applied, so callbacks never observe a half-evaluated frame.
 
 import "base:runtime"
-import "moonhug:engine"
+import "haati:engine"
 import "core:math/linalg"
 import "core:strings"
 

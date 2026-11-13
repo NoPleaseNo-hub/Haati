@@ -20,12 +20,12 @@ import "base:runtime"
 import "core:encoding/json"
 import "core:fmt"
 import "core:strings"
-import im "moonhug:external/odin-imgui"
-import "moonhug:engine"
-import "moonhug:editor/inspector"
-import "moonhug:editor/subassets"
-import "moonhug:editor/widgets"
-import anim "moonhug:packages/animation"
+import im "haati:external/odin-imgui"
+import "haati:engine"
+import "haati:editor/inspector"
+import "haati:editor/subassets"
+import "haati:editor/widgets"
+import anim "haati:packages/animation"
 
 @(phase={key=engine.Phase.EditorInit, order=1, mode=Editor})
 model_clips_install :: proc() {

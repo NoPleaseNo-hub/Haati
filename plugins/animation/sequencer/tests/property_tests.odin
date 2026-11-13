@@ -8,11 +8,11 @@ package animation_sequencer_tests
 import "core:fmt"
 import "core:strings"
 import "core:testing"
-import "moonhug:engine"
-import "moonhug:editor/inspector"
-import "moonhug:editor/undo"
-import common "moonhug:tests/common"
-import anim_seq "moonhug:packages/animation/sequencer"
+import "haati:engine"
+import "haati:editor/inspector"
+import "haati:editor/undo"
+import common "haati:tests/common"
+import anim_seq "haati:packages/animation/sequencer"
 
 @(private = "file")
 _animator_with_states :: proc() -> (^anim_seq.TimelineAnimator, engine.Handle) {

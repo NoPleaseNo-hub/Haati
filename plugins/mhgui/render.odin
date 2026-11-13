@@ -7,7 +7,7 @@ package mhgui
 // container.
 
 import "core:encoding/uuid"
-import "moonhug:engine"
+import "haati:engine"
 
 // The package's white texture (assets/white.png, meta committed with it):
 // what an Image without a sprite draws.

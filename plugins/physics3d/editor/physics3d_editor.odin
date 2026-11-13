@@ -11,14 +11,14 @@ package physics3d_editor
 
 import "core:fmt"
 import "core:math/linalg"
-import im "moonhug:external/odin-imgui"
-import "moonhug:engine"
-import "moonhug:engine/gizmos"
-import "moonhug:editor/handles"
-import "moonhug:editor/inspector"
-import "moonhug:editor/undo"
-import "moonhug:editor/widgets"
-import physics3d "moonhug:packages/physics3d"
+import im "haati:external/odin-imgui"
+import "haati:engine"
+import "haati:engine/gizmos"
+import "haati:editor/handles"
+import "haati:editor/inspector"
+import "haati:editor/undo"
+import "haati:editor/widgets"
+import physics3d "haati:packages/physics3d"
 
 @(phase={key=engine.Phase.EditorInit, order=1, mode=Editor})
 physics3d_editor_install :: proc() {

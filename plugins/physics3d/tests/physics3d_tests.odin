@@ -4,9 +4,9 @@ package physics3d_tests
 // step -> transform write-back, through the same path the app takes.
 
 import "core:testing"
-import "moonhug:engine"
-import common "moonhug:tests/common"
-import physics3d "moonhug:packages/physics3d"
+import "haati:engine"
+import common "haati:tests/common"
+import physics3d "haati:packages/physics3d"
 
 @(test)
 physics3d_dynamic_body_falls_onto_static_floor :: proc(t: ^testing.T) {

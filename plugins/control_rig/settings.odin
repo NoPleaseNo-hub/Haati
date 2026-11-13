@@ -1,6 +1,6 @@
 package control_rig
 
-import engine "moonhug:engine"
+import engine "haati:engine"
 
 // Skeleton & Bone Display project settings.
 // Exposed in Edit -> Project Settings.

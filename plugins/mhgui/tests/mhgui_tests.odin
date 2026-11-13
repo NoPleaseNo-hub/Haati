@@ -4,15 +4,15 @@ package mhgui_tests
 
 import "core:math/linalg"
 import "core:testing"
-import "moonhug:engine"
-import "moonhug:engine/gizmos"
-import editor "moonhug:editor"
-import "moonhug:editor/handles"
-import "moonhug:editor/undo"
-import im "moonhug:external/odin-imgui"
-import mhgui_editor "moonhug:packages/mhgui/editor"
-import mhgui "moonhug:packages/mhgui"
-import common "moonhug:tests/common"
+import "haati:engine"
+import "haati:engine/gizmos"
+import editor "haati:editor"
+import "haati:editor/handles"
+import "haati:editor/undo"
+import im "haati:external/odin-imgui"
+import mhgui_editor "haati:packages/mhgui/editor"
+import mhgui "haati:packages/mhgui"
+import common "haati:tests/common"
 
 @(private = "file")
 _add :: proc(tH: engine.Transform_Handle, key: engine.TypeKey) -> rawptr {

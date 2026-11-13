@@ -4,9 +4,9 @@ package animation_tests
 // and multi-key drag are built on.
 
 import "core:testing"
-import "moonhug:engine"
-import anim "moonhug:packages/animation"
-import common "moonhug:tests/common"
+import "haati:engine"
+import anim "haati:packages/animation"
+import common "haati:tests/common"
 
 @(test)
 test_frame_rate_defaults_for_a_clip_without_one :: proc(t: ^testing.T) {

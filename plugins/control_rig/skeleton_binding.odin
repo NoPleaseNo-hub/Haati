@@ -6,7 +6,7 @@ package control_rig
 import "core:math"
 import "core:strings"
 import "core:math/linalg"
-import engine "moonhug:engine"
+import engine "haati:engine"
 
 Bone_Rest_Transform :: struct {
 	pos:   [3]f32, // character actor-local position

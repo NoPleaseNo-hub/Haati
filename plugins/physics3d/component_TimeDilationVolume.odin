@@ -17,7 +17,7 @@ package physics3d
 
 import "base:runtime"
 import "core:math/linalg"
-import "moonhug:engine"
+import "haati:engine"
 
 Time_Dilation_Combine_Mode :: enum u8 {
 	Multiply    = 0, // Unreal-style layered product (e.g. 0.5x * 0.2x = 0.10x)

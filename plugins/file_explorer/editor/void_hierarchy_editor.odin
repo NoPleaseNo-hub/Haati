@@ -8,21 +8,21 @@ import "core:mem"
 import "core:slice"
 import "core:path/filepath"
 import "core:encoding/uuid"
-import im "moonhug:external/odin-imgui"
-import engine "moonhug:engine"
-import wnd "moonhug:editor/window"
-import icons "moonhug:editor/icons"
-import thm "moonhug:editor/theme"
-import undo "moonhug:editor/undo"
-import clip "moonhug:editor/clipboard"
-import editor_visuals "moonhug:packages/editor_visuals"
-import widgets "moonhug:editor/widgets"
-import inspector "moonhug:editor/inspector"
-import file_exp "moonhug:packages/file_explorer"
-import cad_csg "moonhug:packages/cad_csg"
-import cad_csg_editor "moonhug:packages/cad_csg/editor"
-import control_rig "moonhug:packages/control_rig"
-import physics3d "moonhug:packages/physics3d"
+import im "haati:external/odin-imgui"
+import engine "haati:engine"
+import wnd "haati:editor/window"
+import icons "haati:editor/icons"
+import thm "haati:editor/theme"
+import undo "haati:editor/undo"
+import clip "haati:editor/clipboard"
+import editor_visuals "haati:packages/editor_visuals"
+import widgets "haati:editor/widgets"
+import inspector "haati:editor/inspector"
+import file_exp "haati:packages/file_explorer"
+import cad_csg "haati:packages/cad_csg"
+import cad_csg_editor "haati:packages/cad_csg/editor"
+import control_rig "haati:packages/control_rig"
+import physics3d "haati:packages/physics3d"
 
 // ─────────────────────────────────────────────────────────────
 // VOID HIERARCHY — GODOT & UNREAL STYLE SCENE TREE DOCK
@@ -977,7 +977,7 @@ _vh_sanitize_odin_identifier :: proc(raw: string) -> string {
 _vh_sanitize_odin_subfolder :: proc(raw_folder: string) -> string {
 	norm, _ := strings.replace_all(strings.trim_space(raw_folder), "\\", "/", context.temp_allocator)
 	norm = strings.trim(norm, "/")
-	for prefix in ([?]string{"../plugins/void_odin/", "plugins/void_odin/", "moonhug/packages/void_odin/", "packages/void_odin/", "void_odin/"}) {
+	for prefix in ([?]string{"../plugins/void_odin/", "plugins/void_odin/", "haati/packages/void_odin/", "packages/void_odin/", "void_odin/"}) {
 		if strings.has_prefix(norm, prefix) {
 			norm = strings.trim(norm[len(prefix):], "/")
 			break
@@ -1099,7 +1099,7 @@ _vh_create_and_open_odin_component :: proc(struct_name: string, rel_sub_folder: 
 			u64((h2 >> 16) & 0xffffffffffff),
 		)
 		code_txt := fmt.tprintf(
-			"package %s\n\nimport \"moonhug:engine\"\n\n@" + "(component={{menu=\"Void/%s\"}})\n@" + "(typ_guid={{guid = \"%s\"}})\n%s :: struct {{\n\tusing base: engine.CompData,\n\t// Tip: Use engine.Ref_Local to reference a Scene Node,\n\t// or f32, int, bool, [3]f32 for tunable Inspector variables.\n}}\n\nreset_%s :: proc(c: ^%s) {{\n}}\n",
+			"package %s\n\nimport \"haati:engine\"\n\n@" + "(component={{menu=\"Void/%s\"}})\n@" + "(typ_guid={{guid = \"%s\"}})\n%s :: struct {{\n\tusing base: engine.CompData,\n\t// Tip: Use engine.Ref_Local to reference a Scene Node,\n\t// or f32, int, bool, [3]f32 for tunable Inspector variables.\n}}\n\nreset_%s :: proc(c: ^%s) {{\n}}\n",
 			pkg_name,
 			struct_name,
 			guid_str,
@@ -1864,8 +1864,8 @@ _vh_to_asset_db_path :: proc(path: string, alloc := context.temp_allocator) -> s
 	rel_p       = strings.trim_prefix(rel_p, "./")
 	if strings.has_prefix(rel_p, "plugins/") {
 		return fmt.tprintf("packages/%s", strings.trim_prefix(rel_p, "plugins/"))
-	} else if strings.has_prefix(rel_p, "moonhug/") {
-		return strings.trim_prefix(rel_p, "moonhug/")
+	} else if strings.has_prefix(rel_p, "haati/") {
+		return strings.trim_prefix(rel_p, "haati/")
 	}
 	return rel_p
 }

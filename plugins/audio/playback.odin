@@ -11,7 +11,7 @@ import "base:runtime"
 import "core:fmt"
 import sdl "vendor:sdl3"
 import mix "vendor:sdl3/mixer"
-import engine "moonhug:engine"
+import engine "haati:engine"
 
 _audio_state: struct {
 	lib_ready: bool,
@@ -48,9 +48,15 @@ audio_force_deviceless :: proc() {
 
 mixer_init_headless :: proc() -> bool {
 	_force_deviceless = true
-	if _audio_state.mixer != nil do return true
+	if _audio_state.mixer != nil {
+		audio_buses_ensure_groups(_audio_state.mixer)
+		return true
+	}
 	_mix_lib_ensure()
 	_audio_state.mixer = _create_deviceless_mixer()
+	if _audio_state.mixer != nil {
+		audio_buses_ensure_groups(_audio_state.mixer)
+	}
 	return _audio_state.mixer != nil
 }
 
@@ -61,12 +67,16 @@ _create_deviceless_mixer :: proc() -> ^mix.Mixer {
 }
 
 _mixer_ensure :: proc() -> bool {
-	if _audio_state.mixer != nil do return true
+	if _audio_state.mixer != nil {
+		audio_buses_ensure_groups(_audio_state.mixer)
+		return true
+	}
 	_mix_lib_ensure()
 	m: ^mix.Mixer
 	if !_force_deviceless do m = mix.CreateMixerDevice(sdl.AUDIO_DEVICE_DEFAULT_PLAYBACK, nil)
 	if m == nil do m = _create_deviceless_mixer()
 	_audio_state.mixer = m
+	if m != nil do audio_buses_ensure_groups(m)
 	return m != nil
 }
 
@@ -74,12 +84,17 @@ _mixer_ensure :: proc() -> bool {
 audio_play :: proc(src: ^AudioSource, fade_in_ms: i64 = 0) -> bool {
 	clip, ok := clip_load(src.clip)
 	if !ok do return false
+	audio_buses_ensure_groups(_audio_state.mixer)
 	if src.track == nil {
 		src.track = mix.CreateTrack(_audio_state.mixer)
 		if src.track == nil do return false
 	}
+	if grp := audio_bus_group(src.bus); grp != nil {
+		_ = mix.SetTrackGroup(src.track, grp)
+	}
+	_ = mix.SetTrackCookedCallback(src.track, transmute(mix.TrackMixCallback)_track_cooked_lpf_cb, src)
 	if !mix.SetTrackAudio(src.track, clip.audio) do return false
-	_ = mix.SetTrackGain(src.track, src.volume)
+	_ = mix.SetTrackGain(src.track, src.volume * audio_bus_effective_gain(src.bus))
 	_ = mix.SetTrackLoops(src.track, src.loop ? -1 : 0)
 	props: sdl.PropertiesID
 	if fade_in_ms > 0 {
@@ -253,6 +268,9 @@ audio_update :: proc(dt: f32) {
 		_one_shot_apply(shot)
 	}
 
+	audio_buses_step(dt)
+	audio_step_multicore_occlusion(w, _listener.pos, dt)
+
 	pool := audio_sources(w)
 	if pool == nil do return
 	it := engine.pool_iterator(pool)
@@ -273,6 +291,10 @@ audio_update :: proc(dt: f32) {
 		}
 		if src.track == nil do continue
 
+		// Ensure bus routing stays synced with live inspector edits to `src.bus`.
+		if grp := audio_bus_group(src.bus); grp != nil {
+			_ = mix.SetTrackGroup(src.track, grp)
+		}
 		// Live controls apply every frame — inspector edits are audible.
 		source_apply_gains(src.track, src, 1)
 	}
@@ -290,7 +312,9 @@ source_apply_gains :: proc(track: ^mix.Track, src: ^AudioSource, weight: f32) {
 		sp = spatial_gains(_listener.pos, _listener.rot, sw.position,
 			src.min_distance, src.max_distance, src.spatial_blend, src.rolloff_mode)
 	}
-	gain := src.mute ? 0 : src.volume * weight * sp.gain
+	occ_gain, _ := audio_compute_occlusion_gain_and_cutoff(src.occlusion_factor, src.occlusion_lowpass_hz)
+	bus_gain := audio_bus_effective_gain(src.bus)
+	gain := src.mute ? 0 : src.volume * weight * sp.gain * bus_gain * occ_gain
 	_ = mix.SetTrackGain(track, gain)
 	stereo := mix.StereoGains{sp.left, sp.right}
 	_ = mix.SetTrackStereo(track, &stereo)
@@ -327,5 +351,6 @@ voice_position :: proc(track: ^mix.Track) -> f32 {
 @(phase={key=ExitingPlayMode})
 audio_exiting_play_mode :: proc() {
 	_one_shots_clear()
+	audio_buses_reset_runtime()
 	if _audio_state.mixer != nil do _ = mix.StopAllTracks(_audio_state.mixer, 0)
 }

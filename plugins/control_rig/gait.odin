@@ -6,7 +6,7 @@ package control_rig
 
 import "core:math"
 import "core:math/linalg"
-import engine "moonhug:engine"
+import engine "haati:engine"
 
 Gait_Mode :: enum {
 	Idle,

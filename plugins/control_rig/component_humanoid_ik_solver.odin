@@ -14,7 +14,7 @@ package control_rig
 
 import "core:math"
 import "core:math/linalg"
-import engine "moonhug:engine"
+import engine "haati:engine"
 
 @(component={menu="Animation/HumanoidIkSolver"})
 @(typ_guid={guid = "9b4c7d2e-5a6b-4e1a-8c3d-7f1e0a2b3c4d"})

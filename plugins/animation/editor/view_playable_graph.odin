@@ -17,12 +17,14 @@ package animation_editor
 //      rebuilt into temp memory each frame; weights are structural, not live.
 
 import "core:fmt"
-import im "moonhug:external/odin-imgui"
-import "moonhug:editor/menu"
-import nc "moonhug:editor/node_canvas"
-import engine "moonhug:engine"
-import anim "moonhug:packages/animation"
-import "moonhug:editor/icons"
+import im "haati:external/odin-imgui"
+import "haati:editor/menu"
+import nc "haati:editor/node_canvas"
+import vs "haati:editor/visual_script"
+import "haati:editor/widgets"
+import engine "haati:engine"
+import anim "haati:packages/animation"
+import "haati:editor/icons"
 
 @(private = "file") _PG_BAR_PAD :: f32(4) // inset of the strip above the canvas
 @(private = "file") _PG_COL_W :: f32(250) // one depth rank
@@ -69,9 +71,16 @@ draw_playable_graph_view :: proc() {
 	// Animation, a TimelineAnimator, a director's track arena and the scrub
 	// preview all answer through the same call.
 	owner, src, found := _pg_selected_source()
+	_pg_pad()
+	if im.SmallButton(fmt.ctprintf("%s Author Anim & Motion Layer in Unified Graph Studio (.bodin)", icons.ICON_MD_ACCOUNT_TREE)) {
+		vs.open_unified_graph_domain(.Anim_Motion)
+	}
+	widgets.tooltip("Author Character Motion, Layered Pose Blends, Spring Dampers & IK directly on the unified .bodin Odin VM (0.00 ms VM overhead — no separate AnimBP VM needed!)")
+	im.SameLine()
+	_ = nc.draw_wire_style_combo("##pg_wire_style", 148.0)
 	if !found {
 		_pg_pad()
-		im.TextDisabled("Select an object that owns a playable graph.")
+		im.TextDisabled("Select an object that owns a playable graph to inspect live pose weights.")
 		return
 	}
 	g, live := src.graph, src.live

@@ -14,7 +14,7 @@ package animation
 
 import "base:runtime"
 import "core:encoding/json"
-import "moonhug:engine"
+import "haati:engine"
 import "core:encoding/uuid"
 import "core:math"
 import "core:math/linalg"

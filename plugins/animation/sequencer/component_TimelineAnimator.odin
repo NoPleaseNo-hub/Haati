@@ -14,9 +14,9 @@ package animation_sequencer
 // bind-time default pose. Two timelines evaluating and applying separately do
 // not cross-fade, the second write replaces the first.
 
-import "moonhug:engine"
-import seq "moonhug:packages/sequencer"
-import anim "moonhug:packages/animation"
+import "haati:engine"
+import seq "haati:packages/sequencer"
+import anim "haati:packages/animation"
 
 // One authored layer. Layer order is override order: a higher layer replaces a
 // lower one wherever it animates a channel, which is what

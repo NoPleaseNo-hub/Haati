@@ -37,8 +37,8 @@ import "core:math/linalg"
 import "core:os"
 import "core:strings"
 import stbi "vendor:stb/image"
-import engine "moonhug:engine"
-import gfx "moonhug:engine/gfx"
+import engine "haati:engine"
+import gfx "haati:engine/gfx"
 
 // ============================================================================
 // 1. PHYSICAL & DESTRUCTIBLE MATERIAL PROPERTIES DATATABLE
@@ -866,8 +866,13 @@ csg_apply_soft_deform_impulse :: proc(
 
 	it := engine.pool_iterator(csg_volumes(w))
 	for vol, _ in engine.pool_next(&it) {
-		if !vol.enabled || !vol.soft_deform_enabled do continue
-		if target_vol != nil && vol != target_vol do continue
+		if !vol.enabled do continue
+		if target_vol != nil {
+			if vol != target_vol do continue
+			if !vol.soft_deform_enabled do vol.soft_deform_enabled = true
+		} else if !vol.soft_deform_enabled {
+			continue
+		}
 
 		tw := engine.transform_world(vol.owner)
 		model := engine.trs_matrix(tw.position, tw.rotation, tw.scale)

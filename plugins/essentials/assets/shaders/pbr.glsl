@@ -50,18 +50,7 @@ layout(set = 2, binding = 3) uniform sampler2D ao_tex;
 layout(set = 2, binding = 4) uniform sampler2D emissive_tex;
 layout(set = 2, binding = 5) uniform sampler2D env_tex; // equirect environment
 
-#define MAX_LIGHTS 8
-struct GpuLight {
-    vec4 pos_type;    // xyz = position, w = kind (0 dir, 1 point, 2 spot)
-    vec4 dir_range;   // xyz = normalized travel direction, w = range
-    vec4 color_outer; // rgb premultiplied by intensity, w = cos outer half-angle
-    vec4 params;      // x = cos inner half-angle, yzw reserved
-};
-layout(set = 3, binding = 0) uniform LightUBO {
-    vec4 ambient_count; // x = ambient floor, y = light count
-    vec4 cam_pos;       // xyz = camera world position
-    GpuLight lights[MAX_LIGHTS];
-};
+#include "lighting_common.glsl"
 
 layout(set = 3, binding = 1) uniform MaterialUBO {
     vec4  emissive_color;   // rgb tint, w strength (0 = emissive off)
@@ -112,29 +101,25 @@ void main() {
     vec3 f0 = mix(vec3(0.04), albedo, metal);
 
     // One Cook-Torrance evaluation per light: GGX distribution, Smith-Schlick
-    // geometry, Schlick fresnel. Point/spot attenuate with the same smooth
-    // falloff the lit shader uses.
+    // geometry, Schlick fresnel, shared attenuation and 16-tile shadow atlas.
     vec3 lo = vec3(0.0);
     int light_n = int(ambient_count.y);
+    bool dir_shadow_used = false;
     for (int i = 0; i < light_n; ++i) {
         GpuLight gl = lights[i];
         vec3 l;
-        float atten = 1.0;
+        vec3 L_to_frag;
+        float dist = 0.0;
         if (gl.pos_type.w < 0.5) {
-            l = -gl.dir_range.xyz;
+            L_to_frag = gl.dir_range.xyz;
+            l = -L_to_frag;
         } else {
             vec3 d = gl.pos_type.xyz - frag_world_pos;
-            float dist = length(d);
+            dist = length(d);
             l = d / max(dist, 1e-6);
-            float ratio = dist / max(gl.dir_range.w, 1e-4);
-            atten = clamp(1.0 - ratio * ratio, 0.0, 1.0);
-            atten *= atten;
-            if (gl.pos_type.w > 1.5) { // spot cone
-                float cos_a = dot(-l, gl.dir_range.xyz);
-                atten *= clamp((cos_a - gl.color_outer.w)
-                             / max(gl.params.x - gl.color_outer.w, 1e-4), 0.0, 1.0);
-            }
+            L_to_frag = -l;
         }
+        float atten = light_attenuation(gl, L_to_frag, dist);
         vec3 h = normalize(v + l);
         float nol = max(dot(n, l), 0.0);
         float noh = max(dot(n, h), 0.0);
@@ -151,7 +136,12 @@ void main() {
         // Diffuse keeps parity with the lit shader (no 1/π); the specular lobe
         // stays physical — an extra ×π there blows out highlights.
         vec3 diffuse = (1.0 - F) * (1.0 - metal) * albedo;
-        lo += (diffuse + spec) * gl.color_outer.rgb * (nol * atten);
+        float shadow = 1.0;
+        if (gl.pos_type.w >= 0.5 || !dir_shadow_used) {
+            shadow = eval_light_shadow(i, gl, frag_world_pos, n, L_to_frag, nol);
+            if (gl.pos_type.w < 0.5 && gl.params.y < -1.5) dir_shadow_used = true;
+        }
+        lo += (diffuse + spec) * gl.color_outer.rgb * (nol * atten * shadow);
     }
 
     float ao = texture(ao_tex, frag_uv).r;
@@ -174,6 +164,9 @@ void main() {
     }
     vec3 f_amb = f0 + (max(vec3(1.0 - rough), f0) - f0) * pow(1.0 - nov, 5.0);
     vec3 env_spec = env * f_amb * (1.0 - rough * rough) * ao * env_f;
+    if (light_n == 0 && ambient_count.x <= 0.001) {
+        env_spec = vec3(0.0);
+    }
 
     // Diffuse ambient cedes energy to the reflection (1 - f_amb): smooth
     // glass at glancing angles is mirror, not milk.

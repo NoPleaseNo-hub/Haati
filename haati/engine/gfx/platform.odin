@@ -1,0 +1,156 @@
+// Window, event pump, and frame timing on SDL3. Input state lives in the
+// engine/input package — poll_events feeds it events, call sites read it
+// through `import "engine/input"` and never touch SDL directly.
+//
+// gfx never imports engine: it knows nothing about assets, scenes, or
+// components. See docs/SDL3Renderer.md.
+package gfx
+
+import sdl "vendor:sdl3"
+import "../input"
+
+_platform: struct {
+	window:         ^sdl.Window,
+	quit_requested: bool,
+	perf_freq:      f64,
+	last_counter:   u64,
+	delta:          f32,
+}
+
+// Creates the SDL window (hidden when show=false so the caller can apply
+// saved geometry first, then show_window). GPU device setup lives in
+// init() in gfx.odin, which calls this.
+_platform_init :: proc(title: cstring, width, height: i32, show := true) -> bool {
+	if !sdl.Init({.VIDEO, .GAMEPAD}) {
+		if !sdl.Init({.VIDEO}) {
+			return false
+		}
+	}
+	// The click that gives the window focus is delivered as a click too, as
+	// a game expects (macOS swallows it by default).
+	_ = sdl.SetHint(sdl.HINT_MOUSE_FOCUS_CLICKTHROUGH, "1")
+	flags := sdl.WindowFlags{.RESIZABLE, .HIGH_PIXEL_DENSITY}
+	if !show do flags += {.HIDDEN}
+	_platform.window = sdl.CreateWindow(title, width, height, flags)
+	if _platform.window == nil {
+		sdl.Quit()
+		return false
+	}
+	_apply_native_dark_window_chrome(_platform.window)
+	input.attach_window(_platform.window)
+	_platform.perf_freq = f64(sdl.GetPerformanceFrequency())
+	_platform.last_counter = sdl.GetPerformanceCounter()
+	return true
+}
+
+_platform_shutdown :: proc() {
+	if _platform.window != nil {
+		sdl.DestroyWindow(_platform.window)
+		_platform.window = nil
+	}
+	_cleanup_native_dark_window_chrome()
+	sdl.Quit()
+}
+
+// Escape hatch for the editor's imgui platform backend init.
+window :: proc() -> ^sdl.Window {
+	return _platform.window
+}
+
+// Applies native dark titlebar/caption/erase-brush chrome to secondary OS windows (e.g. ImGui multi-viewports).
+apply_dark_window_chrome :: proc(w: ^sdl.Window) {
+	_apply_native_dark_window_chrome(w)
+}
+
+show_window :: proc() {
+	sdl.ShowWindow(_platform.window)
+	// ShowWindow maps the window but doesn't activate the app (macOS): a
+	// window created HIDDEN (editor: saved geometry applies before first
+	// present) would start behind everything. RaiseWindow activates + focuses.
+	_ = sdl.RaiseWindow(_platform.window)
+}
+
+// Drains the SDL event queue once per frame: updates the input snapshot and
+// forwards every event to event_cb (the editor passes imgui's ProcessEvent).
+poll_events :: proc(event_cb: proc(e: ^sdl.Event) = nil) {
+	input.frame_reset()
+	ws := window_size()
+	input.default_viewport({f32(ws.x), f32(ws.y)})
+	e: sdl.Event
+	main_id := sdl.GetWindowID(_platform.window)
+	for sdl.PollEvent(&e) {
+		if event_cb != nil && !(input.is_mouse_relative() && e.type == .MOUSE_MOTION) {
+			event_cb(&e)
+		}
+		#partial switch e.type {
+		case .QUIT:
+			_platform.quit_requested = true
+		case .WINDOW_CLOSE_REQUESTED:
+			// Only the main window quits. Secondary OS windows (editor panels
+			// popped out as imgui viewports) are closed by the imgui backend,
+			// which reads the same event — closing one must not end the app.
+			if e.window.windowID == main_id do _platform.quit_requested = true
+		case:
+			input.apply_event(&e)
+		}
+	}
+	input.frame_events_done()
+}
+
+quit_requested :: proc() -> bool {
+	return _platform.quit_requested
+}
+
+request_quit :: proc() {
+	_platform.quit_requested = true
+}
+
+// Computes the frame's dt (called from frame_begin in gfx.odin). Frame pacing
+// itself comes from swapchain vsync — there is no SetTargetFPS equivalent;
+// dt-based logic handles 120Hz fine.
+_platform_frame_tick :: proc() {
+	now := sdl.GetPerformanceCounter()
+	_platform.delta = f32(f64(now - _platform.last_counter) / _platform.perf_freq)
+	_platform.last_counter = now
+	// Clamp huge gaps (debugger pause, window drag) so dt-driven logic
+	// doesn't explode.
+	if _platform.delta > 0.25 do _platform.delta = 0.25
+}
+
+delta_time :: proc() -> f32 {
+	return _platform.delta
+}
+
+window_size :: proc() -> [2]i32 {
+	w, h: i32
+	sdl.GetWindowSize(_platform.window, &w, &h)
+	return {w, h}
+}
+
+// Framebuffer pixels (differs from window_size on HiDPI).
+pixel_size :: proc() -> [2]i32 {
+	w, h: i32
+	sdl.GetWindowSizeInPixels(_platform.window, &w, &h)
+	return {w, h}
+}
+
+window_position :: proc() -> [2]i32 {
+	x, y: i32
+	sdl.GetWindowPosition(_platform.window, &x, &y)
+	return {x, y}
+}
+
+set_window_geometry :: proc(x, y, w, h: i32) {
+	sdl.SetWindowSize(_platform.window, w, h)
+	sdl.SetWindowPosition(_platform.window, x, y)
+}
+
+// Usable bounds (excluding menu bar/dock) of the display the window is on.
+display_usable_bounds :: proc() -> (x, y, w, h: i32) {
+	display := sdl.GetDisplayForWindow(_platform.window)
+	rect: sdl.Rect
+	if sdl.GetDisplayUsableBounds(display, &rect) {
+		return rect.x, rect.y, rect.w, rect.h
+	}
+	return 0, 0, 1280, 800
+}

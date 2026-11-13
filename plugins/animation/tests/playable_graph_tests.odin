@@ -8,9 +8,9 @@ package animation_tests
 import "core:encoding/uuid"
 import "core:strings"
 import "core:testing"
-import "moonhug:engine"
-import anim "moonhug:packages/animation"
-import common "moonhug:tests/common"
+import "haati:engine"
+import anim "haati:packages/animation"
+import common "haati:tests/common"
 
 // A constant single-key clip: owner `prop` = `value` for its whole length.
 _const_clip :: proc(path: anim.Animation_Path, value: [4]f32, length: f32 = 1, wrap: anim.Animation_Wrap = .Loop, target := "") -> anim.AnimationClip {

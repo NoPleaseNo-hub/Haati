@@ -1,10 +1,10 @@
 package sequencer_tests
 
 import "core:testing"
-import "moonhug:engine"
-import seq "moonhug:packages/sequencer"
-import tweens "moonhug:packages/sequencer/tweens"
-import common "moonhug:tests/common"
+import "haati:engine"
+import seq "haati:packages/sequencer"
+import tweens "haati:packages/sequencer/tweens"
+import common "haati:tests/common"
 
 // Union fields round-trip through the generic guid-keyed serializers. The
 // unions are #no_nil: their zero value is the FIRST variant, never nil, so

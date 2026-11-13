@@ -19,10 +19,10 @@ import "core:math"
 import "core:math/linalg"
 import "core:slice"
 import "core:strings"
-import engine "moonhug:engine"
-import gfx "moonhug:engine/gfx"
-import cad_csg "moonhug:packages/cad_csg"
-import physics3d "moonhug:packages/physics3d"
+import engine "haati:engine"
+import gfx "haati:engine/gfx"
+import cad_csg "haati:packages/cad_csg"
+import physics3d "haati:packages/physics3d"
 
 @(private = "file")
 _quat_len2 :: #force_inline proc(q: [4]f32) -> f32 {

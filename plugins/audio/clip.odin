@@ -10,7 +10,7 @@ import "core:os"
 import "core:strings"
 import sdl "vendor:sdl3"
 import mix "vendor:sdl3/mixer"
-import engine "moonhug:engine"
+import engine "haati:engine"
 
 // Clips larger than 2 MB (~11s stereo float32 WAV) stream from disk by default
 // instead of stalling the main thread to predecode into uncompressed RAM.

@@ -4,12 +4,12 @@ package audio_tests
 // hook: the min distance pushes the max out and lets it back, one undo step.
 
 import "core:testing"
-import "moonhug:engine"
-import "moonhug:editor/handles"
-import "moonhug:editor/undo"
-import audio "moonhug:packages/audio"
-import audio_editor "moonhug:packages/audio/editor"
-import common "moonhug:tests/common"
+import "haati:engine"
+import "haati:editor/handles"
+import "haati:editor/undo"
+import audio "haati:packages/audio"
+import audio_editor "haati:packages/audio/editor"
+import common "haati:tests/common"
 
 @(private = "file")
 _body :: proc(user: rawptr) {

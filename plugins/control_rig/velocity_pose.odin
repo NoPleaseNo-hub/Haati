@@ -5,7 +5,7 @@ package control_rig
 
 import "core:math"
 import "core:math/linalg"
-import engine "moonhug:engine"
+import engine "haati:engine"
 
 Effector_Dynamic_State :: struct {
 	pos:         [3]f32,

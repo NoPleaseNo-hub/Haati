@@ -6,12 +6,12 @@ package physics3d_tests
 
 import "core:math/linalg"
 import "core:testing"
-import "moonhug:engine"
-import "moonhug:editor/handles"
-import "moonhug:editor/undo"
-import common "moonhug:tests/common"
-import physics3d "moonhug:packages/physics3d"
-import physics3d_editor "moonhug:packages/physics3d/editor"
+import "haati:engine"
+import "haati:editor/handles"
+import "haati:editor/undo"
+import common "haati:tests/common"
+import physics3d "haati:packages/physics3d"
+import physics3d_editor "haati:packages/physics3d/editor"
 
 @(private = "file")
 _box_body :: proc(user: rawptr) {

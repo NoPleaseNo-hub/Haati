@@ -16,11 +16,11 @@ package animation_sequencer_tests
 // no offset from the component base names one.
 
 import "core:testing"
-import undo "moonhug:editor/undo"
-import "moonhug:engine"
-import seq "moonhug:packages/sequencer"
-import common "moonhug:tests/common"
-import anim_seq "moonhug:packages/animation/sequencer"
+import undo "haati:editor/undo"
+import "haati:engine"
+import seq "haati:packages/sequencer"
+import common "haati:tests/common"
+import anim_seq "haati:packages/animation/sequencer"
 
 @(private = "file")
 _ta_handle :: proc(owner: engine.Transform_Handle) -> engine.Handle {

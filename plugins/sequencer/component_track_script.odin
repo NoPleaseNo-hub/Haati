@@ -9,8 +9,8 @@ package sequencer
 // A zero-duration clip is an instant: enter and exit fire together on the
 // tick that passes over it; an empty span has no inside, so tick never runs.
 
-import "moonhug:engine"
-import core "moonhug:packages/sequencer/core"
+import "haati:engine"
+import core "haati:packages/sequencer/core"
 
 @(component={menu="Playables/Tracks/TrackScript"})
 @(typ_guid={guid = "06f39202-753c-4bc9-a7c1-cfc876559f72"})

@@ -23,12 +23,12 @@ package animation_editor
 import "base:runtime"
 import "core:fmt"
 import "core:strings"
-import im "moonhug:external/odin-imgui"
-import "moonhug:editor/icons"
-import "moonhug:editor/inspector"
-import "moonhug:editor/widgets"
-import engine "moonhug:engine"
-import anim "moonhug:packages/animation"
+import im "haati:external/odin-imgui"
+import "haati:editor/icons"
+import "haati:editor/inspector"
+import "haati:editor/widgets"
+import engine "haati:engine"
+import anim "haati:packages/animation"
 
 @(phase={key=engine.Phase.EditorInit, order=1, mode=Editor})
 animation_inspector_install :: proc() {

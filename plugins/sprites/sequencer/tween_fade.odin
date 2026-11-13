@@ -7,9 +7,9 @@ package sprites_sequencer
 // plugin contract: no registration call, no edit to the sequencer. The
 // folder compiles only with the sequencer installed (docs/Plugins.md).
 
-import "moonhug:engine"
-import seq_core "moonhug:packages/sequencer/core"
-import sprites "moonhug:packages/sprites"
+import "haati:engine"
+import seq_core "haati:packages/sequencer/core"
+import sprites "haati:packages/sprites"
 
 // Fades the bound SpriteRenderer's alpha to `to`, keeping RGB. The start
 // alpha is captured per the base's Capture_Mode.

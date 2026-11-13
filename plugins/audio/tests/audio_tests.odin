@@ -11,11 +11,11 @@ import "core:math"
 import "core:os"
 import "core:strings"
 import "core:testing"
-import "moonhug:engine"
-import "moonhug:engine_editor/asset_pipeline"
-import audio "moonhug:packages/audio"
-import audio_editor "moonhug:packages/audio/editor"
-import common "moonhug:tests/common"
+import "haati:engine"
+import "haati:engine_editor/asset_pipeline"
+import audio "haati:packages/audio"
+import audio_editor "haati:packages/audio/editor"
+import common "haati:tests/common"
 _SAMPLE_RATE :: 22050
 _FRAMES :: 2205 // 0.1 s
 _AMPLITUDE :: 0.5
@@ -81,7 +81,7 @@ test_import_bakes_volume_and_clip_loads :: proc(t: ^testing.T) {
 	defer common.teardown(tc)
 	audio.mixer_init_headless()
 
-	src_dir :: "moonhug/tests/fixtures/_audio_tmp"
+	src_dir :: "haati/tests/fixtures/_audio_tmp"
 	wav :: src_dir + "/probe.wav"
 	os.make_directory(src_dir)
 	testing.expect(t, _write_test_wav(wav), "fixture wav written")

@@ -1,0 +1,440 @@
+package simulate
+
+// In-editor simulation: tick the open scene in place, then roll it back.
+// See docs/Simulate.md.
+//
+// Logic only, with no imgui or view dependency, so tests and tools drive a
+// simulation without the editor root. Toolbar: editor/simulate_view.odin.
+//
+// The snapshot is the same bytes a save writes: capture is scene_serialize,
+// restore is scene_reload_in_place_bytes.
+
+import "base:runtime"
+import "core:bytes"
+import "core:strings"
+import "haati:engine"
+import "haati:engine/log"
+import input "haati:engine/input"
+import "haati:editor/undo"
+
+State :: enum {
+    Stopped,
+    Running,
+    Paused,
+}
+
+// One runnable package the editor can tick. Rows come from the generated table
+// (editor/sim_hosts_generated.odin), passed to install.
+Host :: struct {
+    name:         string,
+    path:         string,
+    update:       proc(dt: f32),
+    fixed_update: proc(dt: f32),
+}
+
+// Editor-root state reached through callbacks: selection, phase dispatch and the
+// persisted host name live in the root, which this package cannot import. An
+// unset hook makes its step a no-op.
+Hooks :: struct {
+    selection_ids:     proc() -> []engine.Local_ID, // ids to restore after Stop
+    selection_clear:   proc(),
+    selection_add_id:  proc(s: ^engine.Scene, id: engine.Local_ID),
+    phase:             proc(p: Phase),
+    host_name_load:    proc() -> string,
+    host_name_store:   proc(name: string),
+}
+
+// Play-mode transitions (Unity's PlayModeStateChange). The root maps these onto
+// engine.Phase values.
+Phase :: enum {
+    ExitingEditMode,
+    EnteredPlayMode,
+    ExitingPlayMode,
+    EnteredEditMode,
+}
+
+_state: State
+_hooks: Hooks
+_hosts: []Host
+_host: int
+
+// The scene at Start, in the on-disk scene format, held in memory. Scenes are
+// remembered by session id, not pointer: a scene unloaded during the run frees
+// its struct, and a later scene can be allocated at the same address.
+_snapshot: []byte
+_scene_id: u32
+_scene_path: string
+
+// The scene set at Start: Stop unloads what the run loaded on top and reloads
+// from disk what the run unloaded, so the editor sees the same scenes again.
+_Loaded_Scene :: struct {
+    id:       u32, // engine.Scene.session_id
+    path:     string,
+    guid:     engine.Asset_GUID,
+    snapshot: []byte,
+}
+_loaded_at_start: [dynamic]_Loaded_Scene
+
+// Ids of the objects selected at Start. Handles hold a pool slot + generation and
+// restore re-creates every object, so ids are what survives.
+// Like every global here it outlives the caller, so it pins the default allocator.
+_selection: [dynamic]engine.Local_ID
+
+// Set by step, consumed by the next tick: advance one frame, then hold.
+_step_pending: bool
+
+install :: proc(hooks: Hooks, hosts: []Host) {
+    _hooks = hooks
+    _hosts = hosts
+    _host = 0
+    if _hooks.host_name_load == nil do return
+    want := _hooks.host_name_load()
+    if want == "" do return
+    for h, i in _hosts {
+        if h.name == want {
+            _host = i
+            return
+        }
+    }
+}
+
+shutdown :: proc() {
+    if _state != .Stopped do stop()
+    delete(_selection)
+    _selection = nil
+}
+
+state :: proc() -> State {
+    return _state
+}
+
+is_active :: proc() -> bool {
+    return _state != .Stopped
+}
+
+// The scene captured at Start, or nil when stopped. The hierarchy asks so it
+// can keep Unload off the one scene a Stop has to restore.
+scene :: proc() -> ^engine.Scene {
+    return _state != .Stopped ? engine.sm_scene_find_by_session_id(_scene_id) : nil
+}
+
+// True while the scene advances. Paused holds the world without leaving.
+is_ticking :: proc() -> bool {
+    return _state == .Running
+}
+
+// Ask to start next frame: editor previews (the sequencer's scrub, the
+// animation window's) end on ExitingEditMode, and their per-frame restore
+// only lands when a frame actually renders. Starting in the same call would
+// snapshot and swap the scene between a preview's apply and its restore, so
+// tracks release at visibly different moments. `pending_start` gives every
+// preview one clean frame to unwind before start() runs.
+//
+// Callers use this instead of start(); start() stays the immediate form for
+// tests and anything that has already quiesced.
+request_start :: proc(paused := false) {
+    if _state != .Stopped do return
+    _pending_start = true
+    _pending_paused = paused
+}
+
+// Whether a start is queued for the next tick_pending call.
+start_pending :: proc() -> bool {
+    return _pending_start
+}
+
+// One call per editor frame, before the views draw: runs a queued start.
+tick_pending :: proc() {
+    if !_pending_start do return
+    _pending_start = false
+    start(_pending_paused)
+}
+
+@(private) _pending_start: bool
+@(private) _pending_paused: bool
+
+// Capture the open scene, then start ticking it. `paused` starts on frame zero
+// without advancing, so the transition phases fire in the state callers observe.
+start :: proc(paused := false) -> bool {
+    if _state != .Stopped do return false
+    if !available() {
+        log.error("Simulate: no sim host")
+        return false
+    }
+
+    scene := engine.sm_scene_get_active()
+    if scene == nil {
+        log.error("Simulate: no active scene")
+        return false
+    }
+
+    snapshot, ok := engine.scene_serialize(scene)
+    if !ok {
+        log.error("Simulate: failed to capture scene snapshot")
+        return false
+    }
+
+    // The snapshot outlives this call by the whole length of the run, so it
+    // cannot keep the CALLER's allocator: scene_serialize hands back memory
+    // from context.allocator, and whoever pressed Play may be running on a
+    // scoped or per-frame one. Reusing that memory rewrites bytes inside the
+    // snapshot, which shows up as "snapshot restore failed" on Stop with the
+    // scene left in its simulated state — a lost edit, at the point the user
+    // is least expecting one. Pin it to the default allocator, like every
+    // other global here.
+    _snapshot = make([]byte, len(snapshot), runtime.default_allocator())
+    copy(_snapshot, snapshot)
+    delete(snapshot)
+    _scene_id = scene.session_id
+    _scene_path = strings.clone(scene.path, runtime.default_allocator())
+    _record_loaded_scenes()
+
+    {
+        context.allocator = runtime.default_allocator()
+        clear(&_selection)
+        if _hooks.selection_ids != nil {
+            for id in _hooks.selection_ids() do append(&_selection, id)
+        }
+    }
+
+    _fire(.ExitingEditMode)
+    // From here undo only walks through what the run records (undo.play_begin).
+    undo.play_begin(undo.get())
+    _state = paused ? .Paused : .Running
+    _sync_context()
+    engine.fixed_reset()
+    _fire(.EnteredPlayMode)
+    return true
+}
+
+// Roll the scene back to its state at Start.
+stop :: proc() {
+    _pending_start = false
+    if _state == .Stopped do return
+
+    _fire(.ExitingPlayMode)
+
+    // Selection first, while its handles are still live, so the inspector and
+    // gizmos let go before anything is destroyed.
+    if _hooks.selection_clear != nil do _hooks.selection_clear()
+
+    // The run's scene edits leave the undo stack: they target objects Stop
+    // replaces. Edits from before Play stay and find their objects again in
+    // the restored scene. Asset edits stay.
+    undo.play_end(undo.get())
+
+    _restore_scene_set()
+    restored := false
+    if target := engine.sm_scene_find_by_session_id(_scene_id); _snapshot != nil && target != nil {
+        restored = _restore(target)
+    }
+    if !restored && _snapshot != nil {
+        log.error("Simulate: snapshot restore failed - the scene was NOT restored; reopen it from Project")
+    }
+
+    delete(_snapshot, runtime.default_allocator())
+    _snapshot = nil
+    _scene_id = 0
+    if _scene_path != "" {
+        delete(_scene_path, runtime.default_allocator())
+        _scene_path = ""
+    }
+
+    _state = .Stopped
+    _sync_context()
+    engine.fixed_reset()
+    _fire(.EnteredEditMode)
+}
+
+set_paused :: proc(paused: bool) {
+    if _state == .Stopped do return
+    _state = paused ? .Paused : .Running
+    _sync_context()
+}
+
+toggle_pause :: proc() {
+    switch _state {
+    case .Running: set_paused(true)
+    case .Paused:  set_paused(false)
+    case .Stopped:
+    }
+}
+
+// Advance one frame, then hold. From Running this pauses first; from Stopped it
+// enters a held simulation.
+step :: proc() {
+    switch _state {
+    case .Stopped:
+        if !start(paused = true) do return
+    case .Running:
+        _state = .Paused
+        _sync_context()
+    case .Paused:
+    }
+    _step_pending = true
+}
+
+// Advance the simulation for one frame, in the app loop's order: fixed ticks from
+// the accumulator, then the frame tick.
+//
+// A step advances exactly one fixed tick and one frame tick, ignoring the
+// accumulator. A normal run uses it, so gameplay speed matches standalone.
+tick :: proc(dt: f32) {
+    if _state == .Stopped do return
+
+    step := _step_pending
+    _step_pending = false
+    if !is_ticking() && !step do return
+
+    host, ok := active_host()
+    if !ok do return
+
+    engine.begin_frame_time(dt)
+    g_scale := engine.time_scale()
+    step_dt := engine.fixed_dt() * (g_scale if g_scale > 0.0 else 1.0)
+    fdt     := step_dt if step else engine.scaled_fixed_dt()
+    steps   := 1 if step else engine.fixed_frame_ticks(dt)
+    for _ in 0 ..< steps {
+        engine.fixed_tick_begin()
+        input.fixed_latch()
+        if host.fixed_update != nil do host.fixed_update(fdt)
+        engine.fixed_tick_advance()
+    }
+    if host.update != nil {
+        engine.sim_update_begin()
+        host.update(step_dt if step else engine.scaled_dt(dt))
+        engine.sim_update_end()
+    }
+}
+
+hosts :: proc() -> []Host {
+    return _hosts
+}
+
+host_index :: proc() -> int {
+    return _host
+}
+
+active_host :: proc() -> (Host, bool) {
+    if _host < 0 || _host >= len(_hosts) do return {}, false
+    return _hosts[_host], true
+}
+
+// True when `name` is the active sim host. Generated host-owned phase entries
+// are guarded with this (phase_editor_run, phases_generated.odin).
+host_is :: proc(name: string) -> bool {
+    h, ok := active_host()
+    return ok && h.name == name
+}
+
+// Stops a running simulation first: a scene must not tick with another game's
+// update set.
+set_host :: proc(idx: int) {
+    if idx < 0 || idx >= len(_hosts) do return
+    if idx == _host do return
+    if is_active() do stop()
+    _host = idx
+    if _hooks.host_name_store != nil do _hooks.host_name_store(_hosts[idx].name)
+}
+
+// False when no runnable package is installed. The editor depends on none, so
+// zero hosts is a valid build.
+available :: proc() -> bool {
+    _, ok := active_host()
+    return ok
+}
+
+_record_loaded_scenes :: proc() {
+    context.allocator = runtime.default_allocator()
+    _clear_loaded_scenes()
+    sm := engine.ctx_scene_manager()
+    for i in 0 ..< sm.count {
+        sc := sm.loaded[i]
+        if sc == nil do continue
+        var_snap: []byte = nil
+        if sc.session_id != _scene_id {
+            if raw_snap, ok := engine.scene_serialize(sc); ok {
+                var_snap = make([]byte, len(raw_snap), runtime.default_allocator())
+                copy(var_snap, raw_snap)
+                delete(raw_snap)
+            }
+        }
+        append(&_loaded_at_start, _Loaded_Scene{
+            id       = sc.session_id,
+            path     = strings.clone(sc.path),
+            guid     = sc.asset_guid,
+            snapshot = var_snap,
+        })
+    }
+}
+
+_clear_loaded_scenes :: proc() {
+    context.allocator = runtime.default_allocator()
+    for l in _loaded_at_start {
+        delete(l.path)
+        if l.snapshot != nil do delete(l.snapshot)
+    }
+    clear(&_loaded_at_start)
+}
+
+// Back to the scene set of Start: scenes the run loaded additively go, scenes
+// it unloaded come back from disk, and any other scenes present at Start are
+// restored from their snapshots so runtime-spawned objects never leak.
+_restore_scene_set :: proc() {
+    sm := engine.ctx_scene_manager()
+    for i := 0; i < sm.count; i += 1 {
+        sc := sm.loaded[i]
+        if sc == nil do continue
+        known := false
+        for l in _loaded_at_start do if l.id == sc.session_id { known = true; break }
+        if !known do engine.sm_scene_unload(sc)
+    }
+    for l in _loaded_at_start {
+        if l.id == _scene_id do continue
+        if existing := engine.sm_scene_find_by_session_id(l.id); existing != nil {
+            if l.snapshot != nil {
+                cur_snap, ser_ok := engine.scene_serialize(existing)
+                same := ser_ok && bytes.equal(cur_snap, l.snapshot)
+                delete(cur_snap)
+                if !same {
+                    engine.scene_reload_in_place_bytes(existing, l.snapshot, l.guid, l.path)
+                }
+            }
+            continue
+        }
+        if l.path == "" do continue
+        engine.scene_load_additive_path(l.path)
+    }
+    _clear_loaded_scenes()
+}
+
+// Deserialize the snapshot back over the simulated scene, then re-resolve
+// selection by id. Scoped to that one scene, keeping its slot and active status;
+// additively loaded scenes are untouched.
+//
+// Not atomic: on failure the target scene is already destroyed.
+_restore :: proc(target: ^engine.Scene) -> bool {
+    scene := engine.scene_reload_in_place_bytes(
+        target, _snapshot, target.asset_guid, _scene_path)
+    if scene == nil do return false
+
+    // Objects the game destroyed are absent from the restored scene too, so they
+    // do not resolve and drop out of the selection.
+    if _hooks.selection_add_id != nil {
+        for id in _selection do _hooks.selection_add_id(scene, id)
+    }
+    clear(&_selection)
+    return true
+}
+
+// Feeds engine.application_is_playing(). True from Start to Stop, paused
+// included.
+_sync_context :: proc() {
+    if uc := engine.ctx_get(); uc != nil {
+        uc.is_playing = _state != .Stopped
+    }
+}
+
+_fire :: proc(p: Phase) {
+    if _hooks.phase != nil do _hooks.phase(p)
+}

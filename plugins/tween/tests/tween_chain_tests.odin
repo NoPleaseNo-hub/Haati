@@ -7,9 +7,9 @@ package tween_tests
 // TEMP-allocated keys (tprintf) — a per-frame free_all dangled them and
 // number keys stopped running.
 
-import "moonhug:engine"
-import tween "moonhug:packages/tween"
-import common "moonhug:tests/common"
+import "haati:engine"
+import tween "haati:packages/tween"
+import common "haati:tests/common"
 import "core:fmt"
 import "core:testing"
 

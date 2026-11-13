@@ -1,246 +1,53 @@
-# Haati Engine (Destructive CSG & Kinetic Action Fork of MoonHug)
-![](readme_files/Logo1.png)
+# Haati Engine
 
-> **Fork Notice (`zlib` License Compliance)**: **Haati** is an altered, purpose-built fork of the [MoonHug Game Engine Editor](https://github.com/MoonHug-Editor/moonhug) originally created by `c0ffeeartc` and the MoonHug contributors (see [LICENSE](LICENSE)). While upstream MoonHug targets a general-purpose Unity-style editor, **Haati** specializes in **convex half-space CAD/CSG level blockout, Faker hybrid real-time destruction, Severed-Steel / Titanfall kinetic movement, harmonic multi-layer time scaling, `.bodin` Odin-Delegate Blueprints, and out-of-process Overwatch flight recording**.
->
-> **New here?** Read **[MANUAL.md](MANUAL.md)** (or press **`F1`** / click **`[ ? ]`** in the top-right toolbar inside the editor) for the complete user & game-construction guide!
+**Haati** is a purpose-built, multicore 3D game engine and integrated Odin studio built on the [MoonHug](LICENSE) game engine (zlib License).
 
----
+## Highlights
 
-## Haati Purpose-Built Highlights
-- **CAD & Destructive CSG Redux (`plugins/cad_csg`)**: Tools 1–7 interactive blockout, `Scene3D` Right-Click Multi-CSG/Mesh Booleans (`Join Editable Stack`, `Union`, `Subtract`, `Intersect`), Faker Hybrid visual/collision split, and 64×64 RGBA8 soft deformation stamps.
-- **`.bodin` Blueprint Studio & Odin Micro-Studio V2**: 3-column Unreal-style visual scripting with explicit Odin `◇` procedure delegates (`0.00 ms` idle when `Event_Tick` is omitted), unified single-file `.bodin` format (native Odin source + `@BODIN_GRAPH_V1` layout), `Using / Spaces` selector, async autocomplete, `Ctrl + MouseWheel` zoom, and `~240 ms` `F7` DLL hot-swap.
-- **Out-of-Process Overwatch Recorder (`tools/overwatch`)**: Separate crash-survivable telemetry & user-action recorder toggled from the top-right corner `[ ● ]` button (`0 ns` overhead when retracted).
+- **CAD & Destructible CSG Hybrid ("Faker CSG")**: Real-time CSG booleans, sub-millisecond Jolt collision hulls, surface stamps, and visual mesh deformation.
+- **Control Rig & Procedural Character Motion**: Full humanoid IK/rigging, skeletal deformation, blend spaces, and spring bones (`Mannequin_F.glb` default mannequin in `plugins/control_rig/assets/meshes/characters/`).
+- **Unified Graph & Odin Micro-Studio**: `.bodin` Visual Graphs compiled straight to native x64 machine code alongside Odin source editing, Unreal-style Namespace `BP_Node` Blocks (`Event`, `Flow`, `Input`, `Math`, `Transform`, `Anim`, `VFX`, `Audio`, `AI`, `Delegate`, `Odin`), Left/Right pin-drag context-sensitive spawner, inline `+ New Custom Event` wiring, and ~200 ms F7 Hot-Cartridge live swap.
+- **Unified GPU Lighting & Shadow Atlas**: `4096x4096` 16-tile GPU depth atlas supporting 3-cascade Directional CSM, Spot shadows, and dual 6-face Point Light cubemap shadows, with true `0.0` ambient darkness and `[Lit | Unlit | FakeLight]` Scene 3D viewport modes.
+- **Void Workflow**: Docked `Void Hierarchy`, `Void File Explorer`, and `Void Inspector` workspace.
+- **Overwatch Flight Recorder**: Zero-overhead out-of-process Win32 crash and frame-spike autopsy (`builds/Haati_Overwatch.exe`).
 
----
+## Platform Support (Windows x64 Only)
 
-# Upstream MoonHug Architecture Overview
+Haati targets **Windows x64** natively (producing `Haati_Editor.exe`, `builds/Haati.exe`, Win32 hot-reload `.dll` cartridges, and `builds/Haati_Overwatch.exe`). Linux and macOS builds are not currently maintained (neither platform runs Windows `.exe` binaries).
 
-## State
-Vertical Slice Experimental.
-</br>Project has only started, there are frequent API changes, bugs, non-implemented features.
-</br>Good moment to add contribution and influence how Editor shapes up.
+## How Haati Differs from Upstream MoonHug
 
-## Goals
-- highly and easily extensible level editor
-- allow differently skilled people combine resources together into interactive elements
+Haati began on the MoonHug core (`LICENSE`) and diverges heavily across runtime, rendering, tooling, and editor UX:
+- **Multicore Job-Dispatched Engine**: Worker job system driving parallel physics, culling, and scene work instead of single-core main-thread bottlenecks.
+- **Shadow Atlas & Viewport Modes**: Replaced fake directional ambient with a unified `4096x4096` 16-tile GPU shadow atlas (`Directional` 3-cascade CSM, `Spot`, and dual `Point` 6-face cubemap shadows) plus Scene 3D `[Lit | Unlit | FakeLight]` inspection modes (`Game` views always stay true `Lit`).
+- **CAD & Destructible "Faker CSG"**: Real-time CSG booleans, Jolt convex/compound hulls, surface stamps, and runtime mesh deformation.
+- **Unified `BP_Node` Visual Scripting + Embedded Odin IDE**: Domain-unified `.bodin` graphs, Unreal-style `BP_Node` namespaces, Left/Right pin-drag context filtering, debounced read-only background `odin check` diagnostics, and sub-second F7 hot-reload.
+- **Void Workspace & Overwatch**: Relocated Void docks, integrated Control Rig mannequin pipeline, and out-of-process Win32 crash/spike capture.
 
-## Key Ideas
-- Editor should be user-friendly
-  - easier for users familiar with Unity Editor, for this it should provide similar features when possible but not limited to them
-- Editor should provide convenient access to editing assets and/or redirect into external apps
+## Quick Start
 
-### UX Features
-- Editor UX happens through features
-  - Each feature provides specific UX solution with optional extensibility
+```powershell
+# First-time setup (builds vendored C libs & repairs plugin junctions in haati/packages/)
+odin run tools/haati -- setup
 
-- On top level UX features are represented by window views
+# Build & launch the Haati Editor
+odin run tools/haati -- run
 
-For more details see [Contribution](docs/Contribution.md)
+# Run full automated test suite
+odin run tools/haati -- test
 
-## Introduction video
-[![](http://img.youtube.com/vi/TQLF-db3Jqs/0.jpg)](https://www.youtube.com/watch?v=TQLF-db3Jqs)
+# Build release executable + Overwatch without launching
+odin run tools/haati -- build
+```
 
-## Updates video
-[![](http://img.youtube.com/vi/MEHnLMaGiEo/0.jpg)](https://www.youtube.com/watch?v=MEHnLMaGiEo)
+> `tools/mh` and the `Makefile` forward identically to the same unified build system and pass both `-collection:haati=haati` and `-collection:moonhug=haati` so external plugins importing either collection name build seamlessly.
 
-## Contribution
-- [Contribution](docs/Contribution.md)
+## Troubleshooting
 
-## Community
-- [Discord](https://discord.gg/HTpBmhESwW)
+- Troubleshooting: "It works on my machine."
+- Source: "Trust me bro."
+- Make sure you launch from `Haati_Editor.exe` (or run `odin run tools/haati -- run`) on **Windows x64** so runtime `.dll`s in `builds/` resolve properly and shader tools (`shadercross` / `dxc` / `spirv-cross`) are available when rebuilding shaders.
 
 ## License
-zlib — see [LICENSE](LICENSE). Games built with MoonHug carry no notice
-obligation from MoonHug itself; bundled third-party components and what they
-require are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-Contributions are accepted under the same license
-(see [Contribution](docs/Contribution.md)).
 
-## Building
-
-Install [Odin](https://odin-lang.org/docs/install/) and SDL3 (`brew install sdl3`), then, in a fresh clone:
-
-```sh
-odin run tools/mh -- setup
-```
-```sh
-odin run tools/mh -- run
-```
-
-`make setup` and `make run` do the same when make is installed. Every command,
-dependency and build step: [Install, Build and Run](docs/InstallBuildAndRun.md).
-
-## Build/run/workflow stages
-- PrebuildStage - generates code for other stages
-- DevStage - modifying app and editor code
-- AuthoringStage - using running editor to configure assets
-- BuildStage - converting app code & resources into shippable Build product
-- RuntimeStage - app running
-
-## Folder structure
-- prebuild - generator folder
-  - separate program that runs even before anything compiles
-- editor, *_editor - editor folders
-  - editor is top level package with dependencies on everything else
-  - engine_editor is the engine's editor half — subpackages pairing with engine ones (engine_editor/asset_pipeline is the write side of engine/asset_pipeline.odin: importers, import drivers, AssetDB scanning, meta writing) — never linked into game binaries (the app runs the catalog pipeline only)
-- app folder - game code
-  - app package should not have any editor dependencies
-- engine - core dependency for app and editor
-- builds folder - build results with runnable application
-- external - external dependencies folder
-- library - derived-data cache (Unity's Library model, see [library](#library)). Safe to delete, rebuilt on the next run
-- ProjectSettings - settings about the PROJECT, committed: `mcp.json` and one `<slug>.json` per @(project_settings) tab
-- UserSettings - per-developer editor state, never committed (Unity's UserSettings): window geometry, open scenes and windows, panel visibility, theme, grid and snap, selected run config. Safe to delete, the editor writes defaults on the next run
-
-## Dependencies
-- odin-imgui - for Editor's interface rendering
-- SDL3 + SDL_GPU (`brew install sdl3`) - window, input, GPU rendering (see [SDL3 Renderer](docs/SDL3Renderer.md))
-- vendored C libraries Odin ships as source (stb, cgltf, box2d, box3d), all built by `mh setup`
-
-Full list and what needs them: [Install, Build and Run](docs/InstallBuildAndRun.md#dependencies).
-
-## library
-
-Everything under `library/` is derived data — never a source of truth, safe to delete, rebuilt from assets + metas on the next run (Unity's Library contract).
-
-- `library/artifacts/<xx>/<key>.bin` - import artifacts, **content-addressed**: the 128-bit key hashes every input that shapes the importer's output — source bytes, import settings, the importer's version constant, the artifact format version. Invalidation is automatic (any changed input is a different key), toggling a setting back is a cache hit on the old artifact instead of a re-import, and keys are machine-independent (a shared team cache stays possible). `<xx>` is the key's first two hex chars (Unity's fan-out layout)
-- `library/artifact_db.json` - the index: guid → current artifact key + source file stamp + settings hash, so an unchanged file costs one stat per scan, never a rehash
-- `library/thumbnails/<xx>/<guid>.thumb` - project view thumbnails (raw RGBA + a stamp header), guid-keyed so a changed asset overwrites its entry in place. Written asynchronously after generation (fence-polled GPU readback, no sync stalls), loaded instead of re-rendering on the next session. Deleted assets' entries are pruned at editor startup
-- `library/state_cache/` - editor session state (the Play button's live-scene snapshot)
-- garbage collection runs with the import pass: artifact files no index entry references are deleted
-- importers carry a version constant (`_importer_version`) — bump it when an importer's output changes and exactly its artifacts re-import, nothing else
-
-## Features
-- menu bar - customizable via @(menu_item=...). Attribute on a proc it is an action, on a bool variable it is a toggle. `checked=<proc>` draws a tick from computed state, can be used for a radio group. `enabled=<proc>` greys an item out
-
-- dynamic menus - @(menu_dynamic={path="File/Recent Scenes"}) on a proc makes a submenu whose items the proc draws each frame it is open, for item sets that only exist at runtime. Recent Scenes uses it. Nothing inside one can be listed, invoked by path or bound to a key, so it is the escape hatch and @(menu_item) stays the form.
-- clips inside a model - a glTF model's animations play without extraction: the importer bakes them beside the mesh parts, each gets its own guid in the model's meta, and a clip field names one like any `.anim`. Nothing but the model and its meta is committed ([Animation](docs/AnimationComponent.md)).
-- view tab bar and menu - every dock node's tab bar carries the visible view's toolbar items, then a ⋮ menu. Any package adds to either: @(view_tab_bar={view="Animation", order=0}) on a proc draws a widget, @(view_menu={view="Animation", label="..."}) on a proc is an action and on a bool variable a toggle, with `checked=`/`enabled=` like menu_item.
-
-- scene view overlays - Unity-style dockable overlays (drag the grip to dock to view edges or float), extensible via @(scene_overlay={id="...", order=0}) on a proc that draws IMGUI; item tooltips end with the overlay id and order
-
-- Project Settings window (Edit ▸ Project Settings…) - Unity-style section list + inspector pane, extensible via @(project_settings={name="Tab"}) on a package-level settings struct var; values persist to ProjectSettings/*.json, read by editor and game, edits undoable (see [Plugins](docs/Plugins.md))
-
-- union serialization (#no_nil unions only)
-
-- [Asset Pipeline](docs/AssetPipeline.md) - asset importer/loader
-- [Components](docs/Components.md) - component data layer: pools, handles, iteration contract
-- [Scenes](docs/Scenes.md)
-- [Tweens](docs/Tweens.md)
-- [Reference Handles](docs/ReferenceHandles.md)
-- [Object Picker](docs/ObjectPicker.md) - Unity-style reference picker: Scene/Project tabs, search, ping, project picks filtered by root component or file extension
-- [SDL3 Renderer](docs/SDL3Renderer.md) - SDL3 + SDL_GPU rendering (Metal-native), per-camera render commands, scene view picking + selection outline + move/rotate/scale gizmos
-- [Meshes](docs/Meshes.md) - glTF import with per-material submeshes, MeshFilter/MeshRenderer components
-- [Materials](docs/Materials.md) - Material assets (built-in unlit/lit shaders + texture/color) on MeshRenderer AND SpriteRenderer, custom .glsl shaders with hot reload + property blocks + multi-texture rows, PBR/specular sample shaders (camera position + world position available to fragment shaders), directional/point/spot Light components (up to 8 per pass), live-editing inspector
-- [SpriteRenderer](docs/SpriteRenderer.md)
-- [Text](docs/Text.md) - TextMeshPro-shaped text plugin for the canvas tree: font files import into a signed-distance-field atlas, an SDF material shader gives outline, underlay shadow, dilation and softness, sharp at any size, backend-neutral layout with a swappable glyph source
-- [Handles](docs/Handles.md) - scene-view interaction layer for editor and package editors: immediate-mode drag handles on a plane or a line, bounds composites (box, sphere, capsule), snapping, overlay drawing, one drag = one undo step, picking providers
-- [GUI](docs/Gui.md) - canvas tree in the engine (Canvas, RectTransform anchors/pivot layout, CanvasRenderer, CanvasScaler, rect walk with layout providers), mhgui plugin package for the graphics (Image, sprite or solid color), LayoutGroup (row/column/grid), the render collector and the rect tool on editor/handles
-- [Unity Conveniences](docs/UnityConveniences.md)
-- [Multiselection](docs/Multiselection.md) - cmd/shift selection in hierarchy, scene view and project; rubber-band box select; gizmo moves/rotates/scales the whole selection (Pivot/Center toggle); set-wide delete/duplicate/toggle-active as one undo step; multiedit of shared components with Unity's mixed-value indicators
-- [Crash Journal](docs/CrashJournal.md) - signal-safe crash log with a symbolized stack and a breadcrumb of what the editor was doing (`logs/crash_<pid>.log`)
-- [MCP Bridge](docs/McpBridge.md) - agent access to the running editor (scene dumps, menu invocation) over MCP, zero external dependencies
-- [Undo](docs/Undo.md) - editor undo feature
-- [Simulate](docs/Simulate.md) - play the open scene inside the editor with everything still inspectable: Simulate/Pause/Step controls, snapshot+restore on stop, sim-host dropdown picking which game's update code runs. Separate from the Play button, which builds and launches the game as its own process
-
-### Views
-  - inspector view - edit selected object in scene
-  - project inspector - preview and edit selected asset in project
-  - hierarchy view - shows scene tree
-  - project view - left pane is folder tree, right pane is selected folder contents. Unity-style zoom slider bottom right — minimum is the list, above it a thumbnail grid (image/material/scene previews rendered on demand, budgeted per frame, cached by guid + file stamp, persisted under library/thumbnails across sessions)
-  - console view
-  - scene view - view and edit scene contents. Perspective/orthographic toggle and axis views from the scene gizmo (top-right), a 2D button for a fixed front view with pan-only navigation, F frames the selection (UI rects and canvases included)
-
-- custom drawers
-  - custom property drawers - via @(property_drawer=...) on proc
-  - custom decorator drawers - via field tags `decor:procName(arg=value)`
-
-- inspector buttons (invoke a proc from the inspector, one undo step)
-  - component-level via @(inspector_button={label="...", row=0, weight=1, show_in_array=true}) on a `(^Component)` proc
-  - field-anchored via field tag `decor:button(proc_name, label="", row=0, weight=1)`
-    - proc is `()`, `(^Component)` or `(^Component, ^Field)`
-    - same `row` shares one line, widths split by `weight`
-  - higher row renders higher on screen — rows >= 0 stack above the field/fields, rows < 0 below
-
-### Components
-- Component menu - via @(component={menu="menu/path"}) on struct
-  - adds to Component menu bar and Add Component button popup
-  - if no menu path specified, type name is used
-
-## TODO
-- skinned mesh runs on the CPU: `SkinnedMeshRenderer` rebuilds the bind-pose
-  vertices through the skin matrices every frame and uploads them. GPU skinning
-  — a bone matrix buffer plus a vertex shader variant — is the drop-in
-  replacement that makes many characters on screen affordable
-
-- mesh tangents + linear color pipeline (pbr.glsl works around both in-shader)
-
-- sprite atlas (batching): a .spriteatlas asset packs slices from many textures into one atlas artifact, sprite_quad redirects texture + uvs through the atlas mapping — renderers and scenes untouched. PPtr sprite references are the mapping key
-
-- spline package: a path through space, the spatial counterpart to the engine's scalar `Curve`
-  - a Spline component holding control points, edited in the scene view through the handles layer
-  - sampling by parameter and by arc length
-  - consumers decide what a path means: move a transform along it, aim a camera, place objects at intervals
-  - first consumer: a sequencer track that drives a transform along a spline
-
-- transform:
-  - use bit set + procs, instead of direct bool change
-  - consider making transform regular component (required or optional), node will hold all components
-
-- improve default types inspector UX
-
-- project file ops: Windows trash/reveal (darwin-only today, see project_os_stub.odin)
-
-- physics2d follow-ups:
-  - PhysicsLayerCollision2D settings asset
-  - PhysicsMaterial2D asset
-  - effectors/polygon colliders
-
-- physics3d follow-ups:
-  - PhysicsLayerCollision settings asset
-  - PhysicsMaterial asset
-  - mesh/compound colliders
-  - explicit mass
-
-- bulk entity tier for mass simulation (100k-scale sprite battles): SoA arrays + fixed-tick sim + GPU instancing, see [Components](docs/Components.md) "Two data regimes"
-
-- come up with more TODO and Considered features
-
-- clear clipboard completely on each copy call
-
-- keep improving memory guide
-  - must be explained simply as if for someone new to memory handling
-
-- Node graph editor for different use-cases
-  - VFX graph
-
-- undo follow-ups: asset doc Revert button, import settings onto the asset doc model
-- multiselection follow-ups: multi-path drag-drop, multiedit for prefab-instance selections
-
-### Considered Features
-
-- preview section in hierarchy inspector (project inspector has one)
-
-- Task tracking with backlog, todo, etc.
-
-- some kind of type defaults fill only what json serialized data doesn't cover
-
-- doc generation
-
-- multiple views(windows) of same type support, with lock toggle
-- popup manager
-  - show serialized or in-memory asset inspector as popup with custom title
-    - override property drawer for custom popup look
-
-- generalized serialization of Owned and Ref
-- generic Handle resolve and reset Handle when resolve fails
-
-- ability to switch Value/Ref field in inspector where valid
-
-
-- Convert resource into usable format at buildStage or runtimeStage
-
-- consider SceneFile to hold serialize blobs instead of real types
-
-- bug:[WON'T FIX] terminal-launched editor doesn't gain keyboard focus on some startups (macOS cooperative activation denies non-Launch-Services processes; refocus app to repair). Real fix: .app bundle + `open` in run scripts, icon via Info.plist (drops set_dock_icon)
+Haati is distributed under the terms of the [LICENSE](LICENSE) (zlib License). All original MoonHug copyright and permission notices are preserved in full.

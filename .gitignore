@@ -1,5 +1,8 @@
 bin/**
 .idea/
+.junie/
+.vscode/
+.agents/
 
 *.bin
 # glTF buffers are source assets, not build output - a .gltf without its .bin
@@ -12,6 +15,8 @@ imgui.ini
 editor_window.json
 /editor
 /library/
+haati/library/
+/haati/packages/
 moonhug/library/
 /moonhug/packages/
 .zed
@@ -19,25 +24,31 @@ moonhug/library/
 *_generated.odin
 builds/
 /logs/
+haati/logs/
 moonhug/logs/
 
 /mh
 /mh.exe
-/tools/mh
+/haati.exe
+/Haati_Editor
+/Haati_Editor.exe
+/tools/mh/mh
+/tools/mh/mh.exe
 /tools/mh.exe
+/tools/haati/haati
+/tools/haati/haati.exe
+/tools/haati.exe
 *.pdb
 *.exp
 *.ilk
 overwatch_recordings/
 
 /UserSettings/
+haati/UserSettings/
 moonhug/UserSettings/
-moonhug/ProjectSettings/editor_settings.json
-moonhug/ProjectSettings/campawn_settings.json
+haati/ProjectSettings/editor_settings.json
+haati/ProjectSettings/campawn_settings.json
 
-# Private game project plugin & game-specific audit/tests (exempt from public Haati engine repo)
+# Private game project plugin (exempt from public Haati engine repo)
 /plugins/void_odin/
 /plugins/void_odin
-/tests/
-/ENGINE_AUDIT.md
-/.agents/

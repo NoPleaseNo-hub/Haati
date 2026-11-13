@@ -15,10 +15,10 @@ import "core:math"
 import "core:math/linalg"
 import "core:strings"
 import cgltf "vendor:cgltf"
-import engine "moonhug:engine"
-import gfx "moonhug:engine/gfx"
-import cad_csg "moonhug:packages/cad_csg"
-import physics3d "moonhug:packages/physics3d"
+import engine "haati:engine"
+import gfx "haati:engine/gfx"
+import cad_csg "haati:packages/cad_csg"
+import physics3d "haati:packages/physics3d"
 
 @(component={menu="Animation/ArmatureDeformedMesh"})
 @(typ_guid={guid = "9b4c718a-64d2-4e89-a215-3e91f07b1d42"})
@@ -54,7 +54,6 @@ ArmatureDeformedMesh :: struct {
 	posed:                  [dynamic]gfx.Vertex `json:"-" inspect:"-"`,
 	gpu:                    gfx.Dynamic_Mesh `json:"-" inspect:"-"`,
 	gpu_wire:               gfx.Mesh `json:"-" inspect:"-"`,
-	shadow_mesh_guid:       engine.Asset_GUID `json:"-" inspect:"-"`,
 	bound_guid:             engine.Asset_GUID `json:"-" inspect:"-"`,
 	bound_part:             i32 `json:"-" inspect:"-"`,
 	bound_root:             engine.Transform_Handle `json:"-" inspect:"-"`,
@@ -92,10 +91,6 @@ cleanup_ArmatureDeformedMesh :: proc(adm: ^ArmatureDeformedMesh) {
 	if adm.bound_ready {
 		gfx.dynamic_mesh_destroy(&adm.gpu)
 		if adm.gpu_wire.ibuf != nil do gfx.dynamic_mesh_destroy_wire_indices(&adm.gpu_wire)
-	}
-	if !engine.asset_guid_is_empty(adm.shadow_mesh_guid) {
-		engine.mesh_remove_procedural(adm.shadow_mesh_guid)
-		adm.shadow_mesh_guid = {}
 	}
 	if !engine.asset_guid_is_empty(adm.ghoul_clipped_guid) {
 		engine.mesh_remove_procedural(adm.ghoul_clipped_guid)
@@ -453,11 +448,9 @@ _collect_armature_deformed_meshes :: proc(view: engine.Render_View, out: ^[dynam
 					part      = part,
 					materials = adm.materials[:],
 					model     = model_mat,
+					no_shadow = !adm.cast_shadows,
 				},
 			})
-			if adm.cast_shadows && view.kind != .Preview {
-				_emit_armature_planar_shadows(w, adm, mesh, owner_h, model_mat, false, out)
-			}
 			continue
 		}
 
@@ -503,11 +496,9 @@ _collect_armature_deformed_meshes :: proc(view: engine.Render_View, out: ^[dynam
 				wire_mesh     = nil if use_ghoul_mesh else wire_mesh_ptr,
 				wire_color    = wire_col,
 				unlit_heatmap = is_heatmap,
+				no_shadow     = !adm.cast_shadows,
 			},
 		})
-		if adm.cast_shadows && view.kind != .Preview {
-			_emit_armature_planar_shadows(w, adm, mesh, owner_h, linalg.MATRIX4F32_IDENTITY, true, out)
-		}
 	}
 }
 
@@ -524,249 +515,6 @@ _make_adm_ghoul_guid :: proc(tH: engine.Transform_Handle) -> engine.Asset_GUID {
 	}
 	raw[12] = 0x99
 	return engine.Asset_GUID(raw)
-}
-
-@(private = "file")
-_make_adm_shadow_guid :: proc(tH: engine.Transform_Handle) -> engine.Asset_GUID {
-	raw: [16]u8
-	h_bits := transmute(u64)tH
-	raw[0] = 0x41 // 'A'
-	raw[1] = 0x44 // 'D'
-	raw[2] = 0x4D // 'M'
-	raw[3] = 0x53 // 'S'
-	for i in 0 ..< 8 {
-		raw[4 + i] = u8((h_bits >> (uint(i) * 8)) & 0xFF)
-	}
-	raw[12] = 0x77
-	raw[13] = 0x88
-	raw[14] = 0x99
-	raw[15] = 0xAA
-	return engine.Asset_GUID(raw)
-}
-
-// Projects real-time planar floor shadows for `ArmatureDeformedMesh` from ALL active shadow-casting
-// lights in the scene that are within `light.range` of the character!
-@(private = "file")
-_emit_armature_planar_shadows :: proc(
-	w:          ^engine.World,
-	adm:        ^ArmatureDeformedMesh,
-	mesh:       ^engine.Mesh,
-	owner_h:    engine.Transform_Handle,
-	model_mat:  matrix[4, 4]f32,
-	is_skinned: bool,
-	out:        ^[dynamic]engine.Render_Command,
-) {
-	if engine.asset_guid_is_empty(adm.shadow_mesh_guid) {
-		adm.shadow_mesh_guid = _make_adm_shadow_guid(owner_h)
-	}
-
-	verts := adm.posed[:] if is_skinned else mesh.bind_vertices
-	inds  := mesh.bind_indices
-	if len(verts) < 3 || len(inds) < 3 do return
-
-	mesh_center: [3]f32
-	if is_skinned {
-		mesh_center = (adm.posed_min + adm.posed_max) * 0.5
-	} else {
-		c_local := (mesh.aabb_min + mesh.aabb_max) * 0.5
-		mesh_center = (model_mat * [4]f32{c_local.x, c_local.y, c_local.z, 1.0}).xyz
-	}
-
-	sh_verts := make([dynamic]gfx.Vertex, 0, 512, context.temp_allocator)
-	sh_inds  := make([dynamic]u32, 0, 512, context.temp_allocator)
-
-	tri_count := len(inds) / 3
-	tri_step  := max(tri_count / 1200, 1)
-
-	Adm_Shadow_Light :: struct {
-		kind:      engine.Light_Type,
-		pos:       [3]f32,
-		to_l:      [3]f32,
-		fwd:       [3]f32,
-		outer_cos: f32,
-		range:     f32,
-		intensity: f32,
-		ambient:   f32,
-		strength:  f32,
-		ground_y:  f32,
-	}
-	adm_lights := make([dynamic]Adm_Shadow_Light, 0, 8, context.temp_allocator)
-
-	l_it := engine.pool_iterator(engine.lights(w))
-	for l, _ in engine.pool_next(&l_it) {
-		if !l.enabled || !l.cast_shadows || l.intensity <= 0.01 do continue
-		if !engine.transform_active_in_hierarchy(l.owner) do continue
-		ltw := engine.transform_world(engine.Transform_Handle(l.owner))
-		rot := engine.quat_to_matrix3(ltw.rotation)
-		fwd := linalg.normalize0([3]f32{-rot[0, 2], -rot[1, 2], -rot[2, 2]})
-		to_l := -fwd
-		if to_l.y < -0.08 {
-			to_l = -to_l
-		} else if abs(to_l.y) <= 0.08 {
-			to_l = linalg.normalize0([3]f32{to_l.x, 0.65, to_l.z})
-		}
-		append(&adm_lights, Adm_Shadow_Light{
-			kind      = l.type,
-			pos       = ltw.position,
-			to_l      = to_l,
-			fwd       = fwd,
-			outer_cos = math.cos(math.to_radians(max(l.spot_angle, l.inner_spot_angle)) * 0.5),
-			range     = max(l.range, 1.0),
-			intensity = max(l.intensity, 0.05),
-			ambient   = clamp(l.ambient, 0.05, 0.85),
-			strength  = clamp(l.shadow_strength if l.shadow_strength > 0.01 else 0.72, 0.05, 1.0),
-			ground_y  = l.shadow_ground_y,
-		})
-	}
-
-	eval_adm_light_illum :: proc(al: Adm_Shadow_Light, pt: [3]f32) -> f32 {
-		if al.kind == .Directional do return al.intensity * max(al.to_l.y, 0.15)
-		diff := pt - al.pos
-		d2 := linalg.length2(diff)
-		if d2 >= al.range * al.range do return 0.0
-		dist := math.sqrt(d2)
-		ratio := dist / al.range
-		a := clamp(1.0 - ratio * ratio, 0.0, 1.0)
-		atten := a * a
-		if al.kind == .Spot && dist > 1e-4 {
-			cos_a := linalg.dot(diff / dist, al.fwd)
-			atten *= clamp((cos_a - al.outer_cos) / 0.15, 0.0, 1.0)
-		}
-		return al.intensity * clamp(-diff.y / max(dist, 0.001), 0.15, 1.0) * atten
-	}
-
-	poly_a := make([dynamic][3]f32, 0, 16, context.temp_allocator)
-	poly_b := make([dynamic][3]f32, 0, 16, context.temp_allocator)
-
-	for al, light_idx in adm_lights {
-		if al.kind != .Directional {
-			if linalg.length(mesh_center - al.pos) > al.range do continue
-		}
-		if al.kind == .Spot {
-			dir_to_char := linalg.normalize0(mesh_center - al.pos)
-			if linalg.dot(dir_to_char, al.fwd) < al.outer_cos - 0.18 do continue
-		}
-
-		ground_y := al.ground_y
-		receivers, _ := cad_csg.csg_collect_ground_receivers(ground_y, context.temp_allocator)
-		if len(receivers) == 0 do continue // No floor receiver at `ground_y` -> do not cast shadows into empty air!
-
-		y_step   := 0.015 + f32(light_idx) * 0.0012
-		shadow_y := ground_y + y_step
-		to_l     := al.to_l
-
-		for ti := 0; ti < tri_count; ti += tri_step {
-			i0 := inds[ti * 3 + 0]
-			i1 := inds[ti * 3 + 1]
-			i2 := inds[ti * 3 + 2]
-			if int(i0) >= len(verts) || int(i1) >= len(verts) || int(i2) >= len(verts) do continue
-
-			w0 := verts[i0].position
-			w1 := verts[i1].position
-			w2 := verts[i2].position
-			if !is_skinned {
-				w0 = (model_mat * [4]f32{w0.x, w0.y, w0.z, 1.0}).xyz
-				w1 = (model_mat * [4]f32{w1.x, w1.y, w1.z, 1.0}).xyz
-				w2 = (model_mat * [4]f32{w2.x, w2.y, w2.z, 1.0}).xyz
-			}
-
-			max_y := max(w0.y, max(w1.y, w2.y))
-			if max_y <= ground_y + 0.05 do continue
-
-			p0, p1, p2: [3]f32
-			if al.kind == .Directional {
-				inv_ly := 1.0 / max(to_l.y, 0.18)
-				h0 := max(w0.y - ground_y, 0.0)
-				h1 := max(w1.y - ground_y, 0.0)
-				h2 := max(w2.y - ground_y, 0.0)
-				p0 = {w0.x - to_l.x * h0 * inv_ly, shadow_y, w0.z - to_l.z * h0 * inv_ly}
-				p1 = {w1.x - to_l.x * h1 * inv_ly, shadow_y, w1.z - to_l.z * h1 * inv_ly}
-				p2 = {w2.x - to_l.x * h2 * inv_ly, shadow_y, w2.z - to_l.z * h2 * inv_ly}
-			} else {
-				dy0 := max(al.pos.y - w0.y, 0.25)
-				dy1 := max(al.pos.y - w1.y, 0.25)
-				dy2 := max(al.pos.y - w2.y, 0.25)
-				t0 := clamp(max(w0.y - ground_y, 0.0) / dy0, 0.0, 4.0)
-				t1 := clamp(max(w1.y - ground_y, 0.0) / dy1, 0.0, 4.0)
-				t2 := clamp(max(w2.y - ground_y, 0.0) / dy2, 0.0, 4.0)
-				p0 = {w0.x + (w0.x - al.pos.x) * t0, shadow_y, w0.z + (w0.z - al.pos.z) * t0}
-				p1 = {w1.x + (w1.x - al.pos.x) * t1, shadow_y, w1.z + (w1.z - al.pos.z) * t1}
-				p2 = {w2.x + (w2.x - al.pos.x) * t2, shadow_y, w2.z + (w2.z - al.pos.z) * t2}
-			}
-
-			cr := linalg.cross(p1 - p0, p2 - p0)
-			if abs(cr.y) < 1e-5 do continue
-			if cr.y < 0 do p1, p2 = p2, p1
-
-			mid_p := (p0 + p1 + p2) * (1.0 / 3.0)
-			c_ill := eval_adm_light_illum(al, mid_p)
-			if c_ill <= 0.005 do continue
-			o_ill: f32 = 0.0
-			for ol, o_idx in adm_lights {
-				if o_idx == light_idx do continue
-				o_ill += eval_adm_light_illum(ol, mid_p)
-			}
-			tot_ill := max(al.ambient + (1.0 - al.ambient) * (c_ill + o_ill), 0.05)
-			drop_f  := (((1.0 - al.ambient) * c_ill * al.strength) / tot_ill) * (c_ill / max(c_ill + 1.35 * o_ill, 0.001))
-			if drop_f < 0.10 do continue
-			keep_f := clamp(1.0 - drop_f, 0.16, 1.0)
-			sh_col := [4]u8{
-				u8(clamp(145.0 * keep_f, 16.0, 148.0)),
-				u8(clamp(152.0 * keep_f, 18.0, 155.0)),
-				u8(clamp(164.0 * keep_f, 22.0, 168.0)),
-				255,
-			}
-
-			t_min_x := min(p0.x, min(p1.x, p2.x))
-			t_max_x := max(p0.x, max(p1.x, p2.x))
-			t_min_z := min(p0.z, min(p1.z, p2.z))
-			t_max_z := max(p0.z, max(p1.z, p2.z))
-
-			for r in receivers {
-				if t_max_x <= r.min_xz.x + 1e-3 || t_min_x >= r.max_xz.x - 1e-3 ||
-				   t_max_z <= r.min_xz.y + 1e-3 || t_min_z >= r.max_xz.y - 1e-3 {
-					continue
-				}
-				if r.plane_count == 0 &&
-				   t_min_x >= r.min_xz.x && t_max_x <= r.max_xz.x &&
-				   t_min_z >= r.min_xz.y && t_max_z <= r.max_xz.y {
-					y_use := max(p0.y, r.top_y + y_step)
-					bv := u32(len(sh_verts))
-					append(&sh_verts,
-						gfx.Vertex{position = {p0.x, y_use, p0.z}, normal = {0, 1, 0}, uv = {0, 0}, color = sh_col},
-						gfx.Vertex{position = {p1.x, y_use, p1.z}, normal = {0, 1, 0}, uv = {0, 0}, color = sh_col},
-						gfx.Vertex{position = {p2.x, y_use, p2.z}, normal = {0, 1, 0}, uv = {0, 0}, color = sh_col},
-					)
-					append(&sh_inds, bv, bv + 1, bv + 2)
-					break
-				}
-				cad_csg.csg_clip_shadow_tri_to_receiver(p0, p1, p2, r, y_step, &poly_a, &poly_b)
-				if len(poly_a) < 3 do continue
-				bv := u32(len(sh_verts))
-				for pt in poly_a {
-					append(&sh_verts, gfx.Vertex{position = pt, normal = {0, 1, 0}, uv = {0, 0}, color = sh_col})
-				}
-				tri_n := u32(len(poly_a) - 2)
-				for k in 0 ..< tri_n {
-					append(&sh_inds, bv, bv + k + 1, bv + k + 2)
-				}
-			}
-		}
-	}
-
-	if len(sh_verts) >= 3 && len(sh_inds) >= 3 {
-		engine.mesh_upsert_procedural(adm.shadow_mesh_guid, sh_verts[:], sh_inds[:], nil, keep_cpu_buffers = false)
-		append(out, engine.Render_Command{
-			owner   = owner_h,
-			variant = engine.Draw_Mesh{
-				mesh  = adm.shadow_mesh_guid,
-				part  = 0,
-				model = linalg.MATRIX4F32_IDENTITY,
-			},
-		})
-	} else {
-		engine.mesh_remove_procedural(adm.shadow_mesh_guid)
-	}
 }
 
 @(private = "file")

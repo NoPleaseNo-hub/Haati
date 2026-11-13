@@ -3,9 +3,9 @@ package tween_tests
 // The graph view's root discovery over authored blobs: every Authored field
 // in a component's value graph, in walk order (field order + array order).
 
-import tween "moonhug:packages/tween"
-import tween_editor "moonhug:packages/tween/editor"
-import common "moonhug:tests/common"
+import tween "haati:packages/tween"
+import tween_editor "haati:packages/tween/editor"
+import common "haati:tests/common"
 import "core:testing"
 
 _View_Holder :: struct {

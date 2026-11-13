@@ -9,11 +9,15 @@ package audio_editor
 // in game binaries too.
 
 import "core:fmt"
-import "moonhug:engine_editor/asset_pipeline"
-import engine "moonhug:engine"
-import audio "moonhug:packages/audio"
+import "core:math"
+import "core:os"
+import "core:path/filepath"
+import "core:strings"
+import "haati:engine_editor/asset_pipeline"
+import engine "haati:engine"
+import audio "haati:packages/audio"
 
-_AUDIO_EXTS := []string{".mp3", ".wav", ".ogg"}
+_AUDIO_EXTS := []string{".mp3", ".wav", ".ogg", ".flac"}
 
 @(phase={key=ImportersInit, order=1, mode=Editor})
 audio_importers_init :: proc() {
@@ -38,6 +42,17 @@ _import_audio :: proc(source_path: string, artifact_path: string, settings: rawp
 		s := cast(^audio.AudioSettings)settings
 		volume = s.volume
 		normalize = s.normalize
+	}
+
+	ext := strings.to_lower(filepath.ext(source_path), context.temp_allocator)
+	is_compressed := ext == ".ogg" || ext == ".mp3" || ext == ".flac"
+	if is_compressed && !normalize && math.abs(volume - 1.0) < 1e-4 {
+		if raw, rerr := os.read_entire_file(source_path, context.temp_allocator); rerr == nil {
+			if os.write_entire_file(artifact_path, raw) == nil {
+				fmt.printf("[Pipeline] Imported audio (compressed pass-through %s): %s -> %s\n", ext, source_path, artifact_path)
+				return true
+			}
+		}
 	}
 
 	pcm, spec, ok := audio.decode_file_f32(source_path)

@@ -3,12 +3,12 @@ package particles_sequencer_tests
 // The particles Control Track (particles/sequencer) driven through a director.
 
 import "core:testing"
-import "moonhug:engine"
-import anim "moonhug:packages/animation"
-import seq "moonhug:packages/sequencer"
-import particles "moonhug:packages/particles"
-import common "moonhug:tests/common"
-import particles_seq "moonhug:packages/particles/sequencer"
+import "haati:engine"
+import anim "haati:packages/animation"
+import seq "haati:packages/sequencer"
+import particles "haati:packages/particles"
+import common "haati:tests/common"
+import particles_seq "haati:packages/particles/sequencer"
 
 @(test)
 test_particles_control_track :: proc(t: ^testing.T) {
@@ -93,7 +93,7 @@ test_timeline_sample_scene :: proc(t: ^testing.T) {
 	context.user_ptr = &tc_mem.uc
 	defer common.teardown(tc_mem)
 
-	engine.asset_db_init("moonhug/packages/animation/samples/timeline_sample/assets")
+	engine.asset_db_init("haati/packages/animation/samples/timeline_sample/assets")
 	defer engine.asset_db_shutdown()
 	defer engine.scene_lib_shutdown()
 	anim.animation_clip_cache_init()
@@ -101,7 +101,7 @@ test_timeline_sample_scene :: proc(t: ^testing.T) {
 	seq.register_builtin_tracks()
 	particles_seq.particles_track_init()
 
-	loaded := engine.scene_load_single_path("moonhug/packages/animation/samples/timeline_sample/assets/timeline_demo.scene")
+	loaded := engine.scene_load_single_path("haati/packages/animation/samples/timeline_sample/assets/timeline_demo.scene")
 	testing.expect(t, loaded != nil, "demo scene should load")
 	if loaded == nil do return
 	tc_mem.scene = loaded

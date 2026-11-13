@@ -14,9 +14,9 @@ package particles_sequencer
 // track-driven systems with manual_start (and a random_seed for stable
 // scrubbing): the span decides when they play.
 
-import "moonhug:engine"
-import seq "moonhug:packages/sequencer"
-import particles "moonhug:packages/particles"
+import "haati:engine"
+import seq "haati:packages/sequencer"
+import particles "haati:packages/particles"
 
 // The kind's components: the track carries what it drives; the clip needs no
 // payload (the span itself is the instruction).

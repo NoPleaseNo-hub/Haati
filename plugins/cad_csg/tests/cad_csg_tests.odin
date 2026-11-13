@@ -5,11 +5,11 @@ import "core:math/linalg"
 import "core:os"
 import "core:testing"
 import "core:time"
-import "moonhug:engine"
-import common "moonhug:tests/common"
-import physics3d "moonhug:packages/physics3d"
-import cad_csg "moonhug:packages/cad_csg"
-import cad_ed "moonhug:packages/cad_csg/editor"
+import "haati:engine"
+import common "haati:tests/common"
+import physics3d "haati:packages/physics3d"
+import cad_csg "haati:packages/cad_csg"
+import cad_ed "haati:packages/cad_csg/editor"
 
 @(test)
 cad_csg_three_pillar_level_composition_channels_glass_and_ram_reset_test :: proc(t: ^testing.T) {
@@ -326,7 +326,7 @@ cad_csg_uv_sphere_72_planes_and_ground_clipped_shadows_test :: proc(t: ^testing.
 	cad_csg.csg_volume_rebuild(vol)
 	recs_with_floor, _ := cad_csg.csg_collect_ground_receivers(0.0, context.temp_allocator)
 	testing.expect(t, len(recs_with_floor) > 0, "Floor slab at y = 0 must be detected as a ground receiver")
-	testing.expect(t, engine.mesh_is_cached(vol.shadow_mesh_guid), "Planar shadow mesh should be emitted once a ground receiver is present")
+	testing.expect(t, !engine.mesh_is_cached(vol.shadow_mesh_guid), "CPU planar shadow mesh is retired in favor of GPU shadow atlas")
 }
 
 @(test)

@@ -3,12 +3,12 @@ package input_manager_editor
 import "core:c"
 import "core:fmt"
 import "core:strings"
-import im "moonhug:external/odin-imgui"
-import input "moonhug:engine/input"
-import wnd "moonhug:editor/window"
-import input_mgr "moonhug:packages/input_manager"
-import icons "moonhug:editor/icons"
-import widgets "moonhug:editor/widgets"
+import im "haati:external/odin-imgui"
+import input "haati:engine/input"
+import wnd "haati:editor/window"
+import input_mgr "haati:packages/input_manager"
+import icons "haati:editor/icons"
+import widgets "haati:editor/widgets"
 
 Input_Choice_Kind :: enum {
 	Keyboard,
@@ -406,7 +406,7 @@ _draw_listener_modal :: proc() {
 		if _listener_slot == 1 do slot_name = "Secondary PC Key"
 		else if _listener_slot == 2 do slot_name = "Gamepad / Controller"
 
-		im.TextColored({1.0, 0.85, 0.2, 1.0}, "● LISTENING FOR INPUT...")
+		im.TextColored({1.0, 0.85, 0.2, 1.0}, icons.ICON_MD_RECORD + " LISTENING FOR INPUT...")
 		im.TextUnformatted(fmt.ctprintf("Binding [%s] -> %s", action_item.name, slot_name))
 		im.TextDisabled("Press ANY key, click mouse button (M1, M2, M3, M4, M5), or roll Mouse Wheel.")
 		im.TextDisabled("All keys (including Escape, Space, Enter, Tab) will bind directly.")

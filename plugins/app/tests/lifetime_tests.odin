@@ -5,9 +5,9 @@ package app_tests
 // guids are silently dropped on load, see the missing-component note in
 // docs/Plugins.md).
 
-import app "moonhug:packages/app"
-import "moonhug:engine"
-import common "moonhug:tests/common"
+import app "haati:packages/app"
+import "haati:engine"
+import common "haati:tests/common"
 import "core:fmt"
 import "core:strings"
 import "core:testing"

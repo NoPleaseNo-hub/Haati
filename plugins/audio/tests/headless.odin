@@ -14,7 +14,7 @@ package audio_tests
 // asks first, which may be a test that never mentions the mixer at all.
 
 import "base:runtime"
-import audio "moonhug:packages/audio"
+import audio "haati:packages/audio"
 
 @(init)
 _audio_tests_force_deviceless :: proc "contextless" () {

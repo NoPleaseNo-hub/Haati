@@ -8,13 +8,13 @@ package text_tests
 import "core:os"
 import "core:strings"
 import "core:testing"
-import "moonhug:engine"
-import common "moonhug:tests/common"
-import text "moonhug:packages/text"
+import "haati:engine"
+import common "haati:tests/common"
+import text "haati:packages/text"
 
 @(private = "file")
 _roboto :: proc(t: ^testing.T) -> []u8 {
-	data, err := os.read_entire_file("moonhug/packages/text/assets/Roboto-Medium.ttf", context.temp_allocator)
+	data, err := os.read_entire_file("haati/packages/text/assets/Roboto-Medium.ttf", context.temp_allocator)
 	testing.expect(t, err == nil, "the text package's Roboto is readable")
 	return data
 }

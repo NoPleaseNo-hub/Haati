@@ -12,18 +12,18 @@ import "core:math/linalg"
 import "core:os"
 import "core:slice"
 import "core:strings"
-import im "moonhug:external/odin-imgui"
-import engine "moonhug:engine"
-import gfx "moonhug:engine/gfx"
-import "moonhug:engine/gizmos"
-import input "moonhug:engine/input"
-import "moonhug:editor/handles"
-import "moonhug:editor/icons"
-import "moonhug:editor/widgets"
-import wnd "moonhug:editor/window"
-import cad_csg "moonhug:packages/cad_csg"
-import control_rig "moonhug:packages/control_rig"
-import control_rig_ed "moonhug:packages/control_rig/editor"
+import im "haati:external/odin-imgui"
+import engine "haati:engine"
+import gfx "haati:engine/gfx"
+import "haati:engine/gizmos"
+import input "haati:engine/input"
+import "haati:editor/handles"
+import "haati:editor/icons"
+import "haati:editor/widgets"
+import wnd "haati:editor/window"
+import cad_csg "haati:packages/cad_csg"
+import control_rig "haati:packages/control_rig"
+import control_rig_ed "haati:packages/control_rig/editor"
 
 // Which sub-editor tab is active inside CAD / Modeling Mode
 CAD_Workspace_Tab :: enum u8 {
@@ -1996,11 +1996,20 @@ convert_active_csg_to_editable_mesh :: proc() -> engine.Transform_Handle {
 	unified_hulls := make([dynamic]cad_csg.CSG_Convex, 0, 32, context.temp_allocator)
 	for _, ch in vol.chunks {
 		if ch == nil do continue
-		for h in ch.destructible_hulls {
-			if len(h.planes) >= 4 do append(&unified_hulls, cad_csg.convex_clone(h, context.temp_allocator))
-		}
-		for h in ch.indestructible_hulls {
-			if len(h.planes) >= 4 do append(&unified_hulls, cad_csg.convex_clone(h, context.temp_allocator))
+		if ch.voxel_grid != nil && len(ch.voxel_grid.base_shell_hulls) > 0 {
+			for h in ch.voxel_grid.base_shell_hulls {
+				if len(h.planes) >= 4 do append(&unified_hulls, cad_csg.convex_clone(h, context.temp_allocator))
+			}
+			for h in ch.indestructible_hulls {
+				if len(h.planes) >= 4 do append(&unified_hulls, cad_csg.convex_clone(h, context.temp_allocator))
+			}
+		} else {
+			for h in ch.destructible_hulls {
+				if len(h.planes) >= 4 do append(&unified_hulls, cad_csg.convex_clone(h, context.temp_allocator))
+			}
+			for h in ch.indestructible_hulls {
+				if len(h.planes) >= 4 do append(&unified_hulls, cad_csg.convex_clone(h, context.temp_allocator))
+			}
 		}
 	}
 	if len(unified_hulls) == 0 && len(vol.runtime_hulls) > 0 {
@@ -2018,6 +2027,7 @@ convert_active_csg_to_editable_mesh :: proc() -> engine.Transform_Handle {
 	_history_reset()
 	_mesh_ed.workspace_tab = .Mesh_Editor
 	_ed.tool_active = false
+	engine.inspector_set_active_selection(owner)
 	engine.inspector_request_select(owner)
 	return owner
 }
@@ -4851,7 +4861,9 @@ convert_editable_mesh_to_csg :: proc(make_dynamic_physics := false, append_to_ac
 			}
 			cad_csg.csg_volume_rebuild(vol)
 			scene.dirty = true
+			_mesh_ed.target_owner = owner
 			_mesh_ed.workspace_tab = .CSG_Editor
+			engine.inspector_set_active_selection(owner)
 			engine.inspector_request_select(owner)
 			return owner
 		}
@@ -4918,7 +4930,9 @@ convert_editable_mesh_to_csg :: proc(make_dynamic_physics := false, append_to_ac
 		cad_csg.csg_volume_sync_colliders_only(vol)
 	}
 	scene.dirty = true
+	_mesh_ed.target_owner = target_h
 	_mesh_ed.workspace_tab = .CSG_Editor
+	engine.inspector_set_active_selection(target_h)
 	engine.inspector_request_select(target_h)
 	return target_h
 }

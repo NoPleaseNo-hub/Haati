@@ -17,10 +17,10 @@ package audio_sequencer
 // itself, the sequencer never imports audio. Author track-driven sources with
 // play_on_awake off: the span decides when they play.
 
-import "moonhug:engine"
+import "haati:engine"
 import mix "vendor:sdl3/mixer"
-import seq "moonhug:packages/sequencer"
-import audio "moonhug:packages/audio"
+import seq "haati:packages/sequencer"
+import audio "haati:packages/audio"
 
 // The kind's components: the track carries what it drives, the clip carries
 // its payload. `ref:`/`ext:` tags drive the inspector's pickers, so the
@@ -41,7 +41,7 @@ TrackAudio :: struct {
 ClipAudio :: struct {
 	using base: engine.CompData `inspect:"-"`,
 
-	clip: engine.Asset_GUID `ext:"mp3,wav,ogg"`,
+	clip: engine.Asset_GUID `ext:"mp3,wav,ogg,flac"`,
 }
 
 @(phase={key=ImportersInit, order=4})

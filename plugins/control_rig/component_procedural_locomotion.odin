@@ -9,7 +9,7 @@ package control_rig
 // 3. Head look-at tracking.
 
 import "core:math/linalg"
-import engine "moonhug:engine"
+import engine "haati:engine"
 
 @(component={menu="Animation/ProceduralLocomotion"})
 @(typ_guid={guid = "d87a4192-36c1-4b78-9e51-64d8a1f28e93"})

@@ -13,12 +13,12 @@ package sequencer_tests
 
 import "core:strings"
 import "core:testing"
-import "moonhug:engine"
-import "moonhug:engine/log"
-import seq "moonhug:packages/sequencer"
-import scripts "moonhug:packages/sequencer/scripts"
-import undo "moonhug:editor/undo"
-import common "moonhug:tests/common"
+import "haati:engine"
+import "haati:engine/log"
+import seq "haati:packages/sequencer"
+import scripts "haati:packages/sequencer/scripts"
+import undo "haati:editor/undo"
+import common "haati:tests/common"
 
 @(private = "file")
 _log_count :: proc(msg: string) -> int {

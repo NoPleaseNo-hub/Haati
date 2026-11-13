@@ -6,8 +6,8 @@ package animation_sequencer_tests
 import "core:encoding/json"
 import "core:strings"
 import "core:testing"
-import "moonhug:editor"
-import common "moonhug:tests/common"
+import "haati:editor"
+import common "haati:tests/common"
 
 @(private = "file")
 _tool :: proc(t: ^testing.T, name: string, params: json.Object) -> (json.Object, bool) {

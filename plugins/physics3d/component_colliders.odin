@@ -9,8 +9,8 @@ package physics3d
 // edits don't live-sync (the editor doesn't simulate); runtime code mutates
 // physics through body_of(tH) + moonhug:external/jolt.
 
-import jolt "moonhug:external/jolt"
-import "moonhug:engine"
+import jolt "haati:external/jolt"
+import "haati:engine"
 
 @(component={menu="Physics/BoxCollider"})
 @(typ_guid={guid = "13101cd5-e0a6-49d4-a310-953001ebae6b"})

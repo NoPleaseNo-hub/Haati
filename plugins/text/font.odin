@@ -14,8 +14,8 @@ import "core:os"
 import "core:slice"
 import stbtt "vendor:stb/truetype"
 import stbrp "vendor:stb/rect_pack"
-import "moonhug:engine"
-import gfx "moonhug:engine/gfx"
+import "haati:engine"
+import gfx "haati:engine/gfx"
 
 // Import settings on a font file (the meta). Baked into the artifact.
 @(typ_guid={guid="33026060-aac7-4df7-a6d4-ae9f7b863264"})
@@ -318,7 +318,7 @@ _font_add_glyph :: proc(guid: engine.Asset_GUID, f: ^Font, r: rune) -> (Font_Gly
 				rgba[i * 4 + 1] = 255
 				rgba[i * 4 + 2] = 255
 			}
-			engine.texture_cache[f.dyn_texture] = engine.Texture2D{guid = f.dyn_texture, width = DYN_PAGE_DIM, height = DYN_PAGE_DIM, pixels_per_unit = engine.PIXELS_PER_UNIT, gfx = gfx.texture_create(rgba, DYN_PAGE_DIM, DYN_PAGE_DIM)}
+			engine.texture_cache[f.dyn_texture] = engine.Texture2D{guid = f.dyn_texture, width = DYN_PAGE_DIM, height = DYN_PAGE_DIM, pixels_per_unit = engine.PIXELS_PER_UNIT, gfx = gfx.texture_create(rgba, DYN_PAGE_DIM, DYN_PAGE_DIM, mipmaps = false)}
 		}
 	}
 

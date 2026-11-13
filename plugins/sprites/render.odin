@@ -5,7 +5,7 @@ package sprites
 // commands"). The package owns the SpriteRenderer pool and emits Draw_Quad
 // commands; the engine sorts and submits them.
 
-import "moonhug:engine"
+import "haati:engine"
 
 // The world-space quad and uvs a SpriteRenderer covers: bl, br, tr, tl. The
 // editor picks, outlines and frames sprites by the commands this feeds. Sprites are transform-oriented (not billboards), sized

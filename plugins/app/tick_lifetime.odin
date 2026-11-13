@@ -1,6 +1,6 @@
 package app
 
-import "moonhug:engine"
+import "haati:engine"
 
 @(fixed_update={order=-50})
 tick_lifetime :: proc(dt: f32) {

@@ -7,12 +7,12 @@ package sprites_editor
 import "base:runtime"
 import "core:path/filepath"
 import "core:strings"
-import "moonhug:engine"
-import gfx "moonhug:engine/gfx"
-import im "moonhug:external/odin-imgui"
-import "moonhug:editor/inspector"
-import "moonhug:editor/subassets"
-import sprites "moonhug:packages/sprites"
+import "haati:engine"
+import gfx "haati:engine/gfx"
+import im "haati:external/odin-imgui"
+import "haati:editor/inspector"
+import "haati:editor/subassets"
+import sprites "haati:packages/sprites"
 
 _TEXTURE_EXTS := [?]string{".png", ".jpg", ".jpeg", ".bmp"}
 

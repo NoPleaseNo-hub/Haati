@@ -8,7 +8,7 @@ package hot_scripts
 
 @(require) import "core:math"
 @(require) import "core:math/linalg"
-import hot "moonhug:engine/hot_api"
+import hot "haati:engine/hot_api"
 
 hover_oscillator_Blueprint_State :: struct {
 	amplitude: f32,
@@ -133,7 +133,8 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 // @BODIN_GRAPH_V1
 // {
 //   "name": "hover_oscillator",
-//   "package_target": "moonhug/hot_scripts",
+//   "domain": 0,
+//   "package_target": "haati/hot_scripts",
 //   "next_uid": 10,
 //   "using_spaces": [
 //     "self",
@@ -148,8 +149,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //     {
 //       "name": "amplitude",
 //       "pin_type": 3,
+//       "is_array": false,
 //       "default_f32": 0.40000001,
 //       "default_int": 0,
+//       "default_i64": 0,
 //       "default_bool": false,
 //       "default_vec2": [
 //         0.00000000,
@@ -160,6 +163,13 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //         0.00000000,
 //         0.00000000
 //       ],
+//       "default_vec4": [
+//         0.00000000,
+//         0.00000000,
+//         0.00000000,
+//         0.00000000
+//       ],
+//       "default_str": "",
 //       "instance_editable": true,
 //       "category": "Motion",
 //       "tooltip_text": "Oscillation vertical amplitude in meters",
@@ -169,8 +179,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //     {
 //       "name": "frequency",
 //       "pin_type": 3,
+//       "is_array": false,
 //       "default_f32": 2.20000005,
 //       "default_int": 0,
+//       "default_i64": 0,
 //       "default_bool": false,
 //       "default_vec2": [
 //         0.00000000,
@@ -181,6 +193,13 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //         0.00000000,
 //         0.00000000
 //       ],
+//       "default_vec4": [
+//         0.00000000,
+//         0.00000000,
+//         0.00000000,
+//         0.00000000
+//       ],
+//       "default_str": "",
 //       "instance_editable": true,
 //       "category": "Motion",
 //       "tooltip_text": "Oscillation frequency in Hz",
@@ -190,8 +209,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //     {
 //       "name": "phase",
 //       "pin_type": 3,
+//       "is_array": false,
 //       "default_f32": 0.00000000,
 //       "default_int": 0,
+//       "default_i64": 0,
 //       "default_bool": false,
 //       "default_vec2": [
 //         0.00000000,
@@ -202,6 +223,13 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //         0.00000000,
 //         0.00000000
 //       ],
+//       "default_vec4": [
+//         0.00000000,
+//         0.00000000,
+//         0.00000000,
+//         0.00000000
+//       ],
+//       "default_str": "",
 //       "instance_editable": false,
 //       "category": "Runtime",
 //       "tooltip_text": "",
@@ -219,6 +247,8 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //         -150.00000000
 //       ],
 //       "enabled": true,
+//       "owner_proc": "",
+//       "proc_use_odin_body": false,
 //       "var_name": "",
 //       "var_as_ref": false,
 //       "math_op": 0,
@@ -241,8 +271,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pin_type": 0,
 //           "pass_mode": 0,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -252,7 +284,14 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         }
 //       ]
 //     },
@@ -265,12 +304,14 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //         -30.00000000
 //       ],
 //       "enabled": true,
+//       "owner_proc": "On_Jump_Boost",
+//       "proc_use_odin_body": false,
 //       "var_name": "",
 //       "var_as_ref": false,
 //       "math_op": 0,
 //       "per_object_ts": false,
 //       "hot_proc_target": "On_Jump_Boost",
-//       "odin_body": "",
+//       "odin_body": "// Scoped Procedure Body (`using self` variables active!)\nhot.log_info(\"Custom procedure executed\")",
 //       "action_name": "",
 //       "trigger_edge": 0,
 //       "input_priority": 10,
@@ -283,12 +324,14 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //       ],
 //       "outputs": [
 //         {
-//           "name": "\u25c7 Delegate",
+//           "name": "Delegate",
 //           "pin_type": 7,
 //           "pass_mode": 0,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -298,15 +341,24 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         },
 //         {
 //           "name": "Exec",
 //           "pin_type": 0,
 //           "pass_mode": 0,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -316,15 +368,24 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         },
 //         {
 //           "name": "Payload",
 //           "pin_type": 3,
 //           "pass_mode": 0,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -334,15 +395,24 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         },
 //         {
 //           "name": "Input Vec2",
 //           "pin_type": 8,
 //           "pass_mode": 0,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -352,15 +422,24 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         },
 //         {
 //           "name": "Pressed",
 //           "pin_type": 1,
 //           "pass_mode": 0,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -370,7 +449,14 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         }
 //       ]
 //     },
@@ -383,11 +469,13 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //         -150.00000000
 //       ],
 //       "enabled": true,
+//       "owner_proc": "",
+//       "proc_use_odin_body": false,
 //       "var_name": "",
 //       "var_as_ref": false,
 //       "math_op": 0,
 //       "per_object_ts": false,
-//       "hot_proc_target": "",
+//       "hot_proc_target": "On_Jump_Boost",
 //       "odin_body": "",
 //       "action_name": "Jump",
 //       "trigger_edge": 0,
@@ -402,8 +490,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pin_type": 0,
 //           "pass_mode": 0,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -413,15 +503,24 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         },
 //         {
-//           "name": "\u25c7 Target Proc",
+//           "name": "Target Proc",
 //           "pin_type": 7,
 //           "pass_mode": 0,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -431,7 +530,14 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         }
 //       ],
 //       "outputs": [
@@ -440,8 +546,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pin_type": 0,
 //           "pass_mode": 0,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -451,7 +559,14 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         }
 //       ]
 //     },
@@ -464,6 +579,8 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //         -30.00000000
 //       ],
 //       "enabled": true,
+//       "owner_proc": "On_Jump_Boost",
+//       "proc_use_odin_body": false,
 //       "var_name": "",
 //       "var_as_ref": false,
 //       "math_op": 0,
@@ -483,8 +600,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pin_type": 0,
 //           "pass_mode": 0,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -494,15 +613,24 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         },
 //         {
 //           "name": "New Pos",
 //           "pin_type": 4,
 //           "pass_mode": 0,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -512,7 +640,14 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             2.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         }
 //       ],
 //       "outputs": [
@@ -521,8 +656,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pin_type": 0,
 //           "pass_mode": 0,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -532,7 +669,14 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         }
 //       ]
 //     },
@@ -545,6 +689,8 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //         160.00000000
 //       ],
 //       "enabled": true,
+//       "owner_proc": "",
+//       "proc_use_odin_body": false,
 //       "var_name": "",
 //       "var_as_ref": false,
 //       "math_op": 0,
@@ -567,8 +713,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pin_type": 0,
 //           "pass_mode": 0,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -578,15 +726,24 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         },
 //         {
 //           "name": "dt",
 //           "pin_type": 3,
 //           "pass_mode": 0,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -596,15 +753,24 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         },
 //         {
 //           "name": "Object dt",
 //           "pin_type": 3,
 //           "pass_mode": 0,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -614,7 +780,14 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         }
 //       ]
 //     },
@@ -627,6 +800,8 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //         310.00000000
 //       ],
 //       "enabled": true,
+//       "owner_proc": "",
+//       "proc_use_odin_body": false,
 //       "var_name": "amplitude",
 //       "var_as_ref": false,
 //       "math_op": 0,
@@ -649,8 +824,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pin_type": 3,
 //           "pass_mode": 0,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -660,15 +837,24 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         },
 //         {
 //           "name": "Ref (^Ptr)",
 //           "pin_type": 3,
 //           "pass_mode": 1,
 //           "is_addressable": true,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -678,7 +864,14 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         }
 //       ]
 //     },
@@ -691,6 +884,8 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //         430.00000000
 //       ],
 //       "enabled": true,
+//       "owner_proc": "",
+//       "proc_use_odin_body": false,
 //       "var_name": "frequency",
 //       "var_as_ref": false,
 //       "math_op": 0,
@@ -713,8 +908,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pin_type": 3,
 //           "pass_mode": 0,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -724,15 +921,24 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         },
 //         {
 //           "name": "Ref (^Ptr)",
 //           "pin_type": 3,
 //           "pass_mode": 1,
 //           "is_addressable": true,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -742,7 +948,14 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         }
 //       ]
 //     },
@@ -755,6 +968,8 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //         550.00000000
 //       ],
 //       "enabled": true,
+//       "owner_proc": "",
+//       "proc_use_odin_body": false,
 //       "var_name": "phase",
 //       "var_as_ref": false,
 //       "math_op": 0,
@@ -777,8 +992,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pin_type": 3,
 //           "pass_mode": 0,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -788,15 +1005,24 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         },
 //         {
 //           "name": "Ref (^Ptr)",
 //           "pin_type": 3,
 //           "pass_mode": 1,
 //           "is_addressable": true,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -806,7 +1032,14 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         }
 //       ]
 //     },
@@ -819,6 +1052,8 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //         680.00000000
 //       ],
 //       "enabled": true,
+//       "owner_proc": "",
+//       "proc_use_odin_body": false,
 //       "var_name": "",
 //       "var_as_ref": false,
 //       "math_op": 0,
@@ -841,8 +1076,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pin_type": 4,
 //           "pass_mode": 0,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -852,15 +1089,24 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         },
 //         {
 //           "name": "Pos Ref (^Vec3)",
 //           "pin_type": 4,
 //           "pass_mode": 1,
 //           "is_addressable": true,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -870,7 +1116,14 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         }
 //       ]
 //     },
@@ -883,6 +1136,8 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //         220.00000000
 //       ],
 //       "enabled": true,
+//       "owner_proc": "",
+//       "proc_use_odin_body": false,
 //       "var_name": "",
 //       "var_as_ref": false,
 //       "math_op": 0,
@@ -902,8 +1157,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pin_type": 0,
 //           "pass_mode": 0,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -913,15 +1170,24 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         },
 //         {
 //           "name": "amp",
 //           "pin_type": 3,
 //           "pass_mode": 0,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 0.34999999,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -931,15 +1197,24 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         },
 //         {
 //           "name": "freq",
 //           "pin_type": 3,
 //           "pass_mode": 0,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 2.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -949,15 +1224,24 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         },
 //         {
 //           "name": "phase",
 //           "pin_type": 3,
 //           "pass_mode": 1,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -967,15 +1251,24 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         },
 //         {
 //           "name": "pos",
 //           "pin_type": 4,
 //           "pass_mode": 1,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -985,7 +1278,14 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         }
 //       ],
 //       "outputs": [
@@ -994,8 +1294,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pin_type": 0,
 //           "pass_mode": 0,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -1005,15 +1307,24 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         },
 //         {
 //           "name": "wave_y",
 //           "pin_type": 3,
 //           "pass_mode": 0,
 //           "is_addressable": false,
+//           "is_array": false,
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
+//           "default_i64": 0,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -1023,7 +1334,14 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000,
 //             0.00000000
-//           ]
+//           ],
+//           "default_vec4": [
+//             0.00000000,
+//             0.00000000,
+//             0.00000000,
+//             0.00000000
+//           ],
+//           "default_str": ""
 //         }
 //       ]
 //     }

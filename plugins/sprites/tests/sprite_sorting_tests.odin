@@ -5,12 +5,12 @@ package sprites_tests
 // with SpriteSortingGroup subtrees sorting as one unit against outsiders.
 // Pure data tests: build a scene tree, run the key pass, assert key ordering.
 
-import "moonhug:engine"
-import sprites "moonhug:packages/sprites"
+import "haati:engine"
+import sprites "haati:packages/sprites"
 
 import "core:math/linalg"
 import "core:testing"
-import common "moonhug:tests/common"
+import common "haati:tests/common"
 
 // Camera at +Z looking at the origin: a transform's view depth equals its
 // distance along -Z from the camera (z=0 => depth 10, z=5 => depth 5).
@@ -154,7 +154,7 @@ test_sprite_sorting_group_nesting_and_disable :: proc(t: ^testing.T) {
 test_sprite_sort_group_survives_scene_load :: proc(t: ^testing.T) {
 	tc_mem := new(common.TestCtx)
 	defer free(tc_mem)
-	common.setup(tc_mem, "moonhug/tests/fixtures/_test_sort_group_load.scene")
+	common.setup(tc_mem, "haati/tests/fixtures/_test_sort_group_load.scene")
 	context.user_ptr = &tc_mem.uc
 	defer common.teardown(tc_mem)
 

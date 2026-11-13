@@ -6,9 +6,9 @@ package cad_csg
 // partitioned at compile/runtime into 8m x 8m x 8m Spatial CSG Chunks (`CSG_Chunk`)
 // with an SOA AABB broadphase array (`brush_aabbs`) for cache-friendly culling.
 
-import jolt "moonhug:external/jolt"
-import engine "moonhug:engine"
-import gfx "moonhug:engine/gfx"
+import jolt "haati:external/jolt"
+import engine "haati:engine"
+import gfx "haati:engine/gfx"
 
 CSG_DEFAULT_CHUNK_SIZE :: f32(8.0)
 

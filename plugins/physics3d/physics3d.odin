@@ -25,8 +25,8 @@ import "core:fmt"
 import "core:math"
 import "core:math/linalg"
 import "core:sync"
-import jolt "moonhug:external/jolt"
-import "moonhug:engine"
+import jolt "haati:external/jolt"
+import "haati:engine"
 
 GRAVITY_DEFAULT :: [3]f32{0, -9.81, 0}
 _COLLISION_STEPS :: 1
@@ -122,10 +122,12 @@ _state: struct {
 	body_interface:         ^jolt.BodyInterface,
 	body_interface_no_lock: ^jolt.BodyInterface,
 	job_system:             ^jolt.JobSystem,
-	bp_interface:     ^jolt.BroadPhaseLayerInterface,
-	obj_pair_filter:  ^jolt.ObjectLayerPairFilter,
-	obj_vs_bp_filter: ^jolt.ObjectVsBroadPhaseLayerFilter,
-	contact_listener: ^jolt.ContactListener,
+	bp_interface:           ^jolt.BroadPhaseLayerInterface,
+	obj_pair_filter:        ^jolt.ObjectLayerPairFilter,
+	obj_vs_bp_filter:       ^jolt.ObjectVsBroadPhaseLayerFilter,
+	contact_listener:       ^jolt.ContactListener,
+	occlusion_bp_filter:    ^jolt.BroadPhaseLayerFilter,
+	occlusion_layer_filter: ^jolt.ObjectLayerFilter,
 	world_ready:      bool,
 	current_world:    ^engine.World,
 	current_world_id: u64,
@@ -202,9 +204,14 @@ should_layers_collide :: proc(layer1, layer2: jolt.ObjectLayer) -> bool {
 	return jolt.ObjectLayerPairFilterTable_ShouldCollide(_state.obj_pair_filter, layer1, layer2)
 }
 
+_AUDIO_OCCLUSION_FILTER_TAG :: uintptr(0x10000001)
+
 @(private = "file")
 _ray_layer_filter_should_collide :: proc "c" (userData: rawptr, layer: jolt.ObjectLayer) -> bool {
 	if layer >= NUM_LAYERS do return false
+	if uintptr(userData) == _AUDIO_OCCLUSION_FILTER_TAG {
+		return layer == LAYER_NON_MOVING
+	}
 	mask := u32(uintptr(userData))
 	if mask == 0 do return false
 	if layer == LAYER_TRIGGER_SENSOR {
@@ -555,15 +562,46 @@ physics_step :: proc(fixed_dt: f32) {
 		return
 	}
 	_sync_bodies(w, step_dt)
+	_sync_joints(w)
 	sub_steps := i32(clamp(physics3d_settings.collision_steps, 1, 8))
 	jolt.PhysicsSystem_Update(_state.system, step_dt, sub_steps, _state.job_system)
+	_step_character_controllers(w, step_dt)
+	_step_joints(w)
 	_write_back(w)
 	time_dilation_volumes_step(w, step_dt)
 }
 
+@(private = "file")
+_audio_occlusion_raycast_threadsafe :: proc(origin: [3]f32, direction: [3]f32, max_dist: f32) -> bool {
+	if !_state.world_ready || _state.system == nil || max_dist <= 1e-4 do return false
+	dir_n := linalg.normalize0(direction)
+	if linalg.length2(dir_n) < 1e-6 do return false
+	nq := jolt.PhysicsSystem_GetNarrowPhaseQuery(_state.system)
+	if nq == nil do return false
+	orig := origin
+	ray_vec := dir_n * max_dist
+	res: jolt.RayCastResult
+	return jolt.NarrowPhaseQuery_CastRay(nq, &orig, &ray_vec, &res, _state.occlusion_bp_filter, _state.occlusion_layer_filter, nil)
+}
+
 physics_shutdown :: proc() {
+	engine.register_audio_occlusion_raycast(nil)
 	time_dilation_volumes_shutdown()
 	if !_state.world_ready do return
+	if _state.current_world != nil && _state.system != nil {
+		if jpool := physics_joint3_ds(_state.current_world); jpool != nil {
+			jit := engine.pool_iterator(jpool)
+			for j, _ in engine.pool_next(&jit) {
+				_destroy_joint_runtime(j)
+			}
+		}
+		if cpool := character_controller3_ds(_state.current_world); cpool != nil {
+			cit := engine.pool_iterator(cpool)
+			for cc, _ in engine.pool_next(&cit) {
+				_destroy_character_runtime(cc)
+			}
+		}
+	}
 	if _state.system != nil {
 		jolt.PhysicsSystem_Destroy(_state.system)
 		_state.system = nil
@@ -576,6 +614,14 @@ physics_shutdown :: proc() {
 	if _state.contact_listener != nil {
 		jolt.ContactListener_Destroy(_state.contact_listener)
 		_state.contact_listener = nil
+	}
+	if _state.occlusion_bp_filter != nil {
+		jolt.BroadPhaseLayerFilter_Destroy(_state.occlusion_bp_filter)
+		_state.occlusion_bp_filter = nil
+	}
+	if _state.occlusion_layer_filter != nil {
+		jolt.ObjectLayerFilter_Destroy(_state.occlusion_layer_filter)
+		_state.occlusion_layer_filter = nil
 	}
 	delete(_state.shape_owner)
 	delete(_state.contact_begin)
@@ -689,10 +735,16 @@ _ensure_world :: proc(w: ^engine.World) {
 	_state.sensor_begin = make([dynamic]Contact)
 	_state.sensor_end = make([dynamic]Contact)
 
+	jolt.BroadPhaseLayerFilter_SetProcs(&_ray_bp_solid_only_procs)
+	_state.occlusion_bp_filter = jolt.BroadPhaseLayerFilter_Create(nil)
+	jolt.ObjectLayerFilter_SetProcs(&_ray_layer_filter_procs)
+	_state.occlusion_layer_filter = jolt.ObjectLayerFilter_Create(rawptr(_AUDIO_OCCLUSION_FILTER_TAG))
+
 	_state.current_world = w
 	_state.current_world_id = world_id
 	_state.current_rb_pool = rb_pool
 	_state.world_ready = true
+	engine.register_audio_occlusion_raycast(_audio_occlusion_raycast_threadsafe)
 }
 
 // --- Scale & Dimensions (Unity semantics) --------------------------------------
@@ -1313,6 +1365,11 @@ _sync_bodies :: proc(w: ^engine.World, fixed_dt: f32) {
 			}
 			rb.last_synced_pos      = pos
 			rb.last_synced_rot      = tw.rotation
+			rb.prev_pos             = pos
+			rb.prev_rot             = tw.rotation
+			rb.curr_pos             = pos
+			rb.curr_rot             = tw.rotation
+			rb.has_prev_pose        = true
 			rb.has_synced_transform = true
 
 			for sub in subs {
@@ -1332,6 +1389,11 @@ _sync_bodies :: proc(w: ^engine.World, fixed_dt: f32) {
 				jolt.BodyInterface_MoveKinematic(_state.body_interface, rb.body, &target_pos, &target_rot, fixed_dt)
 				rb.last_synced_pos      = tw.position
 				rb.last_synced_rot      = tw.rotation
+				rb.prev_pos             = rb.curr_pos if rb.has_prev_pose else tw.position
+				rb.prev_rot             = rb.curr_rot if rb.has_prev_pose else tw.rotation
+				rb.curr_pos             = tw.position
+				rb.curr_rot             = tw.rotation
+				rb.has_prev_pose        = true
 				rb.has_synced_transform = true
 			} else if !rb.is_kinematic && rb.enabled && rb.has_synced_transform {
 				// Detect runtime Transform changes (e.g. Scene Gizmo drag, Inspector edit, or script teleport)
@@ -1346,6 +1408,11 @@ _sync_bodies :: proc(w: ^engine.World, fixed_dt: f32) {
 					jolt.BodyInterface_SetLinearAndAngularVelocity(_state.body_interface, rb.body, &zero_v, &zero_v)
 					rb.last_synced_pos = tw.position
 					rb.last_synced_rot = tw.rotation
+					rb.prev_pos        = tw.position
+					rb.prev_rot        = tw.rotation
+					rb.curr_pos        = tw.position
+					rb.curr_rot        = tw.rotation
+					rb.has_prev_pose   = true
 				}
 			}
 		}
@@ -1418,6 +1485,18 @@ _write_back :: proc(w: ^engine.World) {
 		jolt.BodyInterface_GetPosition(_state.body_interface, rb.body, &pos)
 		jolt.BodyInterface_GetRotation(_state.body_interface, rb.body, &q)
 		rot_v := engine.quat_from_native(q)
+		prev_p := rb.curr_pos if rb.has_prev_pose else pos
+		prev_r := rb.curr_rot if rb.has_prev_pose else rot_v
+		if linalg.length2(pos - prev_p) > 25.0 { // > 5m teleport snap
+			prev_p = pos
+			prev_r = rot_v
+		}
+		rb.prev_pos             = prev_p
+		rb.prev_rot             = prev_r
+		rb.curr_pos             = pos
+		rb.curr_rot             = rot_v
+		rb.has_prev_pose        = true
+
 		engine.transform_set_world_position(rb.owner, pos)
 		engine.transform_set_world_rotation(rb.owner, rot_v)
 		rb.last_synced_pos      = pos
@@ -1434,6 +1513,55 @@ _write_back :: proc(w: ^engine.World) {
 			rb.true_angular_vel = post_ang * inv_s
 			jolt.BodyInterface_SetLinearAndAngularVelocity(_state.body_interface, rb.body, &rb.true_linear_vel, &rb.true_angular_vel)
 		}
+	}
+}
+
+// Pure pose interpolation helper (5.0m teleport snap + shortest-path slerp).
+physics_interpolate_pose :: proc(rb: ^Rigidbody, alpha: f32) -> (pos: [3]f32, rot: [4]f32) {
+	if rb == nil do return {}, {0, 0, 0, 1}
+	if !rb.interpolate || !rb.has_prev_pose {
+		return rb.curr_pos, rb.curr_rot
+	}
+	if linalg.length2(rb.curr_pos - rb.prev_pos) > 25.0 {
+		return rb.curr_pos, rb.curr_rot
+	}
+	a := clamp(alpha, f32(0.0), f32(1.0))
+	pos = linalg.lerp(rb.prev_pos, rb.curr_pos, a)
+	q0 := engine.quat_to_native(rb.prev_rot)
+	q1 := engine.quat_to_native(rb.curr_rot)
+	if q0.x*q1.x + q0.y*q1.y + q0.z*q1.z + q0.w*q1.w < 0 {
+		q1 = -q1
+	}
+	rot = engine.quat_from_native(linalg.quaternion_normalize(linalg.quaternion_slerp(q0, q1, a)))
+	return pos, rot
+}
+
+@(update={order=1000})
+physics_interpolate_update :: proc(dt: f32) {
+	w := engine.ctx_world()
+	if w == nil || !_state.world_ready || _state.current_world != w do return
+	if engine.time_scale() <= 1e-5 do return
+
+	alpha := engine.fixed_interpolation_alpha()
+	pool := rigidbodies(w)
+	if pool == nil do return
+	it := engine.pool_iterator(pool)
+	for rb, _ in engine.pool_next(&it) {
+		if !rb.interpolate || !rb.has_prev_pose || !rb.has_synced_transform do continue
+		if rb.is_kinematic || !rb.enabled || rb.frozen_by_time_scale || !is_body_valid(rb.body) do continue
+		if !engine.pool_valid(&w.transforms, engine.Handle(rb.owner)) do continue
+
+		tw := engine.transform_world(rb.owner)
+		if linalg.length2(tw.position - rb.last_synced_pos) > 1e-5 ||
+		   linalg.length2(tw.rotation - rb.last_synced_rot) > 1e-4 {
+			continue // Script moved transform manually this frame; keep it untouched
+		}
+
+		pos, rot := physics_interpolate_pose(rb, alpha)
+		engine.transform_set_world_position(rb.owner, pos)
+		engine.transform_set_world_rotation(rb.owner, rot)
+		rb.last_synced_pos = pos
+		rb.last_synced_rot = rot
 	}
 }
 

@@ -5,9 +5,9 @@ package tween_tests
 // hook handles it, and this test pins that path.
 
 import "core:encoding/json"
-import "moonhug:engine"
-import tween "moonhug:packages/tween"
-import common "moonhug:tests/common"
+import "haati:engine"
+import tween "haati:packages/tween"
+import common "haati:tests/common"
 import "core:testing"
 
 @(private)

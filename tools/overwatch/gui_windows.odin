@@ -11,7 +11,7 @@ package overwatch_app
 import "base:runtime"
 import "core:fmt"
 import win32 "core:sys/windows"
-import ow "moonhug:engine/overwatch_ipc"
+import ow "haati:engine/overwatch_ipc"
 
 foreign import user32 "system:User32.lib"
 foreign import gdi32 "system:Gdi32.lib"
@@ -63,7 +63,7 @@ _draw_text :: proc(hdc: win32.HDC, x, y: i32, s: string, col: win32.COLORREF, fo
 
 run_overwatch_gui :: proc(s: ^Recorder_Session) {
 	hinst := win32.HANDLE(win32.GetModuleHandleW(nil))
-	cls_name: cstring16 = "MoonHugOverwatchWndClass"
+	cls_name: cstring16 = "HaatiOverwatchWndClass"
 
 	wc: win32.WNDCLASSEXW
 	wc.cbSize        = size_of(win32.WNDCLASSEXW)
@@ -81,7 +81,7 @@ run_overwatch_gui :: proc(s: ^Recorder_Session) {
 	hwnd := win32.CreateWindowExW(
 		win32.WS_EX_TOPMOST,
 		cls_name,
-		"MoonHug Overwatch — Out-of-Process Flight Recorder",
+		"Haati Overwatch — Out-of-Process Flight Recorder",
 		win32.WS_OVERLAPPEDWINDOW | win32.WS_VISIBLE,
 		80, 80, 580, 460,
 		nil, nil, win32.HINSTANCE(hinst), nil,
@@ -248,13 +248,15 @@ _paint_dashboard :: proc(hdc: win32.HDC, w, h: i32, s: ^Recorder_Session) {
 
 	// 3. Subsystem Phase Breakdown & Live Context Card
 	cy0: i32 = 186
-	cy1: i32 = 242
+	cy1: i32 = 262
 	_fill_rect(hdc, {10, cy0, w - 10, cy1}, bg_card)
 	_draw_text(hdc, 20, cy0 + 8, fmt.tprintf("Sim/Phys: %.2f ms  |  Editor UI: %.2f ms  |  3D/2D Render: %.2f ms  |  Present: %.2f ms", f.sim_ms, f.ui_ms, f.render_ms, f.present_ms), col_acc, _font_mono)
 	_draw_text(hdc, 20, cy0 + 28, fmt.tprintf("Scene: %s   |   Selected: %s   |   In-Flight: %s", s.last_scene != "" ? s.last_scene : "-", s.last_selected != "" ? s.last_selected : "-", ow.phase_name(s.last_phase)), txt_muted, _font_ui)
+	wc := min(int(s.worker_count), len(s.worker_jobs))
+	_draw_text(hdc, 20, cy0 + 48, fmt.tprintf("Multi-Core Jobs: Workers:%d  Frame:%d  Total:%d  Steals:%d  MainAssist:%d  W0-3:[%d,%d,%d,%d]", s.worker_count, s.frame_jobs, s.total_jobs, s.total_steals, s.main_assist_jobs, wc > 0 ? s.worker_jobs[0] : 0, wc > 1 ? s.worker_jobs[1] : 0, wc > 2 ? s.worker_jobs[2] : 0, wc > 3 ? s.worker_jobs[3] : 0), txt_prim, _font_mono)
 
 	// 4. Live "What You Did & Spikes" Event Feed
-	ey0: i32 = 250
+	ey0: i32 = 270
 	ey1: i32 = h - 10
 	_fill_rect(hdc, {10, ey0, w - 10, ey1}, bg_card)
 	_draw_text(hdc, 20, ey0 + 6, "What You Did & Performance Spikes (Live Stream -> overwatch_latest.md):", txt_prim, _font_bold)

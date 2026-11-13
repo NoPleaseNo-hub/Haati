@@ -8,8 +8,8 @@ package physics3d
 // are scaled already). Drawn through engine/gizmos.
 
 import "core:math/linalg"
-import "moonhug:engine"
-import "moonhug:engine/gizmos"
+import "haati:engine"
+import "haati:engine/gizmos"
 
 // Unity's collider gizmo green.
 COLLIDER_GIZMO_COLOR :: [4]f32{0.57, 0.96, 0.55, 1}

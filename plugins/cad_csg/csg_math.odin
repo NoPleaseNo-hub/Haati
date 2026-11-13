@@ -19,8 +19,8 @@ package cad_csg
 
 import "core:math"
 import "core:math/linalg"
-import gfx "moonhug:engine/gfx"
-import engine "moonhug:engine"
+import gfx "haati:engine/gfx"
+import engine "haati:engine"
 
 // Quantization epsilon for plane distances (~0.5 mm) and polygon clipping
 CSG_PLANE_EPS           :: f32(1e-4)
@@ -648,15 +648,21 @@ _split_convex_along_axis :: proc(
 	ref_col := [4]u8{200, 206, 214, 255}
 	ref_uv: f32 = 0.5
 	ref_slot: u8 = 0
+	ref_uv_offset: [2]f32 = {}
+	ref_uv_rot: f32 = 0
+	ref_uv_lock := false
 	if len(h.planes) > 0 {
-		ref_col  = h.planes[0].color
-		ref_uv   = h.planes[0].uv_scale
-		ref_slot = h.planes[0].mat_slot
+		ref_col       = h.planes[0].color
+		ref_uv        = h.planes[0].uv_scale
+		ref_slot      = h.planes[0].mat_slot
+		ref_uv_offset = h.planes[0].uv_offset
+		ref_uv_rot    = h.planes[0].uv_rot_deg
+		ref_uv_lock   = h.planes[0].uv_lock_brush
 	}
 
 	// Lower half: x[axis] <= split_val -> normal = +axis, dist = split_val
 	lo_hull := convex_clone(h, alloc)
-	append(&lo_hull.planes, CSG_Plane{normal = n_pos, dist = split_val, mat_slot = ref_slot, uv_scale = ref_uv, color = ref_col})
+	append(&lo_hull.planes, CSG_Plane{normal = n_pos, dist = split_val, mat_slot = ref_slot, uv_scale = ref_uv, uv_offset = ref_uv_offset, uv_rot_deg = ref_uv_rot, uv_lock_brush = ref_uv_lock, color = ref_col})
 	if convex_rebuild_bounds_and_prune(&lo_hull, prune_redundant = true) {
 		append(out_list, lo_hull)
 	} else {
@@ -665,7 +671,7 @@ _split_convex_along_axis :: proc(
 
 	// Upper half: x[axis] >= split_val -> normal = -axis, dist = -split_val
 	hi_hull := h
-	append(&hi_hull.planes, CSG_Plane{normal = n_neg, dist = -split_val, mat_slot = ref_slot, uv_scale = ref_uv, color = ref_col})
+	append(&hi_hull.planes, CSG_Plane{normal = n_neg, dist = -split_val, mat_slot = ref_slot, uv_scale = ref_uv, uv_offset = ref_uv_offset, uv_rot_deg = ref_uv_rot, uv_lock_brush = ref_uv_lock, color = ref_col})
 	if convex_rebuild_bounds_and_prune(&hi_hull, prune_redundant = true) {
 		append(out_list, hi_hull)
 	} else {
@@ -2485,7 +2491,7 @@ csg_clip_convex_by_plane :: proc(
 			uv_scale      = ref_p.uv_scale,
 			uv_offset     = ref_p.uv_offset,
 			uv_rot_deg    = ref_p.uv_rot_deg,
-			uv_lock_brush = false,
+			uv_lock_brush = ref_p.uv_lock_brush,
 			color         = eff_col,
 		})
 		append(&back_h.planes, cap_back)
@@ -2506,7 +2512,7 @@ csg_clip_convex_by_plane :: proc(
 			uv_scale      = ref_p.uv_scale,
 			uv_offset     = ref_p.uv_offset,
 			uv_rot_deg    = ref_p.uv_rot_deg,
-			uv_lock_brush = false,
+			uv_lock_brush = ref_p.uv_lock_brush,
 			color         = eff_col,
 		})
 		append(&front_h.planes, cap_front)

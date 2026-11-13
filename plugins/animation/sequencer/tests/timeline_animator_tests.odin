@@ -14,12 +14,12 @@ import "core:os"
 import "core:reflect"
 import "core:strings"
 import "core:testing"
-import inspector "moonhug:editor/inspector"
-import "moonhug:engine"
-import anim "moonhug:packages/animation"
-import seq "moonhug:packages/sequencer"
-import common "moonhug:tests/common"
-import anim_seq "moonhug:packages/animation/sequencer"
+import inspector "haati:editor/inspector"
+import "haati:engine"
+import anim "haati:packages/animation"
+import seq "haati:packages/sequencer"
+import common "haati:tests/common"
+import anim_seq "haati:packages/animation/sequencer"
 
 @(test)
 test_timeline_animator_graph_skeleton :: proc(t: ^testing.T) {

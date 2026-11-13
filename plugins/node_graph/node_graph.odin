@@ -15,7 +15,7 @@ package node_graph
 // caller's data is drawn, never mutated.
 
 import "core:math"
-import im "moonhug:external/odin-imgui"
+import im "haati:external/odin-imgui"
 
 // Caller-assigned node identity. The canvas passes it back in hit results and
 // never looks inside it.

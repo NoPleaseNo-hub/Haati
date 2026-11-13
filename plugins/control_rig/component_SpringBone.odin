@@ -11,7 +11,7 @@ package control_rig
 
 import "core:math"
 import "core:math/linalg"
-import engine "moonhug:engine"
+import engine "haati:engine"
 
 @(component={menu="Physics/SpringBone"})
 @(typ_guid={guid = "7c3b9e14-2a5d-4f81-9b0e-6c8d1f2a3e54"})

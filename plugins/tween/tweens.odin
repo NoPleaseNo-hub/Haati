@@ -12,7 +12,7 @@ package tween
 import "base:runtime"
 import "core:encoding/json"
 import "core:io"
-import engine "moonhug:engine"
+import engine "haati:engine"
 
 Status :: enum {
 	Pending,

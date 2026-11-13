@@ -13,7 +13,7 @@ package control_rig
 
 import "core:math"
 import "core:math/linalg"
-import engine "moonhug:engine"
+import engine "haati:engine"
 
 Control_Shape_Type :: enum {
 	Circle,

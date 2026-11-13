@@ -6,8 +6,8 @@ package physics3d
 // The live Jolt BodyID is runtime-only — for anything not wrapped here
 // (forces, joints, mass overrides) use body_of(tH) and moonhug:external/jolt.
 
-import jolt "moonhug:external/jolt"
-import "moonhug:engine"
+import jolt "haati:external/jolt"
+import "haati:engine"
 
 @(component={menu="Physics/Rigidbody"})
 @(typ_guid={guid = "82976d39-c450-4464-87e2-c260c430c157"})
@@ -19,6 +19,7 @@ Rigidbody :: struct {
 	linear_damping:  f32,
 	angular_damping: f32,
 	continuous:      bool, // continuous collision detection (Jolt LinearCast)
+	interpolate:     bool, // smooth render-frame interpolation between fixed steps
 	freeze_position: [3]bool,
 	freeze_rotation: [3]bool,
 
@@ -26,6 +27,11 @@ Rigidbody :: struct {
 	last_synced_pos:      [3]f32      `json:"-" inspect:"-"`,
 	last_synced_rot:      [4]f32      `json:"-" inspect:"-"`,
 	has_synced_transform: bool        `json:"-" inspect:"-"`,
+	prev_pos:             [3]f32      `json:"-" inspect:"-"`,
+	prev_rot:             [4]f32      `json:"-" inspect:"-"`,
+	curr_pos:             [3]f32      `json:"-" inspect:"-"`,
+	curr_rot:             [4]f32      `json:"-" inspect:"-"`,
+	has_prev_pose:        bool        `json:"-" inspect:"-"`,
 
 	// Relativistic Jolt Pre/Post-Step Time Dilation Bridge state (runtime-only)
 	true_linear_vel:      [3]f32      `json:"-" inspect:"-"`,
@@ -39,6 +45,7 @@ reset_Rigidbody :: proc(comp: ^Rigidbody) {
 	cleanup_Rigidbody(comp)
 	comp.channel            = .Dynamic_Body
 	comp.use_gravity        = true
+	comp.interpolate        = true
 	comp.applied_time_scale = 1.0
 }
 

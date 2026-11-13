@@ -11,7 +11,7 @@ package physics3d
 
 import "core:math"
 import "core:math/linalg"
-import "moonhug:engine"
+import "haati:engine"
 
 SpringArm_Tick_Proc :: #type proc(arm: ^SpringArm3D, w: ^engine.World, dt: f32)
 

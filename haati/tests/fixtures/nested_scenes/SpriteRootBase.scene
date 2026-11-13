@@ -1,0 +1,73 @@
+{
+  "schema_version": 2,
+  "root": 1,
+  "transforms": [
+    {
+      "local_id": 1,
+      "name": "SpriteRoot",
+      "is_active": true,
+      "position": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "render_layer": 1,
+      "parent": {
+        "pptr": {
+          "local_id": 0,
+          "guid": "00000000-0000-0000-0000-000000000000"
+        }
+      },
+      "children": [
+
+      ],
+      "components": [
+        {
+          "local_id": 50
+        }
+      ]
+    }
+  ],
+  "nested_scenes": [
+
+  ],
+  "breadcrumbs": [
+
+  ],
+  "components": [
+    {
+      "__type": "9f36ee91-34b6-4636-a360-ee872af0436b",
+      "ambient": 0.0,
+      "base": {
+        "enabled": true,
+        "local_id": 50
+      },
+      "cast_shadows": true,
+      "color": [
+        1.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "inner_spot_angle": 0.0,
+      "intensity": 1.0,
+      "range": 0.0,
+      "shadow_bias": 0.0015,
+      "shadow_ground_y": 0.0,
+      "shadow_strength": 0.72000003,
+      "spot_angle": 0.0,
+      "type": 0
+    }
+  ]
+}

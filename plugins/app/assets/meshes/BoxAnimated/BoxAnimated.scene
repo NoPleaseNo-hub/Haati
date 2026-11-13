@@ -1,4 +1,5 @@
 {
+  "schema_version": 2,
   "root": 2,
   "transforms": [
     {
@@ -242,6 +243,7 @@
         "enabled": true,
         "local_id": 8
       },
+      "cast_shadows": true,
       "materials": [
         "174a1535-ddfa-4242-a3db-fecda7ee5380"
       ]
@@ -263,6 +265,7 @@
         "enabled": true,
         "local_id": 11
       },
+      "cast_shadows": true,
       "materials": [
         "9df4ba28-e240-4001-897f-176fb05bec72"
       ]

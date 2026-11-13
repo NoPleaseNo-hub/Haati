@@ -15,10 +15,10 @@ import "core:fmt"
 import "core:path/filepath"
 import "core:strings"
 import "core:encoding/uuid"
-import input "moonhug:engine/input"
-import "moonhug:engine"
-import mhgui "moonhug:packages/mhgui"
-import text "moonhug:packages/text"
+import input "haati:engine/input"
+import "haati:engine"
+import mhgui "haati:packages/mhgui"
+import text "haati:packages/text"
 
 @(private = "file") _current_demo: ^engine.Scene
 @(private = "file") _hud_back: ^mhgui.Button // "ESC: back to menu" in the running demo's scene

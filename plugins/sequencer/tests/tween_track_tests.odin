@@ -9,10 +9,10 @@ package sequencer_tests
 // round trip with runtime capture state excluded.
 
 import "core:testing"
-import "moonhug:engine"
-import seq "moonhug:packages/sequencer"
-import tweens "moonhug:packages/sequencer/tweens"
-import common "moonhug:tests/common"
+import "haati:engine"
+import seq "haati:packages/sequencer"
+import tweens "haati:packages/sequencer/tweens"
+import common "haati:tests/common"
 @(private = "file")
 _close :: proc(a, b: [3]f32) -> bool {
 	d := a - b

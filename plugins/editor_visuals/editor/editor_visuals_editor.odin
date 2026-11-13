@@ -2,12 +2,12 @@ package editor_visuals_editor
 
 import "core:fmt"
 import "core:strings"
-import im "moonhug:external/odin-imgui"
-import wnd "moonhug:editor/window"
-import ev "moonhug:packages/editor_visuals"
-import icons "moonhug:editor/icons"
-import thm "moonhug:editor/theme"
-import "moonhug:editor/widgets"
+import im "haati:external/odin-imgui"
+import wnd "haati:editor/window"
+import ev "haati:packages/editor_visuals"
+import icons "haati:editor/icons"
+import thm "haati:editor/theme"
+import "haati:editor/widgets"
 
 @(private = "file")
 _new_folder_buf: [64]u8

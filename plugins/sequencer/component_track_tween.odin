@@ -21,8 +21,8 @@ package sequencer
 // wherever the object is now. The editor's preview ignores both (it always
 // shows the first pass) and preview_end clears every capture.
 
-import "moonhug:engine"
-import core "moonhug:packages/sequencer/core"
+import "haati:engine"
+import core "haati:packages/sequencer/core"
 
 @(component={menu="Playables/Tracks/TrackTween"})
 @(typ_guid={guid = "e45dd366-bc5b-4bb8-81e7-67b339a55680"})

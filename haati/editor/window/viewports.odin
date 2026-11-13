@@ -1,0 +1,409 @@
+package window
+
+// Pop-out windows: editor panels as separate OS windows (imgui multi-viewport,
+// enabled in editor/main.odin). A floating panel dragged outside the main
+// window already becomes its own OS window and merges back when dragged over
+// it again. This file adds the EXPLICIT version behind the floating title-bar
+// button and the Play "New Window" mode:
+//
+//   pop_out  — the panel keeps its own OS window even while it overlaps the
+//              main one (imgui's NoAutoMerge viewport flag, set through a
+//              WindowClass every frame before Begin). Undocks it first.
+//   reunite  — back into the main window: the dock slot it last sat in, else
+//              the central dock node, else floating over the main window.
+//
+// A panel opts in by opening with `begin` instead of im.Begin (it still ends
+// with im.End) and calling decorate_floating_window right after, which records
+// where the panel is each frame and draws the button.
+
+import "base:runtime"
+import "core:fmt"
+import "core:strings"
+import im "haati:external/odin-imgui"
+
+@(private = "file")
+_Max_State :: struct {
+	maximized:     bool,
+	pending_apply: bool,
+	target_pos:    im.Vec2,
+	target_size:   im.Vec2,
+	restore_pos:   im.Vec2,
+	restore_size:  im.Vec2,
+}
+
+@(private = "file")
+_max_states: map[string]_Max_State
+
+@(private = "file")
+_frame_floating_dock_ids: [dynamic]im.ID
+
+@(private)
+viewports_shutdown :: proc() {
+	if _pops != nil {
+		for k in _pops do delete(k, runtime.default_allocator())
+		delete(_pops)
+		_pops = nil
+	}
+	if _max_states != nil {
+		for k in _max_states do delete(k, runtime.default_allocator())
+		delete(_max_states)
+		_max_states = nil
+	}
+	if _frame_floating_dock_ids != nil {
+		delete(_frame_floating_dock_ids)
+		_frame_floating_dock_ids = nil
+	}
+}
+
+@(private = "file")
+_record_floating_dock_id :: proc(dock_id: im.ID) {
+	if dock_id == 0 do return
+	for existing in _frame_floating_dock_ids {
+		if existing == dock_id do return
+	}
+	if _frame_floating_dock_ids == nil {
+		_frame_floating_dock_ids = make([dynamic]im.ID, 0, 8, runtime.default_allocator())
+	}
+	append(&_frame_floating_dock_ids, dock_id)
+}
+
+// Returns and clears the deduplicated list of floating DockNode IDs active this frame
+// so `dock_tab_menu.odin` can draw right-side action buttons on joined floating windows!
+consume_floating_dock_ids :: proc(allocator := context.temp_allocator) -> []im.ID {
+	if len(_frame_floating_dock_ids) == 0 do return nil
+	out := make([]im.ID, len(_frame_floating_dock_ids), allocator)
+	copy(out, _frame_floating_dock_ids[:])
+	clear(&_frame_floating_dock_ids)
+	return out
+}
+
+// Finds the work area (excluding OS taskbar) of the monitor containing `center` (or main viewport work area).
+monitor_work_rect_at :: proc(center: im.Vec2, outside_main: bool) -> (pos: im.Vec2, size: im.Vec2) {
+	if outside_main {
+		pio := im.GetPlatformIO()
+		if pio != nil && pio.Monitors.Size > 0 && pio.Monitors.Data != nil {
+			mons := ([^]im.PlatformMonitor)(pio.Monitors.Data)[:pio.Monitors.Size]
+			for m in mons {
+				if center.x >= m.MainPos.x && center.x < m.MainPos.x + m.MainSize.x &&
+				   center.y >= m.MainPos.y && center.y < m.MainPos.y + m.MainSize.y {
+					if m.WorkSize.x > 64 && m.WorkSize.y > 64 {
+						return m.WorkPos, m.WorkSize
+					}
+					return m.MainPos, m.MainSize
+				}
+			}
+			// Fallback to primary monitor
+			m0 := mons[0]
+			if m0.WorkSize.x > 64 && m0.WorkSize.y > 64 {
+				return m0.WorkPos, m0.WorkSize
+			}
+		}
+	}
+	mvp := im.GetMainViewport()
+	return mvp.WorkPos, mvp.WorkSize
+}
+
+@(private = "file")
+_get_max_state :: proc(k: string) -> ^_Max_State {
+	if m, ok := &_max_states[k]; ok do return m
+	prev := context.allocator
+	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev
+	if _max_states == nil do _max_states = make(map[string]_Max_State)
+	_max_states[strings.clone(k)] = {}
+	return &_max_states[k]
+}
+
+is_window_maximized :: proc(title: cstring) -> bool {
+	if _max_states == nil do return false
+	k := _key(title)
+	if m, ok := _max_states[k]; ok do return m.maximized
+	return false
+}
+
+toggle_maximize_window :: proc(title: cstring, cur_pos, cur_size: im.Vec2, outside_main: bool) {
+	k := _key(title)
+	m := _get_max_state(k)
+	if !m.maximized {
+		m.restore_pos  = cur_pos
+		m.restore_size = cur_size
+		wpos, wsz := monitor_work_rect_at(cur_pos + cur_size * 0.5, outside_main)
+		m.target_pos    = wpos
+		m.target_size   = wsz
+		m.maximized     = true
+		m.pending_apply = true
+	} else {
+		rpos := m.restore_pos
+		rsz  := m.restore_size
+		if rsz.x < 120 || rsz.y < 80 {
+			mvp := im.GetMainViewport()
+			rsz  = {960, 620}
+			rpos = mvp.WorkPos + {64, 64}
+		}
+		m.target_pos    = rpos
+		m.target_size   = rsz
+		m.maximized     = false
+		m.pending_apply = true
+	}
+}
+
+is_dock_node_maximized :: proc(node: ^im.DockNode) -> bool {
+	if node == nil || _max_states == nil do return false
+	root := node
+	for root.ParentNode != nil do root = root.ParentNode
+	dk := fmt.tprintf("__docknode_%d", root.ID_)
+	if m, ok := &_max_states[dk]; ok {
+		if m.maximized && !m.pending_apply {
+			if abs(root.Size.x - m.target_size.x) > 48 || abs(root.Size.y - m.target_size.y) > 48 {
+				m.maximized = false
+			}
+		}
+		return m.maximized
+	}
+	return false
+}
+
+toggle_maximize_dock_node :: proc(node: ^im.DockNode) {
+	if node == nil do return
+	root := node
+	for root.ParentNode != nil do root = root.ParentNode
+	dk := fmt.tprintf("__docknode_%d", root.ID_)
+	m := _get_max_state(dk)
+	if !m.maximized {
+		m.restore_pos  = root.Pos
+		m.restore_size = root.Size
+		wpos, wsz := monitor_work_rect_at(root.Pos + root.Size * 0.5, true)
+		m.target_pos  = wpos
+		m.target_size = wsz
+		m.maximized   = true
+	} else {
+		rpos := m.restore_pos
+		rsz  := m.restore_size
+		if rsz.x < 160 || rsz.y < 100 {
+			mvp := im.GetMainViewport()
+			rsz  = {980, 640}
+			rpos = mvp.WorkPos + {64, 64}
+		}
+		m.target_pos  = rpos
+		m.target_size = rsz
+		m.maximized   = false
+	}
+	im.DockBuilderSetNodePos(root.ID_, m.target_pos)
+	im.DockBuilderSetNodeSize(root.ID_, m.target_size)
+	if root.HostWindow != nil {
+		im.SetWindowPosStr(root.HostWindow.Name, m.target_pos, .Always)
+		im.SetWindowSizeStr(root.HostWindow.Name, m.target_size, .Always)
+	}
+}
+
+@(private = "file")
+_Pop :: struct {
+	popped:       bool,    // keep its own OS window (NoAutoMerge)
+	request_out:  bool,    // pop_out asked; applied before the next Begin
+	request_back: bool,    // reunite asked; applied before the next Begin
+	// Last frame, from track (decorate_floating_window):
+	docked:       bool,
+	dock_id:      im.ID,   // last dock node while docked (reunite target)
+	own_viewport: bool,    // sat in an OS window other than the main one
+	pos:          im.Vec2,
+	size:         im.Vec2,
+}
+
+// Keyed by the window's imgui id part (after "###"), so a title that changes
+// (a dirty-scene star, a renamed tab) keeps its state.
+@(private = "file")
+_pops: map[string]_Pop
+
+@(private = "file")
+_key :: proc(title: cstring) -> string {
+	s := string(title)
+	if idx := strings.last_index(s, "###"); idx >= 0 do return s[idx + 3:]
+	return s
+}
+
+@(private = "file")
+_get :: proc(title: cstring) -> ^_Pop {
+	k := _key(title)
+	if p, ok := &_pops[k]; ok do return p
+	if _pops == nil do _pops = make(map[string]_Pop)
+	_pops[strings.clone(k)] = {}
+	return &_pops[k]
+}
+
+// True when imgui can create OS windows (the editor turns this on at init).
+viewports_enabled :: proc() -> bool {
+	return .ViewportsEnable in im.GetIO().ConfigFlags
+}
+
+// Ask for the window to move into its own OS window, applied at its next
+// Begin. Works on docked windows too (they are undocked in place).
+pop_out :: proc(title: cstring) {
+	p := _get(title)
+	p.request_out = true
+	p.request_back = false
+}
+
+// Ask for the window to come back into the main window (see file comment).
+reunite :: proc(title: cstring) {
+	p := _get(title)
+	p.request_back = true
+	p.request_out = false
+}
+
+// The window is (or is about to be) in its own OS window by explicit pop-out.
+is_popped :: proc(title: cstring) -> bool {
+	p := _get(title)
+	return (p.popped || p.request_out) && !p.request_back
+}
+
+// The window sat in an OS window other than the main one last frame — by
+// pop_out or by being dragged outside the main window.
+in_own_os_window :: proc(title: cstring) -> bool {
+	return _get(title).own_viewport
+}
+
+// Popped window ids for editor_settings, so a restart keeps them out.
+popped_ids :: proc(allocator := context.temp_allocator) -> []string {
+	out := make([dynamic]string, 0, len(_pops), allocator)
+	for k, p in _pops {
+		if p.popped do append(&out, k)
+	}
+	return out[:]
+}
+
+set_popped_ids :: proc(ids: []string) {
+	if _pops == nil do _pops = make(map[string]_Pop)
+	for id in ids {
+		if p, ok := &_pops[id]; ok {
+			p.popped = true
+		} else {
+			_pops[strings.clone(id)] = _Pop{popped = true}
+		}
+	}
+}
+
+// True if any panel is currently popped out or sitting in a secondary OS window.
+any_popped_or_outside :: proc() -> bool {
+	for _, p in _pops {
+		if p.popped || p.own_viewport || p.request_out do return true
+	}
+	return false
+}
+
+// im.Begin for a pop-out capable window: applies pending pop-out / reunite
+// requests and the NoAutoMerge class, then begins. End with im.End as usual.
+begin :: proc(title: cstring, p_open: ^bool = nil, flags: im.WindowFlags = {}) -> bool {
+	p := _get(title)
+
+	if p.request_back {
+		p.request_back = false
+		p.popped = false
+		target := p.dock_id
+		if target != 0 && im.DockBuilderGetNode(target) == nil do target = 0
+		if target == 0 do target = _get_central_dock_target()
+		if target != 0 {
+			im.DockBuilderDockWindow(title, target)
+			if main_dockspace_id != 0 do im.DockBuilderFinish(main_dockspace_id)
+		} else {
+			main := im.GetMainViewport()
+			im.SetNextWindowViewport(main.ID_)
+			im.SetNextWindowPos(main.WorkPos + main.WorkSize * 0.5, .Always, {0.5, 0.5})
+		}
+	}
+
+	if p.request_out {
+		p.request_out = false
+		p.popped = true
+		// Always detach from any dock node (even if the window was an inactive
+		// background tab last frame so _track_current had not run).
+		im.DockBuilderDockWindow(title, 0)
+		main := im.GetMainViewport()
+		if p.size.x > 64 && p.size.y > 64 {
+			im.SetNextWindowSize(p.size, .Always)
+			im.SetNextWindowPos(p.pos + {24, 24}, .Always)
+		} else {
+			im.SetNextWindowSize({960, 600}, .Always)
+			im.SetNextWindowPos(main.WorkPos + {64, 64}, .Always)
+		}
+	}
+
+	if _max_states != nil {
+		if m, ok := &_max_states[_key(title)]; ok && m.pending_apply {
+			m.pending_apply = false
+			im.SetNextWindowPos(m.target_pos, .Always)
+			im.SetNextWindowSize(m.target_size, .Always)
+		}
+	}
+
+	actual_flags := flags
+	if p.popped {
+		// Popped-out OS windows reunite via their title-bar Return button, not
+		// by scanning dock-split targets on every mouse-move over the main window.
+		wc := im.WindowClass{
+			ParentViewportId         = 0,
+			DockingAllowUnclassed    = false,
+			ViewportFlagsOverrideSet = {.NoAutoMerge},
+		}
+		im.SetNextWindowClass(&wc)
+		actual_flags += {.NoDocking}
+	} else if p.own_viewport || (!p.docked && im.IsMouseDown(.Left)) {
+		// Keep a dragged/floating panel's or joined dock container's secondary OS window & swapchain alive
+		// even while passing back over the main window (preventing mid-drag Vulkan swapchain destroy/recreate
+		// stalls), while still allowing full DockSpace drop-target docking via DockingAllowUnclassed = true.
+		wc := im.WindowClass{
+			ParentViewportId         = 0,
+			DockingAllowUnclassed    = true,
+			ViewportFlagsOverrideSet = {.NoAutoMerge},
+		}
+		im.SetNextWindowClass(&wc)
+	}
+
+	// A borderless OS window shows rounded imgui corners as black notches.
+	square := p.own_viewport && !p.docked
+	if square do im.PushStyleVar(.WindowRounding, 0)
+	open := im.Begin(title, p_open, actual_flags)
+	if square do im.PopStyleVar()
+
+	// Always record dock state inside Begin (even when `open == false` for
+	// inactive tabs) so `p.docked`, `p.dock_id`, `p.pos`, and `p.size` stay
+	// accurate when `pop_out` is triggered while the tab is hidden.
+	p.docked = im.IsWindowDocked()
+	if p.docked do p.dock_id = im.GetWindowDockID()
+	vp := im.GetWindowViewport()
+	p.own_viewport = vp != nil && vp.ID_ != im.GetMainViewport().ID_
+	if p.docked && p.own_viewport && p.dock_id != 0 {
+		_record_floating_dock_id(p.dock_id)
+	}
+	if open {
+		p.pos = im.GetWindowPos()
+		p.size = im.GetWindowSize()
+		if _max_states != nil {
+			if m, ok := &_max_states[_key(title)]; ok && m.maximized && !m.pending_apply {
+				if abs(p.size.x - m.target_size.x) > 48 || abs(p.size.y - m.target_size.y) > 48 {
+					m.maximized = false
+				}
+			}
+		}
+	}
+	if p.popped && p.docked && !p.own_viewport do p.popped = false
+
+	return open
+}
+
+// Record where the current window is (called right after Begin by
+// decorate_floating_window, docked or not).
+@(private)
+_track_current :: proc(title: cstring) {
+	p := _get(title)
+	p.docked = im.IsWindowDocked()
+	if p.docked do p.dock_id = im.GetWindowDockID()
+	p.pos = im.GetWindowPos()
+	p.size = im.GetWindowSize()
+	vp := im.GetWindowViewport()
+	p.own_viewport = vp != nil && vp.ID_ != im.GetMainViewport().ID_
+	if p.docked && p.own_viewport && p.dock_id != 0 {
+		_record_floating_dock_id(p.dock_id)
+	}
+	// Docked by dragging into the main window: it is reunited.
+	if p.popped && p.docked && !p.own_viewport do p.popped = false
+}

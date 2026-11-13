@@ -5,12 +5,12 @@ package text_editor
 // toggles, and scene-view picking of text rects.
 
 import "core:strings"
-import im "moonhug:external/odin-imgui"
-import "moonhug:engine"
-import "moonhug:engine_editor/asset_pipeline"
-import "moonhug:editor/inspector"
-import "moonhug:editor/undo"
-import text "moonhug:packages/text"
+import im "haati:external/odin-imgui"
+import "haati:engine"
+import "haati:engine_editor/asset_pipeline"
+import "haati:editor/inspector"
+import "haati:editor/undo"
+import text "haati:packages/text"
 
 @(private = "file") _NONE :: engine.Transform_Handle{}
 

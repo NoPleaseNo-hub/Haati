@@ -8,10 +8,10 @@ package audio_editor
 
 import "base:runtime"
 import "core:fmt"
-import im "moonhug:external/odin-imgui"
-import "moonhug:editor/inspector"
-import engine "moonhug:engine"
-import audio "moonhug:packages/audio"
+import im "haati:external/odin-imgui"
+import "haati:editor/inspector"
+import engine "haati:engine"
+import audio "haati:packages/audio"
 
 // order=1 runs after editor_init (order=0), which creates the registry maps.
 @(phase={key=engine.Phase.EditorInit, order=1, mode=Editor})

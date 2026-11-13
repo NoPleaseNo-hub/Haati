@@ -7,8 +7,8 @@ import "core:math"
 import "core:math/linalg"
 import "core:strings"
 import "core:fmt"
-import engine "moonhug:engine"
-import input "moonhug:engine/input"
+import engine "haati:engine"
+import input "haati:engine/input"
 
 // Computes the combined local-space AABB of all chunks in `vol`.
 csg_volume_local_aabb :: proc(vol: ^CSGVolume) -> (lo, hi: [3]f32, ok: bool) {

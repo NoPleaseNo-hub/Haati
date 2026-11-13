@@ -1,16 +1,18 @@
 #+feature dynamic-literals
 package app
 
-import "moonhug:engine"
-import tween "moonhug:packages/tween"
-import gfx "moonhug:engine/gfx"
-import "moonhug:engine/gizmos"
-import input "moonhug:engine/input"
+import "haati:engine"
+import tween "haati:packages/tween"
+import gfx "haati:engine/gfx"
+import "haati:engine/gizmos"
+import input "haati:engine/input"
 import "core:os"
 import "core:fmt"
+import "core:path/filepath"
 import "core:strings"
 import "core:encoding/uuid"
-import "moonhug:engine/log"
+import "haati:engine/catalog"
+import "haati:engine/log"
 
 MENU_SCENE_GUID :: "b794d34b-3067-4b7e-ac2d-5cd46c16c5c1"
 
@@ -24,10 +26,25 @@ main :: proc() {
     // its console (standalone runs just see the tagged text in the terminal).
     log.stdout_tagged = true
 
-    // Normalize the runtime cwd to moonhug/ (same as the editor): asset paths
-    // are moonhug-relative, and builds always run from the repo root so the
-    // packages: collection flag is one canonical spelling everywhere.
-    engine.project_chdir_root()
+    // Normalize the runtime cwd to moonhug/ when launched inside a checkout, or
+    // to the executable directory when shipped standalone.
+    in_repo := false
+    if cwd, cerr := os.get_working_directory(context.temp_allocator); cerr == nil {
+        if _, ok := engine.project_root_find(cwd); ok {
+            engine.project_chdir_root()
+            in_repo = true
+        }
+    }
+    if !in_repo {
+        if exe, eerr := os.get_executable_path(context.temp_allocator); eerr == nil {
+            exe_dir: string
+            {
+                context.allocator = context.temp_allocator
+                exe_dir = filepath.dir(exe)
+            }
+            _ = os.set_working_directory(exe_dir)
+        }
+    }
 
     for arg in os.args[1:] {
         if arg == "--catalog" {
@@ -36,14 +53,37 @@ main :: proc() {
             _catalog_path = arg[len("--catalog="):]
         }
     }
-    // Launched bare, the binary finds its own export: <exe>_data/catalog.json
-    // beside it, the Game + Game_Data layout run configs stage. So a build
-    // double-clicked in builds/ boots its stamped scene instead of falling
-    // through to the editor's in-place catalog and the dev menu.
+    // Launched bare, the binary finds its own export: <exe>_data/catalog.json,
+    // <stem>_data/catalog.json, or <stem>.pak beside it.
     if _catalog_path == "" {
         if exe, eerr := os.get_executable_path(context.temp_allocator); eerr == nil {
-            beside := strings.concatenate({exe, "_data/catalog.json"}, context.temp_allocator)
-            if os.exists(beside) do _catalog_path = beside
+            ext: string
+            {
+                context.allocator = context.temp_allocator
+                ext = filepath.ext(exe)
+            }
+            stem := strings.trim_suffix(exe, ext)
+            beside_exe  := strings.concatenate({exe, "_data/catalog.json"}, context.temp_allocator)
+            beside_stem := strings.concatenate({stem, "_data/catalog.json"}, context.temp_allocator)
+            pak_path    := strings.concatenate({stem, ".pak"}, context.temp_allocator)
+            if os.exists(beside_exe) {
+                _catalog_path = beside_exe
+            } else if os.exists(beside_stem) {
+                _catalog_path = beside_stem
+            } else if os.exists(pak_path) {
+                dst_dir := strings.concatenate({stem, "_data"}, context.temp_allocator)
+                if catalog.pak_extract_directory(pak_path, dst_dir) && os.exists(beside_stem) {
+                    _catalog_path = beside_stem
+                }
+            }
+            if !in_repo && _catalog_path != "" {
+                data_dir: string
+                {
+                    context.allocator = context.temp_allocator
+                    data_dir = filepath.dir(_catalog_path)
+                }
+                _ = os.set_working_directory(data_dir)
+            }
         }
     }
 
@@ -57,6 +97,8 @@ main :: proc() {
     uc.is_editor = false  // standalone binary (engine.application_is_editor)
     uc.is_playing = true  // for the process lifetime (engine.application_is_playing)
     context.user_ptr = uc
+    engine.job_system_init()
+    defer engine.job_system_shutdown()
 
     w := new(engine.World)
     engine.w_init(w)

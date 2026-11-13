@@ -12,11 +12,11 @@ package animation_editor
 
 import "core:encoding/json"
 import "core:os"
-import "moonhug:engine"
-import "moonhug:engine/serialization"
-import "moonhug:engine_editor/asset_pipeline"
-import "moonhug:engine/log"
-import anim "moonhug:packages/animation"
+import "haati:engine"
+import "haati:engine/serialization"
+import "haati:engine_editor/asset_pipeline"
+import "haati:engine/log"
+import anim "haati:packages/animation"
 import cgltf "vendor:cgltf"
 
 @(phase={key=ImportersInit, order=1, mode=Editor})

@@ -17,9 +17,9 @@ package animation_sequencer
 
 import "base:runtime"
 import "core:slice"
-import "moonhug:engine"
-import seq "moonhug:packages/sequencer"
-import anim "moonhug:packages/animation"
+import "haati:engine"
+import seq "haati:packages/sequencer"
+import anim "haati:packages/animation"
 
 // The kind's components. The clip carries its .anim; the track carries the
 // object those clips play on.

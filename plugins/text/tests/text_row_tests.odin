@@ -5,12 +5,12 @@ package text_tests
 // any generic row.
 
 import "core:strings"
-import "moonhug:editor/inspector"
+import "haati:editor/inspector"
 import "core:testing"
-import "moonhug:editor/undo"
-import "moonhug:engine"
-import text "moonhug:packages/text"
-import common "moonhug:tests/common"
+import "haati:editor/undo"
+import "haati:engine"
+import text "haati:packages/text"
+import common "haati:tests/common"
 
 @(private = "file")
 _write_hello :: proc(field_ptr: rawptr) {

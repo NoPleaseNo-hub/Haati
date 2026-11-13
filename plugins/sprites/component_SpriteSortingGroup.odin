@@ -1,6 +1,6 @@
 package sprites
 
-import "moonhug:engine"
+import "haati:engine"
 
 // Unity's SortingGroup: every sprite in this transform's subtree sorts as ONE
 // unit against sprites outside it, using THIS component's layer/order and the

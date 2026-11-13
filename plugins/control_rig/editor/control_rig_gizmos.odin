@@ -13,12 +13,12 @@ package control_rig_editor
 
 import "core:math"
 import "core:math/linalg"
-import im "moonhug:external/odin-imgui"
-import engine "moonhug:engine"
-import "moonhug:engine/gizmos"
-import "moonhug:editor/handles"
-import undo "moonhug:editor/undo"
-import crig "moonhug:packages/control_rig"
+import im "haati:external/odin-imgui"
+import engine "haati:engine"
+import "haati:engine/gizmos"
+import "haati:editor/handles"
+import undo "haati:editor/undo"
+import crig "haati:packages/control_rig"
 
 _default_control_color :: proc(ctrl_id: Active_Rig_Control) -> [4]f32 {
 	switch ctrl_id {

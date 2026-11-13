@@ -25,10 +25,10 @@ import "core:math"
 import "core:math/linalg"
 import "core:os"
 import "core:strings"
-import jolt "moonhug:external/jolt"
-import engine "moonhug:engine"
-import gfx "moonhug:engine/gfx"
-import physics3d "moonhug:packages/physics3d"
+import jolt "haati:external/jolt"
+import engine "haati:engine"
+import gfx "haati:engine/gfx"
+import physics3d "haati:packages/physics3d"
 
 // Deterministic procedural GPU mesh GUID for a volume's batched Detail Instances + Shatterable Glass Panes
 make_detail_and_glass_guid :: #force_inline proc(tH: engine.Transform_Handle) -> engine.Asset_GUID {
@@ -1945,7 +1945,7 @@ _upload_faker_clipped_meshes_now :: proc(vol: ^CSGVolume) {
 	a_guid     := make_faker_clipped_guid(vol.owner)
 	b_cap_guid := make_faker_cut_cap_guid(vol.owner)
 
-	if !vol.is_faker_mesh || engine.asset_guid_is_empty(vol.faker_mesh_guid) {
+	if !vol.is_faker_mesh {
 		engine.mesh_remove_procedural(a_guid)
 		engine.mesh_remove_procedural(b_cap_guid)
 		return
@@ -2968,6 +2968,7 @@ _collect_faker_mesh_commands :: proc(
 					model         = model_mat,
 					materials     = mats_a,
 					unlit_heatmap = vol.deform_debug_heatmap,
+					no_shadow     = !vol.cast_planar_shadows,
 				},
 			})
 		}
@@ -2989,6 +2990,7 @@ _collect_faker_mesh_commands :: proc(
 					model         = model_mat,
 					materials     = mats_b,
 					unlit_heatmap = vol.deform_debug_heatmap,
+					no_shadow     = !vol.cast_planar_shadows,
 				},
 			})
 		}
@@ -3017,6 +3019,7 @@ _collect_faker_mesh_commands :: proc(
 			model         = inst_world_m,
 			materials     = mats_a,
 			unlit_heatmap = vol.deform_debug_heatmap,
+			no_shadow     = !vol.cast_planar_shadows,
 		},
 	})
 

@@ -1,8 +1,8 @@
 package app_tests
 
 import "core:testing"
-import "moonhug:engine"
-import common "moonhug:tests/common"
+import "haati:engine"
+import common "haati:tests/common"
 
 // Asset-namespace PPtrs must survive nested-instance lid composition. A PPtr
 // with a guid addresses ANOTHER asset's namespace (MeshFilter.mesh's local_id
@@ -19,11 +19,11 @@ test_nested_instance_keeps_asset_pptr_part_ids :: proc(t: ^testing.T) {
 	context.user_ptr = &tc.uc
 	defer common.teardown(tc)
 
-	engine.asset_db_init("moonhug/packages/app/assets")
+	engine.asset_db_init("haati/packages/app/assets")
 	defer engine.asset_db_shutdown()
 	defer engine.scene_lib_shutdown()
 
-	s := engine.scene_load_additive_path("moonhug/packages/app/assets/demo_prefabs/demo_prefabs.scene")
+	s := engine.scene_load_additive_path("haati/packages/app/assets/demo_prefabs/demo_prefabs.scene")
 	testing.expect(t, s != nil, "demo_prefabs loads")
 	if s == nil do return
 

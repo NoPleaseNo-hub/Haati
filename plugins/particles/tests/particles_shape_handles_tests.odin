@@ -6,10 +6,10 @@ package particles_tests
 
 import "core:math"
 import "core:testing"
-import "moonhug:editor/handles"
-import particles "moonhug:packages/particles"
-import particles_editor "moonhug:packages/particles/editor"
-import common "moonhug:tests/common"
+import "haati:editor/handles"
+import particles "haati:packages/particles"
+import particles_editor "haati:packages/particles/editor"
+import common "haati:tests/common"
 
 @(private = "file")
 _Case :: struct {

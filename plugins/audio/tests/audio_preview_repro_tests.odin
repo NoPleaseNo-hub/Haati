@@ -9,11 +9,11 @@ import "core:encoding/json"
 import "core:encoding/uuid"
 import "core:os"
 import "core:testing"
-import "moonhug:engine"
-import "moonhug:engine_editor/asset_pipeline"
-import audio "moonhug:packages/audio"
-import audio_editor "moonhug:packages/audio/editor"
-import common "moonhug:tests/common"
+import "haati:engine"
+import "haati:engine_editor/asset_pipeline"
+import audio "haati:packages/audio"
+import audio_editor "haati:packages/audio/editor"
+import common "haati:tests/common"
 
 @(test)
 test_preview_apply_reimport :: proc(t: ^testing.T) {
@@ -25,7 +25,7 @@ test_preview_apply_reimport :: proc(t: ^testing.T) {
 	defer common.teardown(tc)
 	audio.mixer_init_headless()
 
-	src_dir :: "moonhug/tests/fixtures/_audio_prev_tmp"
+	src_dir :: "haati/tests/fixtures/_audio_prev_tmp"
 	wav :: src_dir + "/probe.wav"
 	os.make_directory(src_dir)
 	testing.expect(t, _write_test_wav(wav))

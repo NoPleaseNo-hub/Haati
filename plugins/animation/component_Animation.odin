@@ -22,7 +22,7 @@ package animation
 // (animation_tick, the @(update) subscriber below).
 
 import "core:slice"
-import "moonhug:engine"
+import "haati:engine"
 
 // Default defers to the clip's own wrap, Once and Loop override it.
 Animation_Wrap_Mode :: enum u8 {

@@ -10,9 +10,9 @@ import "core:encoding/json"
 import "core:encoding/uuid"
 import "core:strings"
 import "core:testing"
-import "moonhug:engine"
-import anim "moonhug:packages/animation"
-import common "moonhug:tests/common"
+import "haati:engine"
+import anim "haati:packages/animation"
+import common "haati:tests/common"
 
 // A constant single-key property clip: `component.field` = `value`.
 _prop_clip :: proc(component: string, field: string, value: [4]f32, length: f32 = 1) -> anim.AnimationClip {

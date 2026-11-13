@@ -9,9 +9,9 @@ import "core:encoding/uuid"
 import "core:os"
 import "core:strings"
 import "core:testing"
-import "moonhug:engine"
-import anim "moonhug:packages/animation"
-import common "moonhug:tests/common"
+import "haati:engine"
+import anim "haati:packages/animation"
+import common "haati:tests/common"
 
 // A layer holding one blend with `children` clips placed at 0, 1, 2... on the axis.
 @(private = "file")

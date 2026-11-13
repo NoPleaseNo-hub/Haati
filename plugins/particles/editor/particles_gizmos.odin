@@ -11,11 +11,11 @@ package particles_editor
 // circle's or edge's radius, a box's size around its center.
 
 import "core:math"
-import "moonhug:engine"
-import "moonhug:engine/gizmos"
-import "moonhug:editor/handles"
-import "moonhug:editor/undo"
-import particles "moonhug:packages/particles"
+import "haati:engine"
+import "haati:engine/gizmos"
+import "haati:editor/handles"
+import "haati:editor/undo"
+import particles "haati:packages/particles"
 
 SHAPE_GIZMO_COLOR :: [4]f32{0.4, 0.75, 1, 1}
 // Cone spread lines and hemisphere/edge direction hints use this length.

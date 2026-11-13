@@ -1,4 +1,5 @@
 {
+  "schema_version": 2,
   "root": 2105059026357447,
   "transforms": [
     {
@@ -490,6 +491,8 @@
       "fov": 60.0,
       "near_clip": 0.30000001,
       "order": 0,
+      "orthographic_size": 5.0,
+      "projection": 0,
       "render_layer_mask": 4294967295
     },
     {
@@ -499,13 +502,21 @@
         "enabled": true,
         "local_id": 4411970875294874
       },
+      "cast_shadows": true,
       "color": [
         1.0,
         1.0,
         1.0,
         1.0
       ],
-      "intensity": 1.0
+      "inner_spot_angle": 21.7999992399999982,
+      "intensity": 1.0,
+      "range": 10.0,
+      "shadow_bias": 0.0015,
+      "shadow_ground_y": 0.0,
+      "shadow_strength": 0.72000003,
+      "spot_angle": 30.0,
+      "type": 0
     },
     {
       "__type": "32f52908-51a9-4f3b-819b-fc9d8cbc5972",
@@ -524,6 +535,7 @@
         "enabled": true,
         "local_id": 527069159011477
       },
+      "cast_shadows": true,
       "materials": [
         "86518465-b823-4eb9-b3f5-c0deef450fc6"
       ]
@@ -534,15 +546,24 @@
         "enabled": true,
         "local_id": 2524645135532881
       },
+      "blocks_channels": 1,
       "bounciness": 0.0,
       "center": [
         0.0,
         0.0,
         0.0
       ],
+      "channel": 0,
+      "collision_mask": 255,
       "density": 1.0,
       "friction": 0.60000002,
       "is_trigger": false,
+      "rotation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
       "size": [
         1.0,
         1.0,
@@ -566,6 +587,7 @@
         "enabled": true,
         "local_id": 4407378276845981
       },
+      "cast_shadows": true,
       "materials": [
         "86518465-b823-4eb9-b3f5-c0deef450fc6"
       ]
@@ -576,15 +598,24 @@
         "enabled": true,
         "local_id": 682807520337279
       },
+      "blocks_channels": 1,
       "bounciness": 0.0,
       "center": [
         0.0,
         0.0,
         0.0
       ],
+      "channel": 0,
+      "collision_mask": 255,
       "density": 1.0,
       "friction": 0.60000002,
       "is_trigger": false,
+      "rotation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
       "size": [
         1.0,
         1.0,
@@ -608,6 +639,7 @@
         "enabled": true,
         "local_id": 4098436975054520
       },
+      "cast_shadows": true,
       "materials": [
         "86518465-b823-4eb9-b3f5-c0deef450fc6"
       ]
@@ -618,15 +650,24 @@
         "enabled": true,
         "local_id": 564175352066824
       },
+      "blocks_channels": 1,
       "bounciness": 0.0,
       "center": [
         0.0,
         0.0,
         0.0
       ],
+      "channel": 0,
+      "collision_mask": 255,
       "density": 1.0,
       "friction": 0.60000002,
       "is_trigger": false,
+      "rotation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
       "size": [
         1.0,
         1.0,
@@ -650,6 +691,7 @@
         "enabled": true,
         "local_id": 234817610676098
       },
+      "cast_shadows": true,
       "materials": [
         "86518465-b823-4eb9-b3f5-c0deef450fc6"
       ]
@@ -661,6 +703,7 @@
         "enabled": true,
         "local_id": 1056453951813666
       },
+      "channel": 1,
       "continuous": false,
       "freeze_position": [
         false,
@@ -672,6 +715,7 @@
         false,
         false
       ],
+      "interpolate": true,
       "is_kinematic": false,
       "linear_damping": 0.0,
       "use_gravity": true
@@ -682,15 +726,24 @@
         "enabled": true,
         "local_id": 45529744515697
       },
+      "blocks_channels": 1,
       "bounciness": 0.0,
       "center": [
         0.0,
         0.0,
         0.0
       ],
+      "channel": 0,
+      "collision_mask": 255,
       "density": 1.0,
       "friction": 0.60000002,
       "is_trigger": false,
+      "rotation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
       "size": [
         1.0,
         1.0,
@@ -714,6 +767,7 @@
         "enabled": true,
         "local_id": 1181362873671415
       },
+      "cast_shadows": true,
       "materials": [
         "86518465-b823-4eb9-b3f5-c0deef450fc6"
       ]
@@ -725,6 +779,7 @@
         "enabled": true,
         "local_id": 2809804962459356
       },
+      "channel": 1,
       "continuous": false,
       "freeze_position": [
         false,
@@ -736,6 +791,7 @@
         false,
         false
       ],
+      "interpolate": true,
       "is_kinematic": false,
       "linear_damping": 0.0,
       "use_gravity": true
@@ -746,15 +802,24 @@
         "enabled": true,
         "local_id": 2475108257567669
       },
+      "blocks_channels": 1,
       "bounciness": 0.0,
       "center": [
         0.0,
         0.0,
         0.0
       ],
+      "channel": 0,
+      "collision_mask": 255,
       "density": 1.0,
       "friction": 0.60000002,
       "is_trigger": false,
+      "rotation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
       "size": [
         1.0,
         1.0,
@@ -778,6 +843,7 @@
         "enabled": true,
         "local_id": 3893507122701294
       },
+      "cast_shadows": true,
       "materials": [
         "86518465-b823-4eb9-b3f5-c0deef450fc6"
       ]
@@ -789,6 +855,7 @@
         "enabled": true,
         "local_id": 421494408627231
       },
+      "channel": 1,
       "continuous": false,
       "freeze_position": [
         false,
@@ -800,6 +867,7 @@
         false,
         false
       ],
+      "interpolate": true,
       "is_kinematic": false,
       "linear_damping": 0.0,
       "use_gravity": true
@@ -810,12 +878,15 @@
         "enabled": true,
         "local_id": 1877239341121627
       },
+      "blocks_channels": 1,
       "bounciness": 0.0,
       "center": [
         0.0,
         0.0,
         0.0
       ],
+      "channel": 0,
+      "collision_mask": 255,
       "density": 1.0,
       "friction": 0.60000002,
       "is_trigger": false,
@@ -838,6 +909,7 @@
         "enabled": true,
         "local_id": 2052033305400533
       },
+      "cast_shadows": true,
       "materials": [
         "86518465-b823-4eb9-b3f5-c0deef450fc6"
       ]
@@ -849,6 +921,7 @@
         "enabled": true,
         "local_id": 2066217666230419
       },
+      "channel": 1,
       "continuous": false,
       "freeze_position": [
         false,
@@ -860,6 +933,7 @@
         false,
         false
       ],
+      "interpolate": true,
       "is_kinematic": false,
       "linear_damping": 0.0,
       "use_gravity": true
@@ -870,18 +944,27 @@
         "enabled": true,
         "local_id": 2904625042685778
       },
+      "blocks_channels": 1,
       "bounciness": 0.0,
       "center": [
         0.0,
         0.0,
         0.0
       ],
+      "channel": 0,
+      "collision_mask": 255,
       "density": 1.0,
       "direction": 1,
       "friction": 0.60000002,
       "height": 2.0,
       "is_trigger": false,
-      "radius": 0.5
+      "radius": 0.5,
+      "rotation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
     }
   ]
 }

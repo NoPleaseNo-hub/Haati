@@ -11,9 +11,9 @@ import "core:os"
 import "core:strings"
 import "core:testing"
 import "core:math"
-import "moonhug:engine"
-import anim "moonhug:packages/animation"
-import common "moonhug:tests/common"
+import "haati:engine"
+import anim "haati:packages/animation"
+import common "haati:tests/common"
 
 // A 1-second clip: owner position x 0→2, plus a child "Arm" scale snap
 // (STEP) from 1 to 3 at t=0.5.
@@ -114,11 +114,11 @@ test_animation_component_tick :: proc(t: ^testing.T) {
 @(test)
 test_animation_clip_from_gltf :: proc(t: ^testing.T) {
 	opts := cgltf.options{}
-	data, res := cgltf.parse_file(opts, "moonhug/tests/fixtures/animated_cube.gltf")
+	data, res := cgltf.parse_file(opts, "haati/tests/fixtures/animated_cube.gltf")
 	testing.expect(t, res == .success, "fixture should parse")
 	if res != .success do return
 	defer cgltf.free(data)
-	lres := cgltf.load_buffers(opts, data, "moonhug/tests/fixtures/animated_cube.gltf")
+	lres := cgltf.load_buffers(opts, data, "haati/tests/fixtures/animated_cube.gltf")
 	testing.expect(t, lres == .success, "fixture buffers should load")
 	if lres != .success do return
 	testing.expect(t, len(data.animations) == 1, "fixture should have one animation")
@@ -152,7 +152,7 @@ test_scene_from_gltf :: proc(t: ^testing.T) {
 	defer common.teardown(tc)
 
 	opts := cgltf.options{}
-	data, res := cgltf.parse_file(opts, "moonhug/tests/fixtures/animated_cube.gltf")
+	data, res := cgltf.parse_file(opts, "haati/tests/fixtures/animated_cube.gltf")
 	testing.expect(t, res == .success, "fixture should parse")
 	if res != .success do return
 	defer cgltf.free(data)
@@ -162,7 +162,7 @@ test_scene_from_gltf :: proc(t: ^testing.T) {
 	mesh_guid := engine.Asset_GUID(mesh_id)
 	clip_guid := engine.Asset_GUID(clip_id)
 
-	out :: "moonhug/tests/fixtures/_test_extracted_model.scene"
+	out :: "haati/tests/fixtures/_test_extracted_model.scene"
 	defer os.remove(out)
 	// The same decorate_root wiring the editor's extraction uses: the engine
 	// authors the scene, the package puts the Animation component on the root.

@@ -7,10 +7,10 @@ package run
 // build only. The pinned scene makes every plain launch produce the same
 // build. The editor's Build button forwards its live scene to the RUN only.
 
-import rc "moonhug:editor/runconfig"
+import rc "haati:editor/runconfig"
 
 SCENE :: "packages/app/assets/demo_menu/menu.scene"
 
 main :: proc() {
-	rc.play({package_path = "moonhug/packages/app", out = "builds/app"}, SCENE)
+	rc.play({package_path = "haati/packages/app", out = "builds/app"}, SCENE)
 }

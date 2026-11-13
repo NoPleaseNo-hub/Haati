@@ -10,9 +10,9 @@ package sequencer_tests
 import "core:os"
 import "core:strings"
 import "core:testing"
-import "moonhug:engine"
-import seq "moonhug:packages/sequencer"
-import common "moonhug:tests/common"
+import "haati:engine"
+import seq "haati:packages/sequencer"
+import common "haati:tests/common"
 // Build a track NODE with clip NODES under `owner` — what the window's Add
 // Track/Add Clip produce. Reuses the view struct as the clip parameter.
 _mk_track :: proc(owner: engine.Transform_Handle, kind: engine.TypeKey, clips: ..seq.Clip_View) -> engine.Transform_Handle {
@@ -200,7 +200,7 @@ test_clip_weight_explicit_ease :: proc(t: ^testing.T) {
 // every field commit, and a bare mutation on nested content is not saved.
 @(test)
 test_timeline_prefab_instance_targets_host_object :: proc(t: ^testing.T) {
-	dir := "moonhug/tests/_test_tl_xboundary"
+	dir := "haati/tests/_test_tl_xboundary"
 	os.make_directory(dir)
 	tl_path := strings.concatenate({dir, "/tl.scene"}, context.temp_allocator)
 	defer {

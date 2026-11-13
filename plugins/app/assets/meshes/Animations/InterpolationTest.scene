@@ -1,4 +1,5 @@
 {
+  "schema_version": 2,
   "root": 3042951162649368,
   "transforms": [
     {
@@ -524,6 +525,7 @@
         "enabled": true,
         "local_id": 4457386679339083
       },
+      "cast_shadows": true,
       "materials": [
         "3e65acfa-01b3-4c48-b0eb-20bc0b50bb22"
       ]
@@ -545,6 +547,7 @@
         "enabled": true,
         "local_id": 936952291050724
       },
+      "cast_shadows": true,
       "materials": [
         "3e65acfa-01b3-4c48-b0eb-20bc0b50bb22"
       ]
@@ -566,6 +569,7 @@
         "enabled": true,
         "local_id": 2394795450920504
       },
+      "cast_shadows": true,
       "materials": [
         "3e65acfa-01b3-4c48-b0eb-20bc0b50bb22"
       ]
@@ -587,6 +591,7 @@
         "enabled": true,
         "local_id": 1216862941520697
       },
+      "cast_shadows": true,
       "materials": [
         "3e65acfa-01b3-4c48-b0eb-20bc0b50bb22"
       ]
@@ -608,6 +613,7 @@
         "enabled": true,
         "local_id": 2657358193151393
       },
+      "cast_shadows": true,
       "materials": [
         "3e65acfa-01b3-4c48-b0eb-20bc0b50bb22"
       ]
@@ -629,6 +635,7 @@
         "enabled": true,
         "local_id": 155972786620429
       },
+      "cast_shadows": true,
       "materials": [
         "3e65acfa-01b3-4c48-b0eb-20bc0b50bb22"
       ]
@@ -650,6 +657,7 @@
         "enabled": true,
         "local_id": 1760090764004402
       },
+      "cast_shadows": true,
       "materials": [
         "3e65acfa-01b3-4c48-b0eb-20bc0b50bb22"
       ]
@@ -671,6 +679,7 @@
         "enabled": true,
         "local_id": 1742719121973129
       },
+      "cast_shadows": true,
       "materials": [
         "3e65acfa-01b3-4c48-b0eb-20bc0b50bb22"
       ]
@@ -692,6 +701,7 @@
         "enabled": true,
         "local_id": 3396719084009809
       },
+      "cast_shadows": true,
       "materials": [
         "3e65acfa-01b3-4c48-b0eb-20bc0b50bb22"
       ]
@@ -713,6 +723,7 @@
         "enabled": true,
         "local_id": 2696816372905960
       },
+      "cast_shadows": true,
       "materials": [
         "031ed7a6-8970-4413-8fea-a70bbcd53602"
       ]

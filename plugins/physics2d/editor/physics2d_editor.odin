@@ -9,11 +9,11 @@ package physics2d_editor
 // In the Handles tool (T), bounds handles on the selected colliders resize
 // them in their plane (@(on_scene_handles)), one undo step per drag.
 
-import "moonhug:engine"
-import "moonhug:engine/gizmos"
-import "moonhug:editor/handles"
-import "moonhug:editor/undo"
-import physics2d "moonhug:packages/physics2d"
+import "haati:engine"
+import "haati:engine/gizmos"
+import "haati:editor/handles"
+import "haati:editor/undo"
+import physics2d "haati:packages/physics2d"
 
 @(on_draw_gizmos={component=BoxCollider2D})
 box_collider_gizmos :: proc(c: ^physics2d.BoxCollider2D, ctx: handles.Gizmo_Context) {

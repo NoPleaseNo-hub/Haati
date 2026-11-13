@@ -7,9 +7,9 @@ package app_tests
 // Tank's turret ref must bind to the NEW live handle.
 
 import app ".."
-import undo "moonhug:editor/undo"
-import "moonhug:engine"
-import common "moonhug:tests/common"
+import undo "haati:editor/undo"
+import "haati:engine"
+import common "haati:tests/common"
 
 import "core:fmt"
 import "core:os"
@@ -18,7 +18,7 @@ import "core:testing"
 
 @(test)
 test_undo_delete_restores_refs_outside_subtree :: proc(t: ^testing.T) {
-	dir := "moonhug/tests/_test_undo_outside_ref"
+	dir := "haati/tests/_test_undo_outside_ref"
 	os.make_directory(dir)
 	path := strings.concatenate({dir, "/tank.scene"}, context.temp_allocator)
 	meta := strings.concatenate({dir, "/tank.scene.meta"}, context.temp_allocator)
@@ -113,7 +113,7 @@ test_undo_delete_restores_refs_outside_subtree :: proc(t: ^testing.T) {
 // moment and only the scene-wide rebind after B's restore can bind it.
 @(test)
 test_undo_group_delete_restores_cross_subtree_refs :: proc(t: ^testing.T) {
-	dir := "moonhug/tests/_test_undo_group_ref"
+	dir := "haati/tests/_test_undo_group_ref"
 	os.make_directory(dir)
 	path := strings.concatenate({dir, "/s.scene"}, context.temp_allocator)
 	meta := strings.concatenate({dir, "/s.scene.meta"}, context.temp_allocator)

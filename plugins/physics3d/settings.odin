@@ -5,8 +5,8 @@ package physics3d
 // and saved automatically to ProjectSettings/physics_3d_jolt.json.
 
 import "core:math"
-import jolt "moonhug:external/jolt"
-import "moonhug:engine"
+import jolt "haati:external/jolt"
+import "haati:engine"
 
 Physics3D_Settings :: struct {
 	async_multithreaded_solver: bool `decor:tooltip(desc="When enabled (default), Jolt Physics dispatches broadphase, narrowphase GJK/EPA, and constraint island solving across background CPU worker threads via JobSystemThreadPool. Disable to force single-threaded execution.")`,
@@ -152,7 +152,11 @@ _recreate_job_system :: proc() {
 	if _state.job_system != nil do return
 	num_threads: i32 = 1
 	if physics3d_settings.async_multithreaded_solver {
-		num_threads = i32(max(physics3d_settings.worker_threads, 0))
+		if physics3d_settings.worker_threads > 0 {
+			num_threads = i32(clamp(physics3d_settings.worker_threads, 1, 16))
+		} else {
+			num_threads = i32(clamp(engine.cpu_logical_core_count() - 2, 1, 8))
+		}
 	}
 	job_config := jolt.JobSystemThreadPoolConfig{
 		maxJobs     = 2048,

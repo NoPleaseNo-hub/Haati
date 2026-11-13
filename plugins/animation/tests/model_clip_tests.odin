@@ -13,19 +13,19 @@ import "core:encoding/uuid"
 import "core:os"
 import "core:strings"
 import "core:testing"
-import "moonhug:engine"
-import "moonhug:engine/catalog"
-import "moonhug:engine_editor/asset_pipeline"
-import anim "moonhug:packages/animation"
-import animation_editor "moonhug:packages/animation/editor"
-import mesh_editor "moonhug:engine_editor/mesh_editor"
-import common "moonhug:tests/common"
+import "haati:engine"
+import "haati:engine/catalog"
+import "haati:engine_editor/asset_pipeline"
+import anim "haati:packages/animation"
+import animation_editor "haati:packages/animation/editor"
+import mesh_editor "haati:engine_editor/mesh_editor"
+import common "haati:tests/common"
 
-BOX_ANIM_GLTF :: "moonhug/tests/fixtures/meshes/box_animated.gltf"
+BOX_ANIM_GLTF :: "haati/tests/fixtures/meshes/box_animated.gltf"
 
 @(test)
 test_mesh_import_bakes_clips_with_stable_identity :: proc(t: ^testing.T) {
-	artifact := "moonhug/tests/fixtures/meshes/_box_anim_artifact.bin"
+	artifact := "haati/tests/fixtures/meshes/_box_anim_artifact.bin"
 	part0 := engine.mesh_part_artifact_path(artifact, 0, context.temp_allocator)
 	clip0 := engine.mesh_clip_artifact_path(artifact, 0, context.temp_allocator)
 	defer os.remove(artifact)
@@ -76,7 +76,7 @@ test_mesh_import_bakes_clips_with_stable_identity :: proc(t: ^testing.T) {
 // scene that names only the clip.
 @(test)
 test_model_clip_resolves_loads_and_exports :: proc(t: ^testing.T) {
-	src_dir :: "moonhug/tests/fixtures/_model_clip_tmp"
+	src_dir :: "haati/tests/fixtures/_model_clip_tmp"
 	gltf :: src_dir + "/box.gltf"
 	scene :: src_dir + "/boot.scene"
 	data_dir :: src_dir + "_data"
@@ -163,7 +163,7 @@ test_model_clip_resolves_loads_and_exports :: proc(t: ^testing.T) {
 // showed while the parts did.
 @(test)
 test_model_provider_lists_parts_then_clips :: proc(t: ^testing.T) {
-	src_dir :: "moonhug/tests/fixtures/_model_provider_tmp"
+	src_dir :: "haati/tests/fixtures/_model_provider_tmp"
 	gltf :: src_dir + "/box.gltf"
 	os.make_directory(src_dir)
 	bytes, rerr := os.read_entire_file(BOX_ANIM_GLTF, context.temp_allocator)
@@ -204,7 +204,7 @@ test_model_provider_lists_parts_then_clips :: proc(t: ^testing.T) {
 // their readiness was a nil check on a lazily allocated map.
 @(test)
 test_model_clip_list_refreshes_after_reimport :: proc(t: ^testing.T) {
-	src_dir :: "moonhug/tests/fixtures/_model_clip_cache_tmp"
+	src_dir :: "haati/tests/fixtures/_model_clip_cache_tmp"
 	gltf :: src_dir + "/box.gltf"
 	os.make_directory(src_dir)
 	bytes, rerr := os.read_entire_file(BOX_ANIM_GLTF, context.temp_allocator)
@@ -250,7 +250,7 @@ test_model_clip_list_refreshes_after_reimport :: proc(t: ^testing.T) {
 // loaded as nothing and its preview stayed in the rest pose.
 @(test)
 test_stale_artifact_sweep_keeps_clip_fan_out :: proc(t: ^testing.T) {
-	src_dir :: "moonhug/tests/fixtures/_model_clip_sweep_tmp"
+	src_dir :: "haati/tests/fixtures/_model_clip_sweep_tmp"
 	gltf :: src_dir + "/box.gltf"
 	os.make_directory(src_dir)
 	bytes, rerr := os.read_entire_file(BOX_ANIM_GLTF, context.temp_allocator)

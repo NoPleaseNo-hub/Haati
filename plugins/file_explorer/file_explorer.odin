@@ -13,7 +13,7 @@ import "core:slice"
 import "core:strings"
 import "core:time"
 import "core:sys/windows"
-import engine "moonhug:engine"
+import engine "haati:engine"
 
 File_Type_Kind :: enum {
 	Folder,
@@ -154,7 +154,7 @@ _init_bookmarks :: proc() {
 	})
 	append(&_bookmarks, Bookmark{
 		label = strings.clone("Engine Core (moonhug)"),
-		path  = resolve_workspace_path("moonhug"),
+		path  = resolve_workspace_path("haati"),
 		icon  = "\ue869",
 	})
 }
@@ -696,12 +696,12 @@ resolve_source_file_path :: proc(raw_path: string, allocator := context.temp_all
 	// Test candidates in order of workspace specificity
 	candidates := make([dynamic]string, allocator)
 
-	// 1. If path starts with "moonhug/packages/<pkg>/..." -> map to "<ws_abs>/plugins/<pkg>/..."
-	if strings.has_prefix(norm_raw, "moonhug/packages/") {
-		sub := norm_raw[len("moonhug/packages/"):]
+	// 1. If path starts with "haati/packages/<pkg>/..." -> map to "<ws_abs>/plugins/<pkg>/..."
+	if strings.has_prefix(norm_raw, "haati/packages/") {
+		sub := norm_raw[len("haati/packages/"):]
 		c1, _ := filepath.join({ws_abs, "plugins", sub}, allocator)
 		append(&candidates, c1)
-		c2, _ := filepath.join({ws_abs, "moonhug", "packages", sub}, allocator)
+		c2, _ := filepath.join({ws_abs, "haati", "packages", sub}, allocator)
 		append(&candidates, c2)
 		c3, _ := filepath.join({".", "packages", sub}, allocator)
 		append(&candidates, c3)
@@ -712,19 +712,19 @@ resolve_source_file_path :: proc(raw_path: string, allocator := context.temp_all
 		sub := norm_raw[len("packages/"):]
 		c1, _ := filepath.join({ws_abs, "plugins", sub}, allocator)
 		append(&candidates, c1)
-		c2, _ := filepath.join({ws_abs, "moonhug", "packages", sub}, allocator)
+		c2, _ := filepath.join({ws_abs, "haati", "packages", sub}, allocator)
 		append(&candidates, c2)
 		c3, _ := filepath.join({".", "packages", sub}, allocator)
 		append(&candidates, c3)
 	}
 
-	// 3. Direct relative to workspace root (e.g. "plugins/...", "moonhug/engine/...")
+	// 3. Direct relative to workspace root (e.g. "plugins/...", "haati/engine/...")
 	c_ws, _ := filepath.join({ws_abs, norm_raw}, allocator)
 	append(&candidates, c_ws)
 
-	// 4. If path starts with "moonhug/" and we are running inside "moonhug" cwd:
-	if strings.has_prefix(norm_raw, "moonhug/") {
-		sub := norm_raw[len("moonhug/"):]
+	// 4. If path starts with "haati/" and we are running inside "haati" cwd:
+	if strings.has_prefix(norm_raw, "haati/") {
+		sub := norm_raw[len("haati/"):]
 		c_s1, _ := filepath.join({ws_abs, sub}, allocator)
 		append(&candidates, c_s1)
 		c_s2, _ := filepath.join({".", sub}, allocator)
@@ -1237,7 +1237,7 @@ create_odin_script :: proc(dir: string, name: string, template_idx: int = 0) -> 
 	)
 
 	content := fmt.tprintf(
-		"package %s\n\nimport \"moonhug:engine\"\n\n@" + "(component={{menu=\"Void/%s\"}})\n@" + "(typ_guid={{guid = \"%s\"}})\n%s :: struct {{\n\tusing base: engine.CompData,\n\t// Tip: Use engine.Ref_Local to reference a Scene Node,\n\t// or f32, int, bool, [3]f32 for tunable Inspector variables.\n}}\n\nreset_%s :: proc(c: ^%s) {{\n}}\n",
+		"package %s\n\nimport \"haati:engine\"\n\n@" + "(component={{menu=\"Void/%s\"}})\n@" + "(typ_guid={{guid = \"%s\"}})\n%s :: struct {{\n\tusing base: engine.CompData,\n\t// Tip: Use engine.Ref_Local to reference a Scene Node,\n\t// or f32, int, bool, [3]f32 for tunable Inspector variables.\n}}\n\nreset_%s :: proc(c: ^%s) {{\n}}\n",
 		pkg_name,
 		struct_name,
 		guid_str,

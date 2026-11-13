@@ -4,7 +4,7 @@ package control_rig
 // Stores all key effector targets and pole vectors in character local space.
 
 import "core:math/linalg"
-import engine "moonhug:engine"
+import engine "haati:engine"
 
 Procedural_Pose :: struct {
 	pelvis_pos:       [3]f32,

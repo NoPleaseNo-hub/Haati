@@ -6,15 +6,15 @@ package sprites_tests
 
 import "core:encoding/uuid"
 import "core:testing"
-import "moonhug:engine"
-import sprites "moonhug:packages/sprites"
-import common "moonhug:tests/common"
+import "haati:engine"
+import sprites "haati:packages/sprites"
+import common "haati:tests/common"
 
 @(test)
 test_save_load_scene_with_sprite_material :: proc(t: ^testing.T) {
 	tc_mem := new(common.TestCtx)
 	defer free(tc_mem)
-	common.setup(tc_mem, "moonhug/tests/fixtures/_test_sprite_material.scene")
+	common.setup(tc_mem, "haati/tests/fixtures/_test_sprite_material.scene")
 	context.user_ptr = &tc_mem.uc
 	defer common.teardown(tc_mem)
 

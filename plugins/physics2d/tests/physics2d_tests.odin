@@ -6,8 +6,8 @@ package physics2d_tests
 // packages/*/tests suite after the central one.
 
 import "core:testing"
-import "moonhug:engine"
-import common "moonhug:tests/common"
+import "haati:engine"
+import common "haati:tests/common"
 import physics2d ".."
 import b2 "vendor:box2d"
 

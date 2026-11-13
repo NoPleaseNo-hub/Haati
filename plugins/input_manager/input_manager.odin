@@ -12,9 +12,9 @@ import "core:math/linalg"
 import "core:os"
 import "core:slice"
 import "core:strings"
-import core "moonhug:engine/core"
-import engine "moonhug:engine"
-import input "moonhug:engine/input"
+import core "haati:engine/core"
+import engine "haati:engine"
+import input "haati:engine/input"
 
 Action :: enum u8 {
 	Move_Forward,

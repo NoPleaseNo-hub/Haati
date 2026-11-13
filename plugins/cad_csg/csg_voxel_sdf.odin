@@ -16,8 +16,8 @@ package cad_csg
 import "base:intrinsics"
 import "core:math"
 import "core:math/linalg"
-import engine "moonhug:engine"
-import gfx "moonhug:engine/gfx"
+import engine "haati:engine"
+import gfx "haati:engine/gfx"
 
 @(private = "package")
 _vox_pt_idx :: #force_inline proc(x, y, z: int) -> int {
@@ -735,6 +735,170 @@ csg_voxel_prune_floating_crumbs :: proc(grid: ^CSG_Voxel_Grid) -> bool {
 		_vox_update_brick_masks_range(grid, p_min.x, p_min.y, p_min.z, p_max.x, p_max.y, p_max.z)
 	}
 	return any_pruned
+}
+
+// Extracts any ungrounded solid connected components (`cnt >= 16`) from a blasted `CSG_Voxel_Grid`
+// into greedy `CSG_Convex` hulls in `out_detached_hulls`, and prunes their voxels out of `grid`.
+csg_voxel_extract_ungrounded_islands :: proc(
+	grid:               ^CSG_Voxel_Grid,
+	ground_y:           f32,
+	ind_hulls:          []CSG_Convex,
+	is_dynamic_volume:  bool,
+	out_detached_hulls: ^[dynamic]CSG_Convex,
+	alloc := context.allocator,
+) -> bool {
+	if grid == nil || out_detached_hulls == nil do return false
+
+	unvisited := grid.pt_solid_rows
+	first_zy := -1
+	for zy in CSG_VOXEL_PTS ..< CSG_VOXEL_RES * CSG_VOXEL_PTS {
+		if unvisited[zy] != 0 {
+			first_zy = zy
+			break
+		}
+	}
+	if first_zy < 0 do return false
+
+	Comp_Span :: struct {
+		start, end, cnt: int,
+		grounded:        bool,
+	}
+	items: [4096]u64 = ---
+	spans: [64]Comp_Span = ---
+	span_count := 0
+	cur_item   := 0
+	max_cnt    := -1
+	best_idx   := 0
+
+	for zy in first_zy ..< CSG_VOXEL_RES * CSG_VOXEL_PTS {
+		for unvisited[zy] != 0 && span_count < 64 && cur_item < len(items) {
+			seed := unvisited[zy] & (0 - unvisited[zy])
+			cnt, next_item := _vox_flood_fill_into_items(&unvisited, &items, cur_item, zy, seed)
+			idx := span_count
+			spans[idx]  = {start = cur_item, end = next_item, cnt = cnt}
+			span_count += 1
+			cur_item    = next_item
+			if cnt > max_cnt {
+				max_cnt  = cnt
+				best_idx = idx
+			}
+		}
+	}
+	if span_count == 0 do return false
+
+	vox_sz := grid.voxel_size
+	ground_tol := ground_y + max(0.25, vox_sz * 1.5)
+	ungrounded_count := 0
+
+	if is_dynamic_volume {
+		if span_count <= 1 do return false
+		for idx in 0 ..< span_count {
+			spans[idx].grounded = (idx == best_idx)
+			if !spans[idx].grounded && spans[idx].cnt >= 16 {
+				ungrounded_count += 1
+			}
+		}
+	} else {
+		for idx in 0 ..< span_count {
+			sp := &spans[idx]
+			if sp.cnt < 16 {
+				sp.grounded = true
+				continue
+			}
+			min_p := [3]int{CSG_VOXEL_RES, CSG_VOXEL_RES, CSG_VOXEL_RES}
+			max_p := [3]int{0, 0, 0}
+			for k in sp.start ..< sp.end {
+				packed := items[k]
+				zy := int(packed >> 32)
+				y  := zy % CSG_VOXEL_PTS
+				z  := zy / CSG_VOXEL_PTS
+				m  := u32(packed)
+				for m != 0 {
+					x := int(intrinsics.count_trailing_zeros(m))
+					m &= m - 1
+					min_p.x = min(min_p.x, x); max_p.x = max(max_p.x, x)
+					min_p.y = min(min_p.y, y); max_p.y = max(max_p.y, y)
+					min_p.z = min(min_p.z, z); max_p.z = max(max_p.z, z)
+				}
+			}
+			w_min := grid.origin + [3]f32{f32(min_p.x), f32(min_p.y), f32(min_p.z)} * vox_sz
+			w_max := grid.origin + [3]f32{f32(max_p.x), f32(max_p.y), f32(max_p.z)} * vox_sz
+			if w_min.y <= ground_tol {
+				sp.grounded = true
+			} else {
+				pad := max(0.12, vox_sz * 1.25)
+				for ih in ind_hulls {
+					if aabb_overlaps(w_min, w_max, ih.aabb_min, ih.aabb_max, pad) {
+						sp.grounded = true
+						break
+					}
+				}
+			}
+			if !sp.grounded {
+				ungrounded_count += 1
+			}
+		}
+	}
+
+	if ungrounded_count == 0 do return false
+
+	ungrounded_rows: [CSG_VOXEL_PTS * CSG_VOXEL_PTS]u32
+	for idx in 0 ..< span_count {
+		sp := spans[idx]
+		if sp.grounded || sp.cnt < 16 do continue
+		for k in sp.start ..< sp.end {
+			packed := items[k]
+			ungrounded_rows[int(packed >> 32)] |= u32(packed)
+		}
+	}
+
+	tmp_hulls := make([dynamic]CSG_Convex, 0, 16, context.temp_allocator)
+	csg_voxel_build_greedy_hulls(grid, &tmp_hulls, alloc)
+	inv_v := 1.0 / max(vox_sz, 1e-4)
+	for &h in tmp_hulls {
+		hc := (h.aabb_min + h.aabb_max) * 0.5 - grid.origin
+		gx := clamp(int(math.round(hc.x * inv_v)), 0, CSG_VOXEL_RES)
+		gy := clamp(int(math.round(hc.y * inv_v)), 0, CSG_VOXEL_RES)
+		gz := clamp(int(math.round(hc.z * inv_v)), 0, CSG_VOXEL_RES)
+		hit := false
+		for dz in -1 ..= 1 {
+			zz := clamp(gz + dz, 0, CSG_VOXEL_RES)
+			for dy in -1 ..= 1 {
+				yy := clamp(gy + dy, 0, CSG_VOXEL_RES)
+				row := ungrounded_rows[zz * CSG_VOXEL_PTS + yy]
+				if row == 0 do continue
+				for dx in -1 ..= 1 {
+					xx := clamp(gx + dx, 0, CSG_VOXEL_RES)
+					if (row & (u32(1) << uint(xx))) != 0 {
+						hit = true
+						break
+					}
+				}
+				if hit do break
+			}
+			if hit do break
+		}
+		if hit || span_count == 1 {
+			append(out_detached_hulls, h)
+		} else {
+			convex_destroy(&h)
+		}
+	}
+
+	p_min := [3]int{CSG_VOXEL_RES, CSG_VOXEL_RES, CSG_VOXEL_RES}
+	p_max := [3]int{0, 0, 0}
+	for idx in 0 ..< span_count {
+		sp := spans[idx]
+		if sp.grounded || sp.cnt < 16 do continue
+		for k in sp.start ..< sp.end {
+			packed := items[k]
+			_vox_prune_row_bits(grid, int(packed >> 32), u32(packed), &p_min, &p_max)
+		}
+	}
+	if p_min.x <= p_max.x {
+		_vox_update_brick_masks_range(grid, p_min.x, p_min.y, p_min.z, p_max.x, p_max.y, p_max.z)
+	}
+	return len(out_detached_hulls) > 0
 }
 
 // Clips a `CSG_Voxel_Grid` against an arbitrary cutting plane `(plane_normal, plane_dist)` in local space.

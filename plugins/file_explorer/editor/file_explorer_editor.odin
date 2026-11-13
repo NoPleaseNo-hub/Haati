@@ -12,20 +12,21 @@ import "core:slice"
 import "core:strconv"
 import "core:strings"
 import stbi "vendor:stb/image"
-import im "moonhug:external/odin-imgui"
-import gfx "moonhug:engine/gfx"
-import wnd "moonhug:editor/window"
-import icons "moonhug:editor/icons"
-import thm "moonhug:editor/theme"
-import undo "moonhug:editor/undo"
-import inspector "moonhug:editor/inspector"
-import engine "moonhug:engine"
-import file_exp "moonhug:packages/file_explorer"
-import editor_visuals "moonhug:packages/editor_visuals"
-import cad_csg "moonhug:packages/cad_csg"
-import audio "moonhug:packages/audio"
-import widgets "moonhug:editor/widgets"
-import nc "moonhug:editor/node_canvas"
+import im "haati:external/odin-imgui"
+import gfx "haati:engine/gfx"
+import wnd "haati:editor/window"
+import icons "haati:editor/icons"
+import thm "haati:editor/theme"
+import undo "haati:editor/undo"
+import inspector "haati:editor/inspector"
+import engine "haati:engine"
+import file_exp "haati:packages/file_explorer"
+import editor_visuals "haati:packages/editor_visuals"
+import cad_csg "haati:packages/cad_csg"
+import audio "haati:packages/audio"
+import widgets "haati:editor/widgets"
+import nc "haati:editor/node_canvas"
+import vs "haati:editor/visual_script"
 
 // ─────────────────────────────────────────────────────────────
 // STATE & STATIC BUFFERS (100% HEAP-CORRUPTION PROOF)
@@ -177,8 +178,8 @@ _to_asset_db_path :: proc(path: string, alloc := context.temp_allocator) -> stri
 	rel_p       = strings.trim_prefix(rel_p, "./")
 	if strings.has_prefix(rel_p, "plugins/") {
 		rel_p = fmt.tprintf("packages/%s", strings.trim_prefix(rel_p, "plugins/"))
-	} else if strings.has_prefix(rel_p, "moonhug/") {
-		rel_p = strings.trim_prefix(rel_p, "moonhug/")
+	} else if strings.has_prefix(rel_p, "haati/") {
+		rel_p = strings.trim_prefix(rel_p, "haati/")
 	}
 	// Sample packages inside `plugins/<pkg>/samples/<sample_pkg>/...` are mounted at `packages/<sample_pkg>/...`
 	if strings.has_prefix(rel_p, "packages/") {
@@ -2132,17 +2133,21 @@ _open_file_item :: proc(path: string) {
 		return
 	}
 
-	// 2. Odin source scripts (.odin) -> Open in IDE with project context (Rider / VS Code)
+	// 2. Odin source scripts (.odin) -> Open in IDE; Unified Blueprint scripts (.bodin / .mhgraph) -> Unified Graph Studio
+	if ext == ".bodin" || ext == ".mhgraph" {
+		vs.open_blueprint_in_studio(norm_p)
+		return
+	}
 	if ext == ".odin" {
 		file_exp.open_script_in_ide(norm_p)
 		return
 	}
 
-	// 3. Material files (.mat) -> Open in Live Material Editor (Void Material Editor window + Preview Pane + Inspector)
+	// 3. Material files (.mat) -> Open in Unified Graph Studio (Material Shader domain)
 	if ext == ".mat" {
 		_show_inspector_pane = true
 		_connect_material_editor_to_mat(norm_p)
-		wnd.open("void_material_editor")
+		vs.open_unified_graph_domain(.Material_Shader, norm_p)
 		return
 	}
 
@@ -3417,6 +3422,7 @@ _draw_asset_inspector_pane :: proc() {
 						lo_d := strings.to_lower(dropped_p, context.temp_allocator)
 						if strings.has_suffix(lo_d, ".png") || strings.has_suffix(lo_d, ".jpg") || strings.has_suffix(lo_d, ".jpeg") || strings.has_suffix(lo_d, ".bmp") {
 							engine.asset_db_request_refresh()
+							_cached_best_tex_mat_len = 0
 							if tid, tok := _lookup_asset_guid_any_path(dropped_p); tok {
 								mat_val.texture = engine.Asset_GUID(tid)
 								mat_changed = true
@@ -3441,9 +3447,9 @@ _draw_asset_inspector_pane :: proc() {
 				}
 
 				im.Spacing()
-				if im.Button(fmt.ctprintf("%s  Open Material Editor & Node Graph", icons.ICON_MD_PALETTE), {-1, 24}) {
+				if im.Button(fmt.ctprintf("%s  Open in Unified Graph Studio (Material Shader)", icons.ICON_MD_PALETTE), {-1, 24}) {
 					_connect_material_editor_to_mat(item.path)
-					wnd.open("void_material_editor")
+					vs.open_unified_graph_domain(.Material_Shader, item.path)
 				}
 			}
 		} else {
@@ -3929,11 +3935,13 @@ Mat_Graph_Node :: struct {
 	rough_frost:       f32,
 	// Comment_Box dimensions in unzoomed canvas units
 	comment_size:      [2]f32,
+	collapsed:         bool,
 }
 
 @(private = "file")
 _mat_graph: struct {
 	initialized:          bool,
+	cv:                   nc.Node_Canvas,
 	nodes:                [dynamic]Mat_Graph_Node,
 	next_node_id:         i32,
 	// Multi-selection & Marquee box drag state
@@ -3942,7 +3950,7 @@ _mat_graph: struct {
 	marquee_start:        [2]f32,
 	marquee_end:          [2]f32,
 	wire_style:           Mat_Graph_Wire_Style,
-	// Canvas Pan & Mouse-Wheel Zoom state
+	// Canvas Pan & Mouse-Wheel Zoom state (kept in sync with `cv` for legacy callers)
 	pan:                  [2]f32,
 	zoom:                 f32,
 	// Interactive Bidirectional Wire Dragging state
@@ -3962,6 +3970,14 @@ _mat_graph: struct {
 	status_buf:           [192]u8,
 	status_len:           int,
 }
+
+// One-shot per-material folder & asset_db caches to avoid filesystem scans inside the frame loop
+@(private = "file") _last_refreshed_mat_buf:    [512]u8
+@(private = "file") _last_refreshed_mat_len:    int
+@(private = "file") _cached_best_tex_mat_buf:   [512]u8
+@(private = "file") _cached_best_tex_mat_len:   int
+@(private = "file") _cached_best_tex_res_buf:   [512]u8
+@(private = "file") _cached_best_tex_res_len:   int
 
 @(private = "file")
 _set_mat_graph_status :: proc(msg: string) {
@@ -3988,7 +4004,7 @@ _resolve_disk_path_from_db_path :: proc(path: string, alloc := context.temp_allo
 		if os.exists(cand0) do return cand0
 		cand1 := fmt.tprintf("plugins/%s", after_pkg)
 		if os.exists(cand1) do return cand1
-		cand2 := fmt.tprintf("moonhug/%s", norm_p)
+		cand2 := fmt.tprintf("haati/%s", norm_p)
 		if os.exists(cand2) do return cand2
 		// Check sample package mounts (e.g. `packages/animation_sample/...` -> `plugins/animation/samples/animation_sample/...`)
 		for parent_pkg in ([?]string{"animation", "particles"}) {
@@ -4273,6 +4289,8 @@ _reset_default_mat_graph :: proc() {
 	_mat_graph.next_node_id = 1
 	_mat_graph.pan          = {0, 0}
 	_mat_graph.zoom         = 1.0
+	_mat_graph.cv.pan       = {0, 0}
+	_mat_graph.cv.zoom      = 1.0
 
 	id_uv  := _spawn_mat_graph_node(.UV_Panner,       {16,  50})
 	id_tex := _spawn_mat_graph_node(.Texture_Sample,  {225, 25})
@@ -5234,20 +5252,14 @@ _compile_mat_graph_to_glsl_shader :: proc() -> bool {
 	}
 
 	sb := strings.builder_make(context.temp_allocator)
-	fmt.sbprintf(&sb, "// Auto-Generated by Void Material Editor Node Graph for '%s'\n", filepath.base(active_mat_path))
+	fmt.sbprintf(&sb, "// Auto-Generated by Haati Material Studio for '%s'\n", filepath.base(active_mat_path))
 	fmt.sbprintln(&sb, "#version 450\n")
 	fmt.sbprintln(&sb, "layout(location = 0) in vec2 frag_uv;")
 	fmt.sbprintln(&sb, "layout(location = 1) in vec4 frag_color;")
 	fmt.sbprintln(&sb, "layout(location = 2) in vec3 frag_normal;")
 	fmt.sbprintln(&sb, "layout(location = 3) in vec3 frag_world_pos;\n")
 	fmt.sbprintln(&sb, "layout(set = 2, binding = 0) uniform sampler2D tex;\n")
-	fmt.sbprintln(&sb, "#define MAX_LIGHTS 8")
-	fmt.sbprintln(&sb, "struct GpuLight { vec4 pos_type; vec4 dir_range; vec4 color_outer; vec4 params; };")
-	fmt.sbprintln(&sb, "layout(set = 3, binding = 0) uniform LightUBO {")
-	fmt.sbprintln(&sb, "    vec4 ambient_count;")
-	fmt.sbprintln(&sb, "    vec4 cam_pos;")
-	fmt.sbprintln(&sb, "    GpuLight lights[MAX_LIGHTS];")
-	fmt.sbprintln(&sb, "};\n")
+	fmt.sbprintln(&sb, "#include \"lighting_common.glsl\"\n")
 
 	fmt.sbprintln(&sb, "layout(set = 3, binding = 1) uniform MaterialUBO {")
 	fmt.sbprintln(&sb, "    vec4  u_fresnel_color;")
@@ -5294,12 +5306,27 @@ _compile_mat_graph_to_glsl_shader :: proc() -> bool {
 	}
 	fmt.sbprintln(&sb, "    float ambient = ambient_count.x;")
 	fmt.sbprintln(&sb, "    int count = int(ambient_count.y);")
+	fmt.sbprintln(&sb, "    bool dir_shadow_used = false;")
 	fmt.sbprintln(&sb, "    vec3 light = vec3(ambient);")
 	fmt.sbprintln(&sb, "    for (int i = 0; i < count; ++i) {")
 	fmt.sbprintln(&sb, "        GpuLight l = lights[i];")
-	fmt.sbprintln(&sb, "        vec3 L = (l.pos_type.w < 0.5) ? l.dir_range.xyz : normalize(frag_world_pos - l.pos_type.xyz);")
+	fmt.sbprintln(&sb, "        vec3 L;")
+	fmt.sbprintln(&sb, "        float dist = 0.0;")
+	fmt.sbprintln(&sb, "        if (l.pos_type.w < 0.5) {")
+	fmt.sbprintln(&sb, "            L = l.dir_range.xyz;")
+	fmt.sbprintln(&sb, "        } else {")
+	fmt.sbprintln(&sb, "            vec3 d = frag_world_pos - l.pos_type.xyz;")
+	fmt.sbprintln(&sb, "            dist = length(d);")
+	fmt.sbprintln(&sb, "            L = d / max(dist, 1e-6);")
+	fmt.sbprintln(&sb, "        }")
 	fmt.sbprintln(&sb, "        float diff = max(dot(N, -L), 0.0);")
-	fmt.sbprintln(&sb, "        light += l.color_outer.rgb * ((1.0 - ambient) * diff);")
+	fmt.sbprintln(&sb, "        float atten = light_attenuation(l, L, dist);")
+	fmt.sbprintln(&sb, "        float shadow = 1.0;")
+	fmt.sbprintln(&sb, "        if (l.pos_type.w >= 0.5 || !dir_shadow_used) {")
+	fmt.sbprintln(&sb, "            shadow = eval_light_shadow(i, l, frag_world_pos, N, L, diff);")
+	fmt.sbprintln(&sb, "            if (l.pos_type.w < 0.5 && l.params.y < -1.5) dir_shadow_used = true;")
+	fmt.sbprintln(&sb, "        }")
+	fmt.sbprintln(&sb, "        light += l.color_outer.rgb * ((1.0 - ambient) * diff * atten * shadow);")
 	fmt.sbprintln(&sb, "    }")
 	fmt.sbprintln(&sb, "    vec3 final_rgb = base.rgb * light;")
 	if has_fresnel {
@@ -5338,7 +5365,7 @@ _draw_visual_material_node_graph_tab :: proc() {
 	// Top Action Bar for the Visual Node Graph
 	im.PushStyleColorImVec4(.Button, {0.20, 0.50, 0.78, 0.98})
 	if im.Button("+ Add Node...") {
-		_mat_graph.ctx_spawn_pos = {240.0 - _mat_graph.pan.x, 120.0 - _mat_graph.pan.y}
+		_mat_graph.ctx_spawn_pos = {240.0 - _mat_graph.cv.pan.x, 120.0 - _mat_graph.cv.pan.y}
 		im.OpenPopup("##AddMatNodeTopPopup")
 	}
 	im.PopStyleColor(1)
@@ -5350,7 +5377,7 @@ _draw_visual_material_node_graph_tab :: proc() {
 	im.SameLine()
 	im.PushStyleColorImVec4(.Button, {0.26, 0.42, 0.56, 0.95})
 	if im.SmallButton("+ Comment (C)") {
-		_ = _spawn_comment_box_for_selection({200.0 - _mat_graph.pan.x, 90.0 - _mat_graph.pan.y})
+		_ = _spawn_comment_box_for_selection({200.0 - _mat_graph.cv.pan.x, 90.0 - _mat_graph.cv.pan.y})
 	}
 	im.PopStyleColor(1)
 	if im.IsItemHovered() {
@@ -5358,17 +5385,42 @@ _draw_visual_material_node_graph_tab :: proc() {
 	}
 
 	im.SameLine()
-	wire_style_names := [3]cstring{"Wires: Electronic 45° (UE)", "Wires: Electric Jagged", "Wires: Smooth Bezier"}
-	ws_i := clamp(i32(_mat_graph.wire_style), 0, 2)
-	im.SetNextItemWidth(175)
-	if im.ComboChar("##MatWireStyle", &ws_i, raw_data(wire_style_names[:]), 3) {
-		_mat_graph.wire_style = Mat_Graph_Wire_Style(ws_i)
+	nc.draw_wire_style_combo("##MatWireStyle", 168.0)
+
+	_frame_all_mat_nodes :: proc() {
+		if len(_mat_graph.nodes) == 0 do return
+		min_p := [2]f32{ 1e9,  1e9}
+		max_p := [2]f32{-1e9, -1e9}
+		for n in _mat_graph.nodes {
+			if n.kind == .Comment_Box do continue
+			min_p.x = min(min_p.x, n.pos.x)
+			min_p.y = min(min_p.y, n.pos.y)
+			max_p.x = max(max_p.x, n.pos.x + 240.0)
+			max_p.y = max(max_p.y, n.pos.y + 220.0)
+		}
+		if min_p.x > max_p.x do return
+		span := max_p - min_p
+		avail := _mat_graph.cv.size
+		if avail.x < 60 do avail.x = 640
+		if avail.y < 60 do avail.y = 400
+		zx := (avail.x - 80.0) / max(span.x, 120.0)
+		zy := (avail.y - 80.0) / max(span.y, 120.0)
+		nz := clamp(min(zx, zy), 0.35, 1.35)
+		center := (min_p + max_p) * 0.5
+		_mat_graph.cv.zoom = nz
+		_mat_graph.cv.pan  = (avail * 0.5) / nz - center
 	}
 
 	im.SameLine()
+	if im.SmallButton("Frame All (F)") {
+		_frame_all_mat_nodes()
+	}
+	im.SameLine()
 	if im.SmallButton("Reset View") {
-		_mat_graph.pan  = {0, 0}
-		_mat_graph.zoom = 1.0
+		_mat_graph.cv.pan  = {0, 0}
+		_mat_graph.cv.zoom = 1.0
+		_mat_graph.pan     = {0, 0}
+		_mat_graph.zoom    = 1.0
 	}
 	im.SameLine()
 	if im.SmallButton("Reset Graph") {
@@ -5396,73 +5448,75 @@ _draw_visual_material_node_graph_tab :: proc() {
 		widgets.tooltip_unchecked("Generates a real #version 450 fragment shader in assets/shaders/ with MaterialUBO uniforms (Float, Bool, Vec2, Vec3, Vec4), Unreal BumpOffset parallax, Bump/Normal relief, and Fresnel rim halo!")
 	}
 
-	im.TextDisabled(fmt.ctprintf("Zoom: %.0f%%  |  Empty Drag=Box Select  |  Ctrl/Shift+Click=Multi-Select  |  C=Comment Box  |  Ctrl+Drag Pin=Move Wire  |  Alt+Click Pin=Disconnect", _mat_graph.zoom * 100.0))
+	_mat_graph.zoom = _mat_graph.cv.zoom > 0 ? _mat_graph.cv.zoom : 1.0
+	im.TextDisabled(fmt.ctprintf("Zoom: %.0f%%  |  Empty Drag=Box Select  |  F=Frame All  |  C=Comment Box  |  Ctrl+Drag Pin=Move Wire  |  Alt+Click Pin=Disconnect", _mat_graph.zoom * 100.0))
 
 	if _mat_graph.status_len > 0 {
 		im.TextColored({0.45, 0.95, 0.65, 1.0}, cstring(&_mat_graph.status_buf[0]))
 	}
 
-	avail_w := max(im.GetContentRegionAvail().x, 260.0)
-	// Interactive Node Graph Canvas
-	canvas_h := max(im.GetContentRegionAvail().y - 4.0, 320.0)
-	im.BeginChild("##MatNodeGraphCanvas", {avail_w, canvas_h}, {.Borders}, {.NoScrollbar, .NoScrollWithMouse})
-	canvas_p0 := im.GetCursorScreenPos()
-	canvas_sz := im.GetContentRegionAvail()
-	dl := im.GetWindowDrawList()
-	io := im.GetIO()
-	canvas_hovered := im.IsWindowHovered()
-
-	// Mouse-Wheel Zoom (`0.50x .. 1.80x`) & Middle-Mouse Panning
-	if canvas_hovered && !im.IsAnyItemActive() && abs(io.MouseWheel) > 0.01 {
-		old_zoom := _mat_graph.zoom
-		new_zoom := clamp(old_zoom + io.MouseWheel * 0.10, 0.50, 1.80)
-		if new_zoom != old_zoom {
-			mouse_rel := [2]f32{io.MousePos.x - canvas_p0.x, io.MousePos.y - canvas_p0.y}
-			world_pt  := (mouse_rel - _mat_graph.pan) / old_zoom
-			_mat_graph.zoom = new_zoom
-			_mat_graph.pan  = mouse_rel - world_pt * new_zoom
-		}
+	// Interactive Node Graph Canvas via Shared `nc.Node_Canvas`
+	if !nc.canvas_begin(&_mat_graph.cv, "##MatNodeGraphCanvas") {
+		nc.canvas_end(&_mat_graph.cv, nil, 0)
+		return
 	}
-	if canvas_hovered && (im.IsMouseDragging(.Middle) || (im.IsMouseDragging(.Right) && !im.IsAnyItemHovered())) {
-		_mat_graph.pan.x += io.MouseDelta.x
-		_mat_graph.pan.y += io.MouseDelta.y
-	}
-
-	zm := _mat_graph.zoom
-
-	// 1. Draw Shared Faker-Style Dark Grid Surface (minor + major grid lines pinned to canvas space)
-	nc.canvas_draw_grid_surface(
-		dl,
-		canvas_p0,
-		{canvas_p0.x + canvas_sz.x, canvas_p0.y + canvas_sz.y},
-		{_mat_graph.pan.x / max(zm, 0.1), _mat_graph.pan.y / max(zm, 0.1)},
-		zm,
-	)
+	canvas_p0      := _mat_graph.cv.origin
+	canvas_sz      := _mat_graph.cv.size
+	dl             := im.GetWindowDrawList()
+	io             := im.GetIO()
+	canvas_hovered := im.IsWindowHovered(im.HoveredFlags_ChildWindows)
+	zm             := _mat_graph.cv.zoom
+	_mat_graph.zoom = zm
+	_mat_graph.pan  = _mat_graph.cv.pan
 
 	// Helpers to compute screen-space positions of Node Input & Output Pins
 	node_screen_pos :: proc(n: Mat_Graph_Node, canvas_p0: im.Vec2) -> im.Vec2 {
-		return {
-			canvas_p0.x + _mat_graph.pan.x + n.pos.x * _mat_graph.zoom,
-			canvas_p0.y + _mat_graph.pan.y + n.pos.y * _mat_graph.zoom,
+		_ = canvas_p0
+		return nc.canvas_to_screen(&_mat_graph.cv, {n.pos.x, n.pos.y})
+	}
+	node_in_pin_count_raw :: proc(n: Mat_Graph_Node) -> int {
+		switch n.kind {
+		case .UV_Panner:       return 1
+		case .Texture_Sample:  return 1
+		case .Proc_Pattern:    return 1
+		case .Color_Constant:  return 0
+		case .Scalar_Constant: return 0
+		case .Math_Blend:      return 3
+		case .Channel_Adjust:  return 1
+		case .Material_Output: return 4
+		case .Named_Param:     return 2 if n.param_type == .Bool_Switch else 0
+		case .Bump_Offset:     return 2
+		case .Bump_Normal:     return 2
+		case .Fresnel_Halo:    return 2
+		case .Comment_Box:     return 0
 		}
+		return 1
 	}
 	node_card_size :: proc(n: Mat_Graph_Node) -> [2]f32 {
+		base: [2]f32 = {190, 135}
 		switch n.kind {
-		case .UV_Panner:       return {185, 130}
-		case .Texture_Sample:  return {235, 206}
-		case .Proc_Pattern:    return {205, 156}
-		case .Color_Constant:  return {175, 96}
-		case .Scalar_Constant: return {175, 90}
-		case .Math_Blend:      return {205, 158}
-		case .Channel_Adjust:  return {195, 146}
-		case .Material_Output: return {210, 272}
-		case .Named_Param:     return {210, 148}
-		case .Bump_Offset:     return {215, 152}
-		case .Bump_Normal:     return {205, 124}
-		case .Fresnel_Halo:    return {210, 150}
+		case .UV_Panner:       base = {185, 130}
+		case .Texture_Sample:  base = {235, 206}
+		case .Proc_Pattern:    base = {205, 156}
+		case .Color_Constant:  base = {175, 96}
+		case .Scalar_Constant: base = {175, 90}
+		case .Math_Blend:      base = {205, 158}
+		case .Channel_Adjust:  base = {195, 146}
+		case .Material_Output: base = {210, 272}
+		case .Named_Param:     base = {210, 148}
+		case .Bump_Offset:     base = {215, 152}
+		case .Bump_Normal:     base = {205, 124}
+		case .Fresnel_Halo:    base = {210, 150}
 		case .Comment_Box:     return {max(n.comment_size.x, 200.0), max(n.comment_size.y, 120.0)}
 		}
-		return {190, 135}
+		if n.collapsed {
+			out_c := 6 if n.kind == .Texture_Sample else (0 if n.kind == .Material_Output else 1)
+			in_c  := node_in_pin_count_raw(n)
+			max_p := max(in_c, out_c)
+			coll_h := max(46.0, 48.0 + f32(max_p) * 30.0)
+			return {base.x, min(base.y, coll_h)}
+		}
+		return base
 	}
 	node_out_pin_count :: proc(n: Mat_Graph_Node) -> int {
 		if n.kind == .Material_Output || n.kind == .Comment_Box do return 0
@@ -5904,17 +5958,10 @@ _draw_visual_material_node_graph_tab :: proc() {
 		im.PopID()
 	}
 
-	// 2. Draw Wires for all active Node Connections via Shared `node_canvas` Renderer
-	// (Supports Electronic 45° UE Style, Electric Jagged, and Smooth Bezier + Animated Flow Beads!)
+	// 2. Draw Wires for all active Node Connections via Shared Global `node_canvas` Renderer
 	draw_wire :: proc(dl: ^im.DrawList, p_out, p_in: im.Vec2, col: im.Vec4, flow: f32 = 0.72) {
 		c_u32 := im.ColorConvertFloat4ToU32(col)
-		nc_style: nc.Canvas_Wire_Style = .Electronic_45
-		switch _mat_graph.wire_style {
-		case .Electronic_45:   nc_style = .Electronic_45
-		case .Electric_Jagged: nc_style = .Electric_Jagged
-		case .Smooth_Bezier:   nc_style = .Smooth_Bezier
-		}
-		nc.canvas_draw_wire(dl, p_out, p_in, c_u32, nc_style, 2.2, flow, _mat_graph.zoom, nil)
+		nc.canvas_draw_wire(dl, p_out, p_in, c_u32, nc.global_wire_style, 2.2, flow, _mat_graph.cv.zoom, nil)
 	}
 
 	for dst_n in _mat_graph.nodes {
@@ -6002,10 +6049,19 @@ _draw_visual_material_node_graph_tab :: proc() {
 		"Float (Scalar)", "Bool / Switch", "Vector2 (XY)", "Vector3 (XYZ)", "Vector4 (RGBA)",
 	}
 
-	// 3. Draw Each Node Card, Interactive Pins, and Controls
+	// 3. Draw Each Node Card, Interactive Pins, and Controls (Niagara Chrome + Zoom-Scaled Typography)
+	mat_pal := thm.palette()
+	mat_st  := im.GetStyle()
+	well_bg_m  := mat_pal.is_light ? thm.lerp_col(mat_pal.bg_canvas, {0, 0, 0, 1}, 0.04) : thm.lerp_col(mat_pal.bg_canvas, {0, 0, 0, 1}, 0.25)
 	for &n, n_idx in _mat_graph.nodes {
 		if n.kind == .Comment_Box do continue // Already drawn in background layer!
 		im.PushIDInt(n.id)
+		im.PushFontFloat(nil, clamp(mat_st.FontSizeBase * zm, 8.0, 36.0))
+		im.PushStyleVarImVec2(.FramePadding,     {5.0 * zm, 2.5 * zm})
+		im.PushStyleVarImVec2(.ItemSpacing,      {5.0 * zm, 3.5 * zm})
+		im.PushStyleVarImVec2(.ItemInnerSpacing, {4.0 * zm, 2.5 * zm})
+		im.PushStyleVar(.FrameRounding,          3.5 * zm)
+
 		sp  := node_screen_pos(n, canvas_p0)
 		bsz := node_card_size(n)
 		sz  := im.Vec2{bsz.x * zm, bsz.y * zm}
@@ -6030,8 +6086,15 @@ _draw_visual_material_node_graph_tab :: proc() {
 		case .Comment_Box:     hdr_col = {0.24, 0.40, 0.56, 1.0}; title = "Comment"
 		}
 
+		well_hov_m := thm.lerp_col(well_bg_m, hdr_col, 0.22)
+		well_act_m := thm.lerp_col(well_bg_m, hdr_col, 0.34)
+		im.PushStyleColorImVec4(.FrameBg,        well_bg_m)
+		im.PushStyleColorImVec4(.FrameBgHovered, well_hov_m)
+		im.PushStyleColorImVec4(.FrameBgActive,  well_act_m)
+
 		// Draggable Node Header evaluated BEFORE drawing card chrome so card, title, and pins share exact same-frame `sp`!
-		hdr_drag_w := sz.x if n.kind == .Material_Output else max(sz.x - 24.0 * zm, 20.0)
+		right_btn_pad := 24.0 * zm if n.kind == .Material_Output else 44.0 * zm
+		hdr_drag_w := max(sz.x - right_btn_pad, 20.0)
 		im.SetCursorScreenPos(sp)
 		im.InvisibleButton("##HdrDrag", {hdr_drag_w, hdr_h})
 		if im.IsItemClicked(.Left) {
@@ -6063,13 +6126,20 @@ _draw_visual_material_node_graph_tab :: proc() {
 			}
 		}
 
-		// Shared Faker-style high-contrast card chrome (drop shadow, dark body, top-rounded
-		// hue-scaled header, outer selection halo, and bright hue-tinted border)
+		// Unified Node Card Chrome behind foreground text, buttons & widgets
 		is_card_hov := io.MousePos.x >= sp.x && io.MousePos.x <= sp.x + sz.x && io.MousePos.y >= sp.y && io.MousePos.y <= sp.y + sz.y
-		nc.canvas_draw_card_chrome(dl, sp, {sp.x + sz.x, sp.y + sz.y}, hdr_h, hdr_col, is_sel, is_card_hov, zm, 6.0)
+		nc.canvas_draw_node_chrome(dl, sp, {sp.x + sz.x, sp.y + sz.y}, hdr_h, 0.0, hdr_col, is_sel, is_card_hov, true, zm)
 		im.DrawList_AddText(dl, {sp.x + 8.0 * zm, sp.y + 4.0 * zm}, im.ColorConvertFloat4ToU32({0.96, 0.97, 0.99, 1.0}), title)
 
-		// Delete `[X]` button in top-right of non-output nodes
+		// Collapse chevron (`v`/`>`) + Delete `[X]` button in top-right
+		coll_x := sp.x + sz.x - (22.0 * zm if n.kind == .Material_Output else 42.0 * zm)
+		im.SetCursorScreenPos({coll_x, sp.y + 3.0 * zm})
+		if im.InvisibleButton("##MatColl", {18.0 * zm, 18.0 * zm}) {
+			n.collapsed = !n.collapsed
+		}
+		chev_ic := n.collapsed ? cstring(icons.ICON_MD_CHEVRON_RIGHT) : cstring(icons.ICON_MD_EXPAND_MORE)
+		im.DrawList_AddText(dl, {coll_x + 3.0 * zm, sp.y + 4.0 * zm}, im.GetColorU32ImVec4(mat_pal.text_secondary), chev_ic)
+
 		if n.kind != .Material_Output {
 			im.SetCursorScreenPos({sp.x + sz.x - 22.0 * zm, sp.y + 2.0 * zm})
 			if im.SmallButton("X") {
@@ -6104,13 +6174,14 @@ _draw_visual_material_node_graph_tab :: proc() {
 			}
 		}
 
-		// Node Body Controls (indented by `18 * zm` so widgets never collide with Left/Right Pins!)
-		im.SetCursorScreenPos({sp.x + 18.0 * zm, sp.y + hdr_h + 6.0 * zm})
-		im.BeginGroup()
-		right_pad: f32 = 92.0 if n.kind == .Texture_Sample else 70.0
-		item_w := max((bsz.x - right_pad) * zm, 60.0)
-		im.PushItemWidth(item_w)
-		prev_dirty_before_node := _mat_graph.preview_dirty
+		// Node Body Controls (hidden when collapsed, keeping pins & wires anchored!)
+		if !n.collapsed {
+			im.SetCursorScreenPos({sp.x + 18.0 * zm, sp.y + hdr_h + 6.0 * zm})
+			im.BeginGroup()
+			right_pad: f32 = 92.0 if n.kind == .Texture_Sample else 70.0
+			item_w := max((bsz.x - right_pad) * zm, 60.0)
+			im.PushItemWidth(item_w)
+			prev_dirty_before_node := _mat_graph.preview_dirty
 
 		switch n.kind {
 		case .UV_Panner:
@@ -6297,11 +6368,15 @@ _draw_visual_material_node_graph_tab :: proc() {
 
 		im.PopItemWidth()
 		im.EndGroup()
+		} // end if !n.collapsed
+		im.PopStyleColor(3)
+		im.PopStyleVar(4)
+		im.PopFont()
 		im.PopID()
 		_ = n_idx
 	}
 
-	// 4. Marquee Box Drag Selection & Keyboard Shortcuts (`C` = Comment Box, `Delete`/`Backspace` = Delete Selected)
+	// 4. Marquee Box Drag Selection & Keyboard Shortcuts (`F` = Frame All, `C` = Comment Box, `Delete`/`Backspace` = Delete Selected)
 	if canvas_hovered && !_mat_graph.wire_dragging && !any_comment_or_node_active && hover_in_node_id == 0 && hover_out_node_id == 0 && !im.IsAnyItemHovered() && !im.IsAnyItemActive() {
 		if im.IsMouseClicked(.Left) {
 			if !io.KeyCtrl && !io.KeyShift {
@@ -6337,13 +6412,17 @@ _draw_visual_material_node_graph_tab :: proc() {
 	}
 
 	// Keyboard shortcuts when canvas is hovered and not typing in a text box:
+	// • `F` -> Frame All nodes
 	// • `C` -> Spawn Comment Box wrapping selected nodes (just like Unreal Engine!)
 	// • `Delete` or `Backspace` -> Delete all selected non-output nodes
 	if canvas_hovered && !io.WantTextInput {
+		if im.IsKeyPressed(.F, false) {
+			_frame_all_mat_nodes()
+		}
 		if im.IsKeyPressed(.C, false) {
 			spawn_p := [2]f32{
-				(io.MousePos.x - canvas_p0.x - _mat_graph.pan.x) / zm,
-				(io.MousePos.y - canvas_p0.y - _mat_graph.pan.y) / zm,
+				(io.MousePos.x - canvas_p0.x) / max(zm, 0.1) - _mat_graph.cv.pan.x,
+				(io.MousePos.y - canvas_p0.y) / max(zm, 0.1) - _mat_graph.cv.pan.y,
 			}
 			_ = _spawn_comment_box_for_selection(spawn_p)
 		}
@@ -6405,18 +6484,20 @@ _draw_visual_material_node_graph_tab :: proc() {
 		_ = _save_mat_graph_to_connected_mat(force_bake = false)
 	}
 
-	// Right-Click Context Menu on Empty Canvas Space to Add Nodes!
-	if canvas_hovered && hover_in_node_id == 0 && hover_out_node_id == 0 && !im.IsAnyItemHovered() && im.IsMouseReleased(.Right) && (io.MouseDelta.x * io.MouseDelta.x + io.MouseDelta.y * io.MouseDelta.y) < 4.0 {
-		_mat_graph.ctx_spawn_pos = {
-			(io.MousePos.x - canvas_p0.x - _mat_graph.pan.x) / zm,
-			(io.MousePos.y - canvas_p0.y - _mat_graph.pan.y) / zm,
-		}
-		im.OpenPopup("##CanvasAddNodePopup")
+	// Right-Click Context Menu via Shared `Node_Canvas` (MouseWheel zoom, RMB pan without popup, Comment + Wire Style)
+	if _mat_graph.wire_dragging || hover_in_node_id != 0 || hover_out_node_id != 0 {
+		_mat_graph.cv.rmb_pressed_in_canvas = false
 	}
-	if im.BeginPopup("##CanvasAddNodePopup") {
+	if nc.canvas_begin_context_menu(&_mat_graph.cv, nil, 0, true) {
+		_mat_graph.ctx_spawn_pos = {
+			(io.MousePos.x - canvas_p0.x) / max(zm, 0.1) - _mat_graph.cv.pan.x,
+			(io.MousePos.y - canvas_p0.y) / max(zm, 0.1) - _mat_graph.cv.pan.y,
+		}
 		im.TextColored({0.45, 0.88, 1.0, 1.0}, "Add Material Graph Node")
 		im.Separator()
 		_draw_add_mat_node_menu_items(_mat_graph.ctx_spawn_pos)
+		im.Separator()
+		nc.canvas_draw_default_context_menu_items(&_mat_graph.cv, nil, 0)
 		im.EndPopup()
 	}
 
@@ -6430,8 +6511,8 @@ _draw_visual_material_node_graph_tab :: proc() {
 				lo_d := strings.to_lower(dropped_p, context.temp_allocator)
 				if strings.has_suffix(lo_d, ".png") || strings.has_suffix(lo_d, ".jpg") || strings.has_suffix(lo_d, ".jpeg") || strings.has_suffix(lo_d, ".bmp") {
 					drop_pos := [2]f32{
-						(io.MousePos.x - canvas_p0.x - _mat_graph.pan.x) / zm,
-						(io.MousePos.y - canvas_p0.y - _mat_graph.pan.y) / zm,
+						(io.MousePos.x - canvas_p0.x) / max(zm, 0.1) - _mat_graph.cv.pan.x,
+						(io.MousePos.y - canvas_p0.y) / max(zm, 0.1) - _mat_graph.cv.pan.y,
 					}
 					_ = _spawn_mat_graph_node(.Texture_Sample, drop_pos, dropped_p)
 					_set_mat_graph_status(fmt.tprintf("Spawned Texture Sample node for '%s'!", filepath.base(dropped_p)))
@@ -6443,11 +6524,28 @@ _draw_visual_material_node_graph_tab :: proc() {
 		}
 	}
 
-	im.EndChild()
+	nc.canvas_end(&_mat_graph.cv, nil, 0)
 }
 
-@(editor_window={id="void_material_editor", title="Void Material Editor", icon="PALETTE", width=980, height=700})
+connect_material_editor_to_path :: proc(mat_path: string) {
+	_ensure_init()
+	_ensure_mat_graph_init()
+	if mat_path != "" {
+		_ = _connect_material_editor_to_mat(mat_path)
+	}
+}
+
+draw_material_graph_studio_embedded :: proc() {
+	_draw_void_material_editor_impl(true)
+}
+
+@(editor_window={id="void_material_editor", title="Material Shader Graph", icon="PALETTE", width=980, height=700})
 void_material_editor_window_draw :: proc() {
+	_draw_void_material_editor_impl(false)
+}
+
+@(private = "file")
+_draw_void_material_editor_impl :: proc(embedded_in_unified_studio: bool) {
 	_ensure_init()
 	_ensure_mat_graph_init()
 
@@ -6515,6 +6613,13 @@ void_material_editor_window_draw :: proc() {
 			_set_mat_graph_status("Selected 3D object has no .mat assigned yet (click 'Assign to Selected 3D Object' to assign).")
 		}
 	}
+	if !embedded_in_unified_studio {
+		im.SameLine()
+		if im.Button(fmt.ctprintf("%s Unified Graph Studio", icons.ICON_MD_ACCOUNT_TREE)) {
+			vs.open_unified_graph_domain(.Material_Shader, active_mat_path)
+		}
+		widgets.tooltip("Open Material Shader Graph inside the single Unified Graph Studio alongside Gameplay, Anim & Particle VFX domains")
+	}
 	im.SameLine()
 	if len(active_mat_path) > 0 {
 		if m_id, m_ok := _lookup_asset_guid_any_path(active_mat_path); m_ok {
@@ -6561,7 +6666,13 @@ void_material_editor_window_draw :: proc() {
 		im.TextColored({1.0, 0.78, 0.28, 1.0}, "No .mat file connected.")
 		im.TextWrapped("Select a .mat file in the dropdown above or click '+ New .mat'.")
 	} else {
-		engine.asset_db_request_refresh()
+		if active_mat_path != string(_last_refreshed_mat_buf[:_last_refreshed_mat_len]) {
+			engine.asset_db_request_refresh()
+			n_copy := min(len(active_mat_path), len(_last_refreshed_mat_buf))
+			if n_copy > 0 do copy(_last_refreshed_mat_buf[:n_copy], active_mat_path[:n_copy])
+			_last_refreshed_mat_len = n_copy
+			_cached_best_tex_mat_len = 0
+		}
 		if m_id, m_ok := _lookup_asset_guid_any_path(active_mat_path); m_ok {
 			mat_guid := engine.Asset_GUID(m_id)
 			if mat_ptr, l_ok := engine.material_load(mat_guid); l_ok && mat_ptr != nil {
@@ -6605,6 +6716,7 @@ void_material_editor_window_draw :: proc() {
 						lo_d := strings.to_lower(dropped_p, context.temp_allocator)
 						if strings.has_suffix(lo_d, ".png") || strings.has_suffix(lo_d, ".jpg") || strings.has_suffix(lo_d, ".jpeg") || strings.has_suffix(lo_d, ".bmp") {
 							engine.asset_db_request_refresh()
+							_cached_best_tex_mat_len = 0
 							if tid, tok := _lookup_asset_guid_any_path(dropped_p); tok {
 								mat_val.texture = engine.Asset_GUID(tid)
 								mat_changed = true
@@ -6651,8 +6763,17 @@ void_material_editor_window_draw :: proc() {
 					}
 				}
 
-				// One-click Auto-Detect Matching Texture in Folder button
-				best_folder_tex := _find_best_matching_texture_in_folder(active_mat_path, context.temp_allocator)
+				// One-click Auto-Detect Matching Texture in Folder (cached per active_mat_path, zero per-frame disk scan!)
+				if active_mat_path != string(_cached_best_tex_mat_buf[:_cached_best_tex_mat_len]) {
+					bt := _find_best_matching_texture_in_folder(active_mat_path, context.temp_allocator)
+					nm := min(len(active_mat_path), len(_cached_best_tex_mat_buf))
+					if nm > 0 do copy(_cached_best_tex_mat_buf[:nm], active_mat_path[:nm])
+					_cached_best_tex_mat_len = nm
+					nr := min(len(bt), len(_cached_best_tex_res_buf))
+					if nr > 0 do copy(_cached_best_tex_res_buf[:nr], bt[:nr])
+					_cached_best_tex_res_len = nr
+				}
+				best_folder_tex := string(_cached_best_tex_res_buf[:_cached_best_tex_res_len])
 				if len(best_folder_tex) > 0 {
 					if im.Button(fmt.ctprintf("Auto-Fix Texture (%s)", filepath.base(best_folder_tex)), {-1, 23}) {
 						if tid, tok := _lookup_asset_guid_any_path(best_folder_tex); tok {
@@ -6802,4 +6923,61 @@ void_material_editor_window_draw :: proc() {
 void_material_editor_window_open :: proc() {
 	wnd.open("void_material_editor")
 }
+
+// Returns the active Void File Explorer directory mapped into asset-DB space
+// (e.g. "assets/..." or "packages/<pkg>/assets/..."), defaulting to "assets".
+fe_active_asset_dir :: proc() -> string {
+	rel := _to_asset_db_path(_get_current_dir(), context.temp_allocator)
+	if strings.has_prefix(rel, "assets") || strings.has_prefix(rel, "packages/") {
+		return rel
+	}
+	return "assets"
+}
+
+// Returns the currently selected item in Void File Explorer mapped into asset-DB space.
+fe_selected_asset_path :: proc() -> string {
+	if !_has_selection do return ""
+	rel := _to_asset_db_path(_get_selected_path(), context.temp_allocator)
+	if strings.has_prefix(rel, "assets") || strings.has_prefix(rel, "packages/") {
+		return rel
+	}
+	return ""
+}
+
+// Navigates Void File Explorer to the folder containing `asset_db_path` and optionally selects it.
+fe_reveal_asset_path :: proc(asset_db_path: string, select_item: bool) {
+	if asset_db_path == "" do return
+	disk_path := ""
+	if strings.has_prefix(asset_db_path, "packages/") {
+		cand := file_exp.resolve_workspace_path(fmt.tprintf("plugins/%s", strings.trim_prefix(asset_db_path, "packages/")), context.temp_allocator)
+		if os.exists(cand) {
+			disk_path = cand
+		} else {
+			cand = file_exp.resolve_workspace_path(fmt.tprintf("haati/%s", asset_db_path), context.temp_allocator)
+			if os.exists(cand) do disk_path = cand
+		}
+	} else if strings.has_prefix(asset_db_path, "assets") {
+		cand := file_exp.resolve_workspace_path(fmt.tprintf("haati/%s", asset_db_path), context.temp_allocator)
+		if os.exists(cand) do disk_path = cand
+	} else {
+		cand := file_exp.resolve_workspace_path(asset_db_path, context.temp_allocator)
+		if os.exists(cand) do disk_path = cand
+	}
+	if disk_path == "" do return
+	parent := disk_path if os.is_dir(disk_path) else filepath.dir(disk_path)
+	if parent != "" {
+		_set_current_dir(parent, true)
+		_needs_refresh = true
+	}
+	if select_item {
+		for p in _selected_paths do delete(p)
+		clear(&_selected_paths)
+		append(&_selected_paths, strings.clone(disk_path))
+		_selected_path_len = copy(_selected_path_buf[:], disk_path)
+		_selected_name_len = copy(_selected_name_buf[:], filepath.base(disk_path))
+		_selected_type_len = copy(_selected_type_buf[:], "Asset")
+		_has_selection = true
+	}
+}
+
 

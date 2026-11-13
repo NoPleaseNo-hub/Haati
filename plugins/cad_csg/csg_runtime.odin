@@ -10,11 +10,11 @@ import "core:math/linalg"
 import "core:sync"
 import "core:thread"
 import "core:time"
-import jolt "moonhug:external/jolt"
-import engine "moonhug:engine"
-import gfx "moonhug:engine/gfx"
-import "moonhug:engine/gizmos"
-import physics3d "moonhug:packages/physics3d"
+import jolt "haati:external/jolt"
+import engine "haati:engine"
+import gfx "haati:engine/gfx"
+import "haati:engine/gizmos"
+import physics3d "haati:packages/physics3d"
 
 // ============================================================================
 // PROJECT SETTINGS (`Edit -> Project Settings -> CAD & Destructible CSG`)
@@ -278,10 +278,6 @@ csg_volume_free_runtime :: proc(vol: ^CSGVolume, clear_recorded_blasts := false)
 		engine.mesh_remove_procedural(vol.mesh_guid)
 		vol.mesh_guid = {}
 	}
-	if !engine.asset_guid_is_empty(vol.shadow_mesh_guid) {
-		engine.mesh_remove_procedural(vol.shadow_mesh_guid)
-		vol.shadow_mesh_guid = {}
-	}
 	vol.compiled = false
 	vol.gpu_dirty = false
 	if w := engine.ctx_world(); w != nil && physics3d._state.world_ready {
@@ -454,9 +450,6 @@ _ensure_volume_guids :: proc(vol: ^CSGVolume) {
 	if engine.asset_guid_is_empty(vol.mesh_guid) {
 		vol.mesh_guid = make_procedural_guid(vol.owner, 0)
 	}
-	if engine.asset_guid_is_empty(vol.shadow_mesh_guid) {
-		vol.shadow_mesh_guid = make_procedural_guid(vol.owner, 1)
-	}
 	// If a legacy scene attached a MeshFilter with a transient "CSG!" GUID, clear it
 	// so `_collect_mesh_renderers` never attempts a failed disk lookup on `library/`.
 	w := engine.ctx_world()
@@ -468,219 +461,6 @@ _ensure_volume_guids :: proc(vol: ^CSGVolume) {
 			}
 		}
 	}
-}
-
-CSG_Shadow_Light :: struct {
-	valid:      bool,
-	kind:       engine.Light_Type,
-	world_pos:  [3]f32,
-	to_light:   [3]f32, // unit vector pointing TOWARD the light (for directional/spot)
-	forward:    [3]f32, // unit vector pointing ALONG the light's shine direction (-Z)
-	outer_cos:  f32,    // cosine of half spot_angle (for spot light cone check)
-	range:      f32,
-	intensity:  f32,
-	ambient:    f32,
-	strength:   f32,
-	ground_y:   f32,
-	signature:  u64,
-}
-
-@(private = "file")
-_last_shadow_light_sig: u64
-@(private = "file")
-_scene_props_shadow_guid: engine.Asset_GUID
-
-// Collects ALL active `engine.Light` objects in the scene with `cast_shadows == true`.
-// Supports simultaneous `.Directional`, `.Spot`, and `.Point` lights (each respecting its `range` and cone!).
-@(private = "file")
-_resolve_scene_shadow_lights :: proc(alloc := context.temp_allocator) -> (lights: [dynamic]CSG_Shadow_Light, combined_sig: u64) {
-	lights = make([dynamic]CSG_Shadow_Light, 0, 8, alloc)
-	w := engine.ctx_world()
-	if w == nil do return
-
-	hash_f32 :: #force_inline proc(h: u64, v: f32) -> u64 {
-		q := i32(math.round(v * 200.0))
-		return (h ~ u64(u32(q))) * 1099511628211
-	}
-	combined_sig = 14695981039346656037
-
-	it := engine.pool_iterator(engine.lights(w))
-	for l, _ in engine.pool_next(&it) {
-		if !l.enabled || !l.cast_shadows || l.intensity <= 0.01 do continue
-		if !engine.transform_active_in_hierarchy(l.owner) do continue
-
-		tw := engine.transform_world(engine.Transform_Handle(l.owner))
-		rot := engine.quat_to_matrix3(tw.rotation)
-		fwd := linalg.normalize0([3]f32{-rot[0, 2], -rot[1, 2], -rot[2, 2]})
-		to_l := -fwd
-		if to_l.y < -0.08 {
-			to_l = -to_l
-		} else if abs(to_l.y) <= 0.08 {
-			to_l = linalg.normalize0([3]f32{to_l.x, 0.65, to_l.z})
-		}
-
-		sl := CSG_Shadow_Light{
-			valid     = true,
-			kind      = l.type,
-			world_pos = tw.position,
-			to_light  = to_l,
-			forward   = fwd,
-			outer_cos = math.cos(math.to_radians(max(l.spot_angle, l.inner_spot_angle)) * 0.5),
-			range     = max(l.range, 1.0),
-			intensity = max(l.intensity, 0.05),
-			ambient   = clamp(l.ambient, 0.05, 0.85),
-			strength  = clamp(l.shadow_strength if l.shadow_strength > 0.01 else 0.72, 0.05, 1.0),
-			ground_y  = l.shadow_ground_y,
-		}
-
-		h: u64 = 14695981039346656037
-		h = (h ~ u64(l.type)) * 1099511628211
-		h = hash_f32(h, sl.world_pos.x)
-		h = hash_f32(h, sl.world_pos.y)
-		h = hash_f32(h, sl.world_pos.z)
-		h = hash_f32(h, sl.to_light.x)
-		h = hash_f32(h, sl.to_light.y)
-		h = hash_f32(h, sl.to_light.z)
-		h = hash_f32(h, sl.range)
-		h = hash_f32(h, sl.intensity)
-		h = hash_f32(h, sl.strength)
-		h = hash_f32(h, sl.ground_y)
-		sl.signature = h
-		combined_sig = (combined_sig ~ h) * 1099511628211
-
-		append(&lights, sl)
-	}
-	return
-}
-
-// Primary directional/dominant light helper for vertex self-shadowing
-@(private = "file")
-_resolve_scene_shadow_light :: proc() -> (res: CSG_Shadow_Light) {
-	lights, sig := _resolve_scene_shadow_lights(context.temp_allocator)
-	if len(lights) == 0 do return
-	best_idx := 0
-	for l, i in lights {
-		if l.kind == .Directional {
-			best_idx = i
-			break
-		}
-	}
-	res = lights[best_idx]
-	res.signature = sig
-	return
-}
-
-// Returns true if a world-space point `world_pt` is within `light.range` (and spot cone for Spot lights).
-@(private = "file")
-_light_reaches_world_point :: #force_inline proc(light: CSG_Shadow_Light, world_pt: [3]f32) -> bool {
-	if !light.valid do return false
-	if light.kind == .Directional do return true
-	diff := world_pt - light.world_pos
-	dist2 := linalg.length2(diff)
-	if dist2 > light.range * light.range do return false
-	if light.kind == .Spot && dist2 > 1e-4 {
-		dir := diff / math.sqrt(dist2)
-		if linalg.dot(dir, light.forward) < light.outer_cos - 0.15 do return false
-	}
-	return true
-}
-
-// Projects a single vertex `pos` onto `y = ground_y` for Directional, Point, or Spot lights.
-@(private = "file")
-_project_vertex_to_shadow_plane :: #force_inline proc(pos: [3]f32, ground_y, y_eps: f32, light: CSG_Shadow_Light) -> [3]f32 {
-	h := max(pos.y - ground_y, 0.0)
-	if light.kind == .Directional {
-		inv_ly := 1.0 / max(light.to_light.y, 0.18)
-		return {
-			pos.x - light.to_light.x * h * inv_ly,
-			y_eps,
-			pos.z - light.to_light.z * h * inv_ly,
-		}
-	}
-	// Point or Spot light: radial perspective projection from `light.world_pos` through `pos` onto `y = ground_y`
-	dy := max(light.world_pos.y - pos.y, 0.20)
-	t_proj := clamp(h / dy, 0.0, 4.5)
-	proj_x := pos.x + (pos.x - light.world_pos.x) * t_proj
-	proj_z := pos.z + (pos.z - light.world_pos.z) * t_proj
-	// Clamp projected shadow extent to `light.range` from the light's XZ position
-	dx := proj_x - light.world_pos.x
-	dz := proj_z - light.world_pos.z
-	d_xz := math.sqrt(dx * dx + dz * dz)
-	max_r := max(light.range * 1.15, 1.5)
-	if d_xz > max_r && d_xz > 1e-4 {
-		scale := max_r / d_xz
-		proj_x = light.world_pos.x + dx * scale
-		proj_z = light.world_pos.z + dz * scale
-	}
-	return {proj_x, y_eps, proj_z}
-}
-
-// Evaluates the floor illumination contribution of `light` at world-space floor point `world_pt`,
-// matching the exact attenuation curve of `lit.frag` (`a = clamp(1 - (d/R)^2, 0, 1); a *= a`).
-@(private = "file")
-_eval_light_floor_illum :: #force_inline proc(light: CSG_Shadow_Light, world_pt: [3]f32) -> f32 {
-	if !light.valid do return 0.0
-	if light.kind == .Directional {
-		ndotl := max(light.to_light.y, 0.15)
-		return light.intensity * ndotl
-	}
-	diff := world_pt - light.world_pos
-	dist2 := linalg.length2(diff)
-	r := max(light.range, 0.001)
-	if dist2 >= r * r do return 0.0
-	dist := math.sqrt(dist2)
-	ratio := dist / r
-	a := clamp(1.0 - ratio * ratio, 0.0, 1.0)
-	atten := a * a
-	if light.kind == .Spot && dist > 1e-4 {
-		dir := diff / dist
-		cos_a := linalg.dot(dir, light.forward)
-		atten *= clamp((cos_a - light.outer_cos) / 0.15, 0.0, 1.0)
-	}
-	ndotl := clamp(-diff.y / max(dist, 0.001), 0.15, 1.0)
-	return light.intensity * ndotl * atten
-}
-
-// Cheap analytical multi-light shadow washout & additive light ratio at floor point `world_pt`:
-// Because `lit.frag` multiplies vertex color by `I_total(p) = ambient + (1 - ambient) * sum(I_i(p))`,
-// when Light `caster_idx` is blocked while other lights `j != caster_idx` directly illuminate `world_pt`,
-// an opposing light washes out / kills the shadow (`drop -> 0`) instead of leaving a dark shadow under the opposing light!
-@(private = "file")
-_eval_shadow_vertex_color :: proc(
-	lights:     []CSG_Shadow_Light,
-	caster_idx: int,
-	world_pt:   [3]f32,
-) -> (col: [4]u8, drop_strength: f32) {
-	if caster_idx < 0 || caster_idx >= len(lights) {
-		return {38, 40, 48, 255}, 0.5
-	}
-	caster := lights[caster_idx]
-	caster_illum := _eval_light_floor_illum(caster, world_pt)
-	if caster_illum <= 0.005 {
-		return {145, 152, 164, 255}, 0.0
-	}
-
-	other_illum: f32 = 0.0
-	for ol, idx in lights {
-		if idx == caster_idx || !ol.valid do continue
-		other_illum += _eval_light_floor_illum(ol, world_pt)
-	}
-
-	ambient := caster.ambient
-	total_illum := max(ambient + (1.0 - ambient) * (caster_illum + other_illum), 0.05)
-
-	// Fraction of total floor light lost when `caster` is occluded, weighted by opposing-light washout
-	blocked_frac := ((1.0 - ambient) * caster_illum * caster.strength) / total_illum
-	washout      := caster_illum / max(caster_illum + 1.35 * other_illum, 0.001)
-	drop_strength = clamp(blocked_frac * washout, 0.0, 0.85)
-
-	// Base lit floor neutral albedo is ~{145, 152, 164}; scale down by `(1.0 - drop_strength)`
-	// so `lit.frag` (`out = color * I_total`) reproduces `floor_albedo * (I_total - I_caster)`!
-	keep := clamp(1.0 - drop_strength, 0.16, 1.0)
-	r_u8 := u8(clamp(145.0 * keep, 16.0, 148.0))
-	g_u8 := u8(clamp(152.0 * keep, 18.0, 155.0))
-	b_u8 := u8(clamp(164.0 * keep, 22.0, 168.0))
-	return {r_u8, g_u8, b_u8, 255}, drop_strength
 }
 
 // ============================================================================
@@ -934,87 +714,7 @@ csg_clip_shadow_tri_to_receiver :: proc(
 	}
 }
 
-// Clips a world-space projected shadow triangle `(p0_w, p1_w, p2_w)` against `receivers` and appends
-// the surviving floor-clamped shadow triangles to `sh_verts` and `sh_inds`.
-// If no ground receiver exists underneath, emits nothing (preventing floating mid-air shadows!).
-@(private = "file")
-_clip_and_emit_shadow_triangle :: proc(
-	p0_w, p1_w, p2_w: [3]f32,
-	out_offset:       [3]f32,
-	y_layer_step:     f32,
-	receivers:        []CSG_Ground_Receiver,
-	lights:           []CSG_Shadow_Light,
-	l_idx:            int,
-	sh_verts:         ^[dynamic]gfx.Vertex,
-	sh_inds:          ^[dynamic]u32,
-	poly_a:           ^[dynamic][3]f32,
-	poly_b:           ^[dynamic][3]f32,
-) {
-	if len(receivers) == 0 do return
-
-	t_min_x := min(p0_w.x, min(p1_w.x, p2_w.x))
-	t_max_x := max(p0_w.x, max(p1_w.x, p2_w.x))
-	t_min_z := min(p0_w.z, min(p1_w.z, p2_w.z))
-	t_max_z := max(p0_w.z, max(p1_w.z, p2_w.z))
-
-	for r in receivers {
-		if t_max_x <= r.min_xz.x + 1e-3 || t_min_x >= r.max_xz.x - 1e-3 ||
-		   t_max_z <= r.min_xz.y + 1e-3 || t_min_z >= r.max_xz.y - 1e-3 {
-			continue
-		}
-
-		// Fast Path: triangle is 100% inside a rectangular floor receiver
-		if r.plane_count == 0 &&
-		   t_min_x >= r.min_xz.x && t_max_x <= r.max_xz.x &&
-		   t_min_z >= r.min_xz.y && t_max_z <= r.max_xz.y {
-			y_use := max(p0_w.y, r.top_y + y_layer_step)
-			q0 := [3]f32{p0_w.x, y_use, p0_w.z}
-			q1 := [3]f32{p1_w.x, y_use, p1_w.z}
-			q2 := [3]f32{p2_w.x, y_use, p2_w.z}
-			c0, d0 := _eval_shadow_vertex_color(lights, l_idx, q0)
-			c1, d1 := _eval_shadow_vertex_color(lights, l_idx, q1)
-			c2, d2 := _eval_shadow_vertex_color(lights, l_idx, q2)
-			if max(d0, max(d1, d2)) >= 0.10 {
-				bv := u32(len(sh_verts))
-				append(sh_verts,
-					gfx.Vertex{position = q0 + out_offset, normal = {0, 1, 0}, uv = {0, 0}, color = c0},
-					gfx.Vertex{position = q1 + out_offset, normal = {0, 1, 0}, uv = {0, 0}, color = c1},
-					gfx.Vertex{position = q2 + out_offset, normal = {0, 1, 0}, uv = {0, 0}, color = c2},
-				)
-				append(sh_inds, bv, bv + 1, bv + 2)
-			}
-			return
-		}
-
-		// Clip Path: slice shadow triangle against the exact boundary planes of `r`
-		csg_clip_shadow_tri_to_receiver(p0_w, p1_w, p2_w, r, y_layer_step, poly_a, poly_b)
-		if len(poly_a) < 3 || polygon_area(poly_a[:]) <= 1e-4 do continue
-
-		max_d: f32 = 0
-		bv := u32(len(sh_verts))
-		for pt in poly_a^ {
-			col, d := _eval_shadow_vertex_color(lights, l_idx, pt)
-			max_d = max(max_d, d)
-			append(sh_verts, gfx.Vertex{
-				position = pt + out_offset,
-				normal   = {0, 1, 0},
-				uv       = {0, 0},
-				color    = col,
-			})
-		}
-		if max_d < 0.10 {
-			resize(sh_verts, int(bv))
-			continue
-		}
-		tri_n := u32(len(poly_a) - 2)
-		for k in 0 ..< tri_n {
-			append(sh_inds, bv, bv + k + 1, bv + k + 2)
-		}
-	}
-}
-
-// Repacks all chunks' cached vertex and index arrays into `vol.mesh_guid` and builds
-// the real-time projected planar shadow mesh (`vol.shadow_mesh_guid`) driven by ALL active shadow-casting `Light`s.
+// Repacks all chunks' cached vertex and index arrays into `vol.mesh_guid` (shadows use the GPU shadow atlas).
 // Safe to call during `csg_render_collector` (before draw calls are encoded for the frame)
 // or in headless unit tests.
 csg_volume_upload_gpu_now :: proc(vol: ^CSGVolume) {
@@ -1051,8 +751,7 @@ csg_volume_upload_gpu_now :: proc(vol: ^CSGVolume) {
 	dg_guid := make_detail_and_glass_guid(vol.owner)
 	dg_verts := make([dynamic]gfx.Vertex, 0, 256, context.temp_allocator)
 	dg_indices := make([dynamic]u32, 0, 512, context.temp_allocator)
-	sun_light := _resolve_scene_shadow_light()
-	sun_vec := sun_light.to_light if (sun_light.valid && sun_light.kind == .Directional) else [3]f32{0, 0, 0}
+	sun_vec := [3]f32{0, 0, 0}
 	if len(vol.detail_instances) > 0 {
 		_append_detail_instances_and_glass_to_gpu_mesh(vol, &dg_verts, &dg_indices, sun_vec, include_glass = false)
 	}
@@ -1084,7 +783,6 @@ csg_volume_upload_gpu_now :: proc(vol: ^CSGVolume) {
 
 	if (total_v == 0 || total_i == 0) && len(dg_verts) == 0 {
 		engine.mesh_remove_procedural(vol.mesh_guid)
-		engine.mesh_remove_procedural(vol.shadow_mesh_guid)
 		return
 	}
 
@@ -1144,293 +842,6 @@ csg_volume_upload_gpu_now :: proc(vol: ^CSGVolume) {
 	}
 
 	engine.mesh_upsert_procedural(vol.mesh_guid, all_verts[:], all_indices[:], all_submeshes[:], keep_cpu_buffers = false)
-
-	// Build Projected Planar Drop Shadow Mesh from ALL active `Light` components (`cast_shadows == true`) in range,
-	// clipped strictly against actual ground/floor receiver surfaces (`csg_collect_ground_receivers`) so shadows
-	// never float in empty air when there is no floor underneath!
-	// Optimization: Only project `slot == 0` outer shell triangles (never `slot == 1` interior crater micro-triangles!)
-	// and cap per-light projected triangles at 384 so rapid-fire voxel blasts stay 100% stutter-free!
-	lights, _ := _resolve_scene_shadow_lights(context.temp_allocator)
-	if vol.cast_planar_shadows && !vol.is_dynamic_rigidbody && len(lights) > 0 {
-		tw_vol := engine.transform_world(vol.owner)
-		vol_offset := tw_vol.position
-		outer_idx_cnt := int(all_submeshes[0].index_count) if len(all_submeshes) > 0 else len(all_indices)
-		tri_count := min(outer_idx_cnt / 3, len(all_indices) / 3)
-		tri_step  := max(tri_count / 384, 1)
-
-		sh_verts := make([dynamic]gfx.Vertex, 0, min(tri_count, 384) * 3, context.temp_allocator)
-		sh_inds  := make([dynamic]u32, 0, min(tri_count, 384) * 3, context.temp_allocator)
-		poly_a   := make([dynamic][3]f32, 0, 16, context.temp_allocator)
-		poly_b   := make([dynamic][3]f32, 0, 16, context.temp_allocator)
-
-		for light, l_idx in lights {
-			ground_y := vol.ground_y if abs(light.ground_y) < 1e-4 else light.ground_y
-			receivers, _ := csg_collect_ground_receivers(ground_y, context.temp_allocator)
-			if len(receivers) == 0 do continue // No ground surface at `ground_y` -> do not project shadows into empty air!
-
-			// Slight per-light height step (1.2mm) prevents Z-fighting when multiple lights' shadows overlap!
-			y_step   := 0.015 + f32(l_idx) * 0.0012
-			shadow_y := ground_y + y_step
-
-			// Transform light position into volume-local space for range & projection checks
-			local_light := light
-			local_light.world_pos = light.world_pos - vol_offset
-
-			for ti := 0; ti < tri_count; ti += tri_step {
-				v0 := all_verts[all_indices[ti * 3 + 0]]
-				v1 := all_verts[all_indices[ti * 3 + 1]]
-				v2 := all_verts[all_indices[ti * 3 + 2]]
-
-				max_y := max(v0.position.y, max(v1.position.y, v2.position.y))
-				if max_y <= ground_y + 0.12 do continue
-				if v0.normal.y < -0.15 do continue
-
-				tri_mid := (v0.position + v1.position + v2.position) * (1.0 / 3.0)
-				if !_light_reaches_world_point(local_light, tri_mid) do continue
-
-				to_l := local_light.to_light if local_light.kind == .Directional else linalg.normalize0(local_light.world_pos - tri_mid)
-				if linalg.dot(v0.normal, to_l) < 0.02 do continue
-
-				p0 := _project_vertex_to_shadow_plane(v0.position, ground_y, shadow_y, local_light)
-				p1 := _project_vertex_to_shadow_plane(v1.position, ground_y, shadow_y, local_light)
-				p2 := _project_vertex_to_shadow_plane(v2.position, ground_y, shadow_y, local_light)
-
-				cr := linalg.cross(p1 - p0, p2 - p0)
-				if abs(cr.y) < 1e-4 do continue
-				if cr.y < 0 {
-					p1, p2 = p2, p1
-				}
-
-				_clip_and_emit_shadow_triangle(
-					p0 + vol_offset,
-					p1 + vol_offset,
-					p2 + vol_offset,
-					-vol_offset,
-					y_step,
-					receivers[:],
-					lights[:],
-					l_idx,
-					&sh_verts,
-					&sh_inds,
-					&poly_a,
-					&poly_b,
-				)
-			}
-		}
-
-		if len(sh_verts) >= 3 && len(sh_inds) >= 3 {
-			engine.mesh_upsert_procedural(vol.shadow_mesh_guid, sh_verts[:], sh_inds[:], nil, keep_cpu_buffers = false)
-		} else {
-			engine.mesh_remove_procedural(vol.shadow_mesh_guid)
-		}
-	} else {
-		engine.mesh_remove_procedural(vol.shadow_mesh_guid)
-	}
-}
-
-// Projects real-time planar shadows for `MeshRenderer` and `SkinnedMeshRenderer` objects in the scene
-// across ALL active `engine.Light`s with `cast_shadows == true` that are within `light.range`,
-// clipped strictly against actual ground/floor receiver surfaces (`csg_collect_ground_receivers`)!
-@(private = "file")
-_collect_standard_mesh_shadows :: proc(w: ^engine.World, view: engine.Render_View, lights: []CSG_Shadow_Light, out: ^[dynamic]engine.Render_Command) {
-	if len(lights) == 0 do return
-	if engine.asset_guid_is_empty(_scene_props_shadow_guid) {
-		raw: [16]u8 = {0x43, 0x53, 0x47, 0x21, 0x53, 0x48, 0x44, 0x57, 1, 2, 3, 4, 5, 6, 7, 8}
-		_scene_props_shadow_guid = transmute(engine.Asset_GUID)raw
-	}
-
-	sh_verts := make([dynamic]gfx.Vertex, 0, 512, context.temp_allocator)
-	sh_inds  := make([dynamic]u32, 0, 512, context.temp_allocator)
-	poly_a   := make([dynamic][3]f32, 0, 16, context.temp_allocator)
-	poly_b   := make([dynamic][3]f32, 0, 16, context.temp_allocator)
-	first_owner: engine.Transform_Handle
-
-	for light, l_idx in lights {
-		if !light.valid do continue
-		ground_y := light.ground_y
-		receivers, _ := csg_collect_ground_receivers(ground_y, context.temp_allocator)
-		if len(receivers) == 0 do continue // No floor receiver in scene -> do not emit shadows into empty air!
-
-		y_step   := 0.015 + f32(l_idx) * 0.0012
-		shadow_y := ground_y + y_step
-
-		// 1. Standard MeshRenderer + MeshFilter objects (`mr.cast_shadows == true`)
-		mr_it := engine.pool_iterator(engine.mesh_renderers(w))
-		for mr, _ in engine.pool_next(&mr_it) {
-			if !mr.enabled || !mr.cast_shadows do continue
-			owner_h := engine.Transform_Handle(mr.owner)
-			t := engine.pool_get(&w.transforms, engine.Handle(owner_h))
-			if t == nil || !engine.transform_active_in_hierarchy(owner_h) do continue
-			if t.render_layer & view.layer_mask == 0 do continue
-			if _, has_csg := engine.transform_get_comp(owner_h, CSGVolume); has_csg != nil do continue
-			_, mf := engine.transform_get_comp(owner_h, engine.MeshFilter)
-			if mf == nil || engine.asset_guid_is_empty(mf.mesh.guid) do continue
-			mesh, ok := engine.mesh_load_filter(mf)
-			if !ok do continue
-
-			tw := engine.transform_world(owner_h)
-			model := engine.trs_matrix(tw.position, tw.rotation, tw.scale)
-			lo := mesh.aabb_min
-			hi := mesh.aabb_max
-			c_local := (lo + hi) * 0.5
-			c_world := (model * [4]f32{c_local.x, c_local.y, c_local.z, 1.0}).xyz
-			if !_light_reaches_world_point(light, c_world) do continue
-
-			// If CPU triangles are available (e.g. Editable CAD Meshes, Torus, Car, etc.), project exact triangles!
-			if len(mesh.bind_vertices) >= 3 && len(mesh.bind_indices) >= 3 && len(mesh.bind_indices) <= 3600 {
-				if first_owner == {} do first_owner = owner_h
-				tri_n := len(mesh.bind_indices) / 3
-				for ti in 0 ..< tri_n {
-					v0 := mesh.bind_vertices[mesh.bind_indices[ti * 3 + 0]].position
-					v1 := mesh.bind_vertices[mesh.bind_indices[ti * 3 + 1]].position
-					v2 := mesh.bind_vertices[mesh.bind_indices[ti * 3 + 2]].position
-					w0 := (model * [4]f32{v0.x, v0.y, v0.z, 1.0}).xyz
-					w1 := (model * [4]f32{v1.x, v1.y, v1.z, 1.0}).xyz
-					w2 := (model * [4]f32{v2.x, v2.y, v2.z, 1.0}).xyz
-					if max(w0.y, max(w1.y, w2.y)) <= ground_y + 0.08 do continue
-					n_tri := linalg.normalize0(linalg.cross(w1 - w0, w2 - w0))
-					to_l := light.to_light if light.kind == .Directional else linalg.normalize0(light.world_pos - w0)
-					if linalg.dot(n_tri, to_l) < 0.01 do continue
-
-					p0 := _project_vertex_to_shadow_plane(w0, ground_y, shadow_y, light)
-					p1 := _project_vertex_to_shadow_plane(w1, ground_y, shadow_y, light)
-					p2 := _project_vertex_to_shadow_plane(w2, ground_y, shadow_y, light)
-					cr := linalg.cross(p1 - p0, p2 - p0)
-					if abs(cr.y) < 1e-4 do continue
-					if cr.y < 0 do p1, p2 = p2, p1
-
-					_clip_and_emit_shadow_triangle(
-						p0, p1, p2,
-						{0, 0, 0},
-						y_step,
-						receivers[:],
-						lights[:],
-						l_idx,
-						&sh_verts,
-						&sh_inds,
-						&poly_a,
-						&poly_b,
-					)
-				}
-				continue
-			}
-
-			corners_local := [8][3]f32{
-				{lo.x, lo.y, lo.z}, {hi.x, lo.y, lo.z}, {hi.x, hi.y, lo.z}, {lo.x, hi.y, lo.z},
-				{lo.x, lo.y, hi.z}, {hi.x, lo.y, hi.z}, {hi.x, hi.y, hi.z}, {lo.x, hi.y, hi.z},
-			}
-			cw: [8][3]f32
-			max_y: f32 = -1e9
-			for c, k in corners_local {
-				w4 := model * [4]f32{c.x, c.y, c.z, 1.0}
-				cw[k] = w4.xyz
-				max_y = max(max_y, w4.y)
-			}
-			if max_y <= ground_y + 0.12 do continue
-			if first_owner == {} do first_owner = owner_h
-
-			box_tris := [10][3]int{
-				{3, 2, 6}, {3, 6, 7}, // Top (+Y)
-				{0, 1, 2}, {0, 2, 3}, // Back (-Z)
-				{4, 6, 5}, {4, 7, 6}, // Front (+Z)
-				{0, 3, 7}, {0, 7, 4}, // Left (-X)
-				{1, 5, 6}, {1, 6, 2}, // Right (+X)
-			}
-			for tri in box_tris {
-				w0 := cw[tri[0]]
-				w1 := cw[tri[1]]
-				w2 := cw[tri[2]]
-				n_tri := linalg.normalize0(linalg.cross(w1 - w0, w2 - w0))
-				to_l := light.to_light if light.kind == .Directional else linalg.normalize0(light.world_pos - w0)
-				if linalg.dot(n_tri, to_l) < 0.02 do continue
-
-				p0 := _project_vertex_to_shadow_plane(w0, ground_y, shadow_y, light)
-				p1 := _project_vertex_to_shadow_plane(w1, ground_y, shadow_y, light)
-				p2 := _project_vertex_to_shadow_plane(w2, ground_y, shadow_y, light)
-				cr := linalg.cross(p1 - p0, p2 - p0)
-				if abs(cr.y) < 1e-4 do continue
-				if cr.y < 0 do p1, p2 = p2, p1
-
-				_clip_and_emit_shadow_triangle(
-					p0, p1, p2,
-					{0, 0, 0},
-					y_step,
-					receivers[:],
-					lights[:],
-					l_idx,
-					&sh_verts,
-					&sh_inds,
-					&poly_a,
-					&poly_b,
-				)
-			}
-		}
-
-		// 2. SkinnedMeshRenderer objects (`smr.cast_shadows == true`)
-		smr_it := engine.pool_iterator(engine.skinned_mesh_renderers(w))
-		for smr, _ in engine.pool_next(&smr_it) {
-			if !smr.enabled || !smr.cast_shadows || !smr.posed_ok do continue
-			owner_h := engine.Transform_Handle(smr.owner)
-			t := engine.pool_get(&w.transforms, engine.Handle(owner_h))
-			if t == nil || !engine.transform_active_in_hierarchy(owner_h) do continue
-			if t.render_layer & view.layer_mask == 0 do continue
-
-			lo := smr.posed_min
-			hi := smr.posed_max
-			if hi.y <= ground_y + 0.12 do continue
-			c_world := (lo + hi) * 0.5
-			if !_light_reaches_world_point(light, c_world) do continue
-			if first_owner == {} do first_owner = owner_h
-
-			cw := [8][3]f32{
-				{lo.x, lo.y, lo.z}, {hi.x, lo.y, lo.z}, {hi.x, hi.y, lo.z}, {lo.x, hi.y, lo.z},
-				{lo.x, lo.y, hi.z}, {hi.x, lo.y, hi.z}, {hi.x, hi.y, hi.z}, {lo.x, hi.y, hi.z},
-			}
-			box_tris := [10][3]int{
-				{3, 2, 6}, {3, 6, 7},
-				{0, 1, 2}, {0, 2, 3},
-				{4, 6, 5}, {4, 7, 6},
-				{0, 3, 7}, {0, 7, 4},
-				{1, 5, 6}, {1, 6, 2},
-			}
-			for tri in box_tris {
-				w0, w1, w2 := cw[tri[0]], cw[tri[1]], cw[tri[2]]
-				p0 := _project_vertex_to_shadow_plane(w0, ground_y, shadow_y, light)
-				p1 := _project_vertex_to_shadow_plane(w1, ground_y, shadow_y, light)
-				p2 := _project_vertex_to_shadow_plane(w2, ground_y, shadow_y, light)
-				cr := linalg.cross(p1 - p0, p2 - p0)
-				if abs(cr.y) < 1e-4 do continue
-				if cr.y < 0 do p1, p2 = p2, p1
-
-				_clip_and_emit_shadow_triangle(
-					p0, p1, p2,
-					{0, 0, 0},
-					y_step,
-					receivers[:],
-					lights[:],
-					l_idx,
-					&sh_verts,
-					&sh_inds,
-					&poly_a,
-					&poly_b,
-				)
-			}
-		}
-	}
-
-	if len(sh_verts) >= 3 && first_owner != {} {
-		engine.mesh_upsert_procedural(_scene_props_shadow_guid, sh_verts[:], sh_inds[:], nil, keep_cpu_buffers = false)
-		append(out, engine.Render_Command{
-			owner   = first_owner,
-			variant = engine.Draw_Mesh{
-				mesh  = _scene_props_shadow_guid,
-				part  = 0,
-				model = linalg.MATRIX4F32_IDENTITY,
-			},
-		})
-	} else {
-		engine.mesh_remove_procedural(_scene_props_shadow_guid)
-	}
 }
 
 // Marks the volume's GPU mesh dirty so `csg_render_collector` uploads it safely before the next render pass
@@ -1465,13 +876,6 @@ _collect_csg_volumes :: proc(view: engine.Render_View, out: ^[dynamic]engine.Ren
 		csg_drain_completed_results()
 	}
 
-	lights, light_sig := _resolve_scene_shadow_lights(context.temp_allocator)
-	light := _resolve_scene_shadow_light()
-	_, rec_sig := csg_collect_ground_receivers(light.ground_y if light.valid else 0.0, context.temp_allocator)
-	combined_env_sig := (light_sig ~ rec_sig) * 1099511628211
-	light_changed := combined_env_sig != _last_shadow_light_sig
-	_last_shadow_light_sig = combined_env_sig
-
 	it := engine.pool_iterator(csg_volumes(w))
 	for vol, _ in engine.pool_next(&it) {
 		if !vol.enabled do continue
@@ -1482,22 +886,6 @@ _collect_csg_volumes :: proc(view: engine.Render_View, out: ^[dynamic]engine.Ren
 
 		if !vol.compiled {
 			csg_volume_rebuild(vol)
-		} else if light_changed && vol.cast_planar_shadows {
-			// Re-bake chunk vertex self-shadowing and planar shadow mesh when any scene Light moves/rotates!
-			sun_vec := light.to_light if (light.valid && light.kind == .Directional) else [3]f32{0, 0, 0}
-			combined_hulls := make([dynamic]CSG_Convex, 0, 32, context.temp_allocator)
-			for _, ch in vol.chunks {
-				if ch.voxel_grid != nil && ch.voxel_grid.has_cuts {
-					csg_voxel_triangulate_chunk(ch.voxel_grid, ch.indestructible_hulls[:], &ch.verts, &ch.indices, &ch.submeshes, sun_vec)
-				} else {
-					clear(&combined_hulls)
-					append(&combined_hulls, ..ch.destructible_hulls[:])
-					append(&combined_hulls, ..ch.indestructible_hulls[:])
-					csg_triangulate_hulls(combined_hulls[:], &ch.verts, &ch.indices, &ch.submeshes, sun_vec)
-				}
-				ch.dirty_gpu = true
-			}
-			vol.gpu_dirty = true
 		}
 		if vol.gpu_dirty || !engine.mesh_is_cached(vol.mesh_guid) {
 			csg_volume_upload_gpu_now(vol)
@@ -1556,6 +944,7 @@ _collect_csg_volumes :: proc(view: engine.Render_View, out: ^[dynamic]engine.Ren
 						model         = model_mat,
 						materials     = var_mats,
 						unlit_heatmap = vol.deform_debug_heatmap,
+						no_shadow     = !vol.cast_planar_shadows,
 					},
 				})
 				rendered_chunks = true
@@ -1569,6 +958,7 @@ _collect_csg_volumes :: proc(view: engine.Render_View, out: ^[dynamic]engine.Ren
 						model         = model_mat,
 						materials     = var_mats,
 						unlit_heatmap = vol.deform_debug_heatmap,
+						no_shadow     = !vol.cast_planar_shadows,
 					},
 				})
 			}
@@ -1584,6 +974,7 @@ _collect_csg_volumes :: proc(view: engine.Render_View, out: ^[dynamic]engine.Ren
 					part          = 0,
 					model         = model_mat,
 					unlit_heatmap = vol.deform_debug_heatmap,
+					no_shadow     = !vol.cast_planar_shadows,
 				},
 			})
 		}
@@ -1600,6 +991,7 @@ _collect_csg_volumes :: proc(view: engine.Render_View, out: ^[dynamic]engine.Ren
 					part      = 0,
 					model     = model_mat,
 					materials = glass_mats,
+					no_shadow = true,
 				},
 			})
 		}
@@ -1612,28 +1004,13 @@ _collect_csg_volumes :: proc(view: engine.Render_View, out: ^[dynamic]engine.Ren
 			append(out, engine.Render_Command{
 				owner   = owner_h,
 				variant = engine.Draw_Mesh{
-					mesh  = inst.custom_mesh,
-					part  = 0,
-					model = model_mat * inst_local_mat,
+					mesh      = inst.custom_mesh,
+					part      = 0,
+					model     = model_mat * inst_local_mat,
+					no_shadow = !vol.cast_planar_shadows,
 				},
 			})
 		}
-
-		if vol.cast_planar_shadows && !vol.is_dynamic_rigidbody && len(lights) > 0 && engine.mesh_is_cached(vol.shadow_mesh_guid) {
-			append(out, engine.Render_Command{
-				owner   = owner_h,
-				variant = engine.Draw_Mesh{
-					mesh  = vol.shadow_mesh_guid,
-					part  = 0,
-					model = model_mat,
-				},
-			})
-		}
-	}
-
-	// Also project planar floor shadows for standard MeshRenderer and SkinnedMeshRenderer objects across all shadow-casting Lights!
-	if view.kind != .Preview {
-		_collect_standard_mesh_shadows(w, view, lights[:], out)
 	}
 }
 
@@ -1924,10 +1301,9 @@ csg_volume_rebuild :: proc(vol: ^CSGVolume) {
 		csg_volume_restore_ram_state(vol)
 	}
 
-	// 3. Smart-clean & triangulate each spatial chunk using the active scene Light direction (if any),
+	// 3. Smart-clean & triangulate each spatial chunk,
 	//    passing touching hulls from neighboring chunks as `extra_sibling_hulls` so inter-chunk seam faces are 100% clipped!
-	light := _resolve_scene_shadow_light()
-	sun_vec := light.to_light if (light.valid && light.kind == .Directional) else [3]f32{0, 0, 0}
+	sun_vec := [3]f32{0, 0, 0}
 	for _, ch in vol.chunks {
 		if ch.voxel_grid == nil && len(ch.destructible_hulls) > 0 {
 			_ = csg_clean_and_simplify_hulls(&ch.destructible_hulls, alloc)
@@ -2235,9 +1611,12 @@ csg_volume_clip_by_plane :: proc(
 			for &rh in vol.runtime_hulls do convex_destroy(&rh)
 			delete(vol.runtime_hulls)
 			vol.runtime_hulls = extracted
+			context.allocator = prev_alloc
 			for &b in vol.brushes {
+				if len(b.name) > 0 do delete(b.name)
 				if b.profile_points != nil do delete(b.profile_points)
 			}
+			context.allocator = alloc
 			clear(&vol.brushes)
 			if len(saved_vox_blasts) == 0 {
 				clear(&vol.recorded_blasts)
@@ -2762,8 +2141,7 @@ csg_volume_rebuild_dirty_aabb :: proc(vol: ^CSGVolume, dirty_min, dirty_max: [3]
 	}
 
 	// 6. Smart-clean & re-triangulate ONLY the touched dirty chunks!
-	light := _resolve_scene_shadow_light()
-	sun_vec := light.to_light if (light.valid && light.kind == .Directional) else [3]f32{0, 0, 0}
+	sun_vec := [3]f32{0, 0, 0}
 	combined_hulls := make([dynamic]CSG_Convex, 0, 32, context.temp_allocator)
 	for _, ch in touched_chunks {
 		if ch.voxel_grid != nil && ch.voxel_grid.has_cuts {
@@ -2807,8 +2185,7 @@ csg_volume_smart_clean_and_simplify :: proc(vol: ^CSGVolume) -> (cleaned_ops: in
 	context.allocator = alloc
 	defer context.allocator = prev_alloc
 
-	light := _resolve_scene_shadow_light()
-	sun_vec := light.to_light if (light.valid && light.kind == .Directional) else [3]f32{0, 0, 0}
+	sun_vec := [3]f32{0, 0, 0}
 	combined_hulls := make([dynamic]CSG_Convex, 0, 32, context.temp_allocator)
 
 	for _, ch in vol.chunks {
@@ -2871,8 +2248,7 @@ csg_volume_bake_to_static_mesh :: proc(vol: ^CSGVolume) -> engine.Transform_Hand
 
 	_ = csg_clean_and_simplify_hulls(&unified_hulls, context.temp_allocator)
 
-	light := _resolve_scene_shadow_light()
-	sun_vec := light.to_light if (light.valid && light.kind == .Directional) else [3]f32{0, 0, 0}
+	sun_vec := [3]f32{0, 0, 0}
 	all_verts := make([dynamic]gfx.Vertex, 0, 128, context.temp_allocator)
 	all_inds  := make([dynamic]u32, 0, 256, context.temp_allocator)
 	all_subs  := make([dynamic]engine.Mesh_Submesh, 0, 2, context.temp_allocator)
@@ -3479,8 +2855,7 @@ _extract_volume_detached_islands :: proc(vol: ^CSGVolume, out_detached: ^[dynami
 		affected_chunks[r.ch] = true
 	}
 
-	light := _resolve_scene_shadow_light()
-	sun_vec := light.to_light if (light.valid && light.kind == .Directional) else [3]f32{0, 0, 0}
+	sun_vec := [3]f32{0, 0, 0}
 	combined := make([dynamic]CSG_Convex, 0, 32, context.temp_allocator)
 
 	for ch, _ in affected_chunks {
@@ -3750,6 +3125,12 @@ csg_trigger_blast :: proc(
 	})
 
 	// 2. Find all CSGVolumes and their 8m^3 spatial chunks overlapping the blast AABB
+	Pending_Vox_Detach :: struct {
+		vol_owner: engine.Transform_Handle,
+		hulls:     [dynamic]CSG_Convex,
+		radius:    f32,
+	}
+	pending_vox_detaches := make([dynamic]Pending_Vox_Detach, 0, 4, context.temp_allocator)
 	touched_count := 0
 	it := engine.pool_iterator(csg_volumes(w))
 	for vol, _ in engine.pool_next(&it) {
@@ -3795,9 +3176,9 @@ csg_trigger_blast :: proc(
 		// ZERO 15.6ms WINDOWS THREAD SLEEP STALLS ON RAPID CLICK SPAM!):
 		// =========================================================================
 		if use_vox_sdf {
-			light := _resolve_scene_shadow_light()
-			sun_vec := light.to_light if (light.valid && light.kind == .Directional) else [3]f32{0, 0, 0}
+			sun_vec := [3]f32{0, 0, 0}
 			vol_touched := 0
+			vox_detached := make([dynamic]CSG_Convex, 0, 8, alloc)
 
 			for _, ch in vol.chunks {
 				if len(ch.destructible_hulls) == 0 && ch.voxel_grid == nil do continue
@@ -3822,6 +3203,16 @@ csg_trigger_blast :: proc(
 					scorch_col,
 					blast_slot,
 				)
+				if vol.enable_structural_collapse {
+					_ = csg_voxel_extract_ungrounded_islands(
+						ch.voxel_grid,
+						vol.ground_y,
+						ch.indestructible_hulls[:],
+						vol.is_dynamic_rigidbody,
+						&vox_detached,
+						alloc,
+					)
+				}
 				if vol.is_dynamic_rigidbody {
 					csg_voxel_build_greedy_hulls(ch.voxel_grid, &ch.destructible_hulls, alloc)
 				}
@@ -3905,6 +3296,15 @@ csg_trigger_blast :: proc(
 				)
 			}
 			csg_volume_repack_gpu_mesh(vol)
+			if len(vox_detached) > 0 {
+				append(&pending_vox_detaches, Pending_Vox_Detach{
+					vol_owner = vol.owner,
+					hulls     = vox_detached,
+					radius    = eff_radius,
+				})
+			} else {
+				delete(vox_detached)
+			}
 			continue
 		}
 
@@ -3991,6 +3391,47 @@ csg_trigger_blast :: proc(
 			csg_drain_completed_results()
 			context.allocator = alloc
 		}
+	}
+
+	for &pd in pending_vox_detaches {
+		if len(pd.hulls) > 0 {
+			_, src_vol := engine.transform_get_comp(pd.vol_owner, CSGVolume)
+			if src_vol != nil {
+				islands := csg_group_hulls_into_islands(&pd.hulls, alloc)
+				for &isl, isl_idx in islands {
+					if len(isl) > 0 {
+						lo := isl[0].aabb_min
+						hi := isl[0].aabb_max
+						for h in isl[1:] {
+							lo.x = min(lo.x, h.aabb_min.x); lo.y = min(lo.y, h.aabb_min.y); lo.z = min(lo.z, h.aabb_min.z)
+							hi.x = max(hi.x, h.aabb_max.x); hi.y = max(hi.y, h.aabb_max.y); hi.z = max(hi.z, h.aabb_max.z)
+						}
+						ext := hi - lo
+						max_ext := max(ext.x, max(ext.y, ext.z))
+						if max_ext >= 0.25 {
+							context.allocator = prev_alloc
+							_, src_vol = engine.transform_get_comp(pd.vol_owner, CSGVolume)
+							if src_vol != nil {
+								_ = _spawn_detached_csg_island_volume(
+									src_vol,
+									isl[:],
+									world_pos,
+									impulse * 0.40,
+									seed + u32(isl_idx + 1) * 97,
+								)
+							}
+							context.allocator = alloc
+						}
+					}
+					for &h in isl do convex_destroy(&h)
+					delete(isl)
+				}
+				delete(islands)
+			} else {
+				for &h in pd.hulls do convex_destroy(&h)
+			}
+		}
+		delete(pd.hulls)
 	}
 
 	return touched_count
@@ -4118,8 +3559,8 @@ csg_drain_completed_results :: proc() {
 		delete(res.chunk_outputs)
 
 		// Perform volume-wide structural island extraction and spawn severed islands as
-		// standalone Dynamic `CSGVolume` physics objects (`CSG_Detached_Piece`) when Physics is active!
-		if vol.enable_structural_collapse && physics3d._state.world_ready {
+		// standalone Dynamic `CSGVolume` physics objects (`CSG_Detached_Piece`)!
+		if vol.enable_structural_collapse {
 			detached_hulls := make([dynamic]CSG_Convex, 0, 8, alloc)
 			_extract_volume_detached_islands(vol, &detached_hulls)
 			if len(detached_hulls) > 0 {

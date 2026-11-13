@@ -12,12 +12,12 @@ package control_rig_editor
 
 import "core:math"
 import "core:math/linalg"
-import im "moonhug:external/odin-imgui"
-import engine "moonhug:engine"
-import "moonhug:engine/gizmos"
-import handles "moonhug:editor/handles"
-import undo "moonhug:editor/undo"
-import crig "moonhug:packages/control_rig"
+import im "haati:external/odin-imgui"
+import engine "haati:engine"
+import "haati:engine/gizmos"
+import handles "haati:editor/handles"
+import undo "haati:editor/undo"
+import crig "haati:packages/control_rig"
 
 Weight_Paint_Mode :: enum {
 	Paint,    // Blends smoothly towards target weight (0.0 to 1.0)

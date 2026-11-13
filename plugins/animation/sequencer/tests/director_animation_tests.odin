@@ -3,11 +3,11 @@ package animation_sequencer_tests
 // Directors playing animation tracks (animation/sequencer).
 
 import "core:testing"
-import "moonhug:engine"
-import anim "moonhug:packages/animation"
-import seq "moonhug:packages/sequencer"
-import common "moonhug:tests/common"
-import anim_seq "moonhug:packages/animation/sequencer"
+import "haati:engine"
+import anim "haati:packages/animation"
+import seq "haati:packages/sequencer"
+import common "haati:tests/common"
+import anim_seq "haati:packages/animation/sequencer"
 
 _clip_guid :: proc(n: u8) -> engine.Asset_GUID {
 	id: engine.Asset_GUID

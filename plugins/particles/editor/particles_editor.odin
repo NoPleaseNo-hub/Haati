@@ -12,11 +12,14 @@ package particles_editor
 // they land in undo as whole-component steps. Never compiled into the app.
 
 import "core:fmt"
-import im "moonhug:external/odin-imgui"
-import "moonhug:engine"
-import "moonhug:editor/inspector"
-import "moonhug:editor/undo"
-import particles "moonhug:packages/particles"
+import im "haati:external/odin-imgui"
+import "haati:engine"
+import "haati:editor/icons"
+import "haati:editor/inspector"
+import "haati:editor/undo"
+import vs "haati:editor/visual_script"
+import "haati:editor/widgets"
+import particles "haati:packages/particles"
 
 @(phase={key=engine.Phase.EditorInit, order=1, mode=Editor})
 particles_inspector_install :: proc() {
@@ -446,6 +449,13 @@ _particle_system_inspector :: proc(ctx: ^inspector.Component_Ctx) {
 			for e in list do particles.system_tick(e, dt)
 		}
 	}
+
+	// Unified Graph Studio bridge: author VFX Emitter & On-GPU SIMD VFX math alongside BP Events!
+	if im.Button(fmt.ctprintf("%s Open Particle / GPU VFX in Unified Graph Studio", icons.ICON_MD_AUTO_AWESOME), {-1, 0}) {
+		vs.open_unified_graph_domain(.Particle_VFX)
+	}
+	widgets.tooltip("Author VFX Particle Emitter stages & On-GPU SIMD Curl/Drag Force math inside Unified Graph Studio (.bodin)")
+	im.Separator()
 
 	// Main module (Unity: always visible, no header).
 	_ps_field(ps, &ps.duration, typeid_of(f32), "Duration", "duration")

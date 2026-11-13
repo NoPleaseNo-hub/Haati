@@ -8,11 +8,11 @@ package audio_editor
 // max below the min pulls the min in.
 
 import "core:math"
-import "moonhug:engine"
-import "moonhug:engine/gizmos"
-import "moonhug:editor/handles"
-import "moonhug:editor/undo"
-import audio "moonhug:packages/audio"
+import "haati:engine"
+import "haati:engine/gizmos"
+import "haati:editor/handles"
+import "haati:editor/undo"
+import audio "haati:packages/audio"
 
 AUDIO_GIZMO_COLOR :: [4]f32{0.5, 0.7, 1, 0.5}
 AUDIO_HANDLE_COLOR :: [4]f32{0.5, 0.7, 1, 1}

@@ -1,3 +1,18 @@
+Haati Game Engine
+Copyright (c) 2026 Haati Contributors
+
+Haati is a modified and extended game engine built upon the MoonHug game engine
+(originally developed by c0ffeeartc and the MoonHug contributors under the zlib License).
+In accordance with Clause 2 of the zlib License, this distribution contains substantial
+alterations from the original MoonHug software (including CAD-CSG, Faker Mesh & Control
+Rig Studio, Unified Odin / Node Block Graph Studio, Hot Cartridge runtime,
+Multi-Viewport Editor, Overwatch Flight Recorder, and GPU Shadow Atlas) and is
+distributed as Haati, not the original MoonHug software.
+
+-------------------------------------------------------------------------------
+Original MoonHug License Notice (retained verbatim per zlib Clause 3):
+-------------------------------------------------------------------------------
+
 zlib License
 
 Copyright (c) 2026 c0ffeeartc and the MoonHug contributors

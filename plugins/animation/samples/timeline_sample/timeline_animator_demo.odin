@@ -15,8 +15,8 @@ package timeline_sample
 // inspector edit rather than a code change.
 
 import "core:log"
-import "moonhug:engine"
-import anim_seq "moonhug:packages/animation/sequencer"
+import "haati:engine"
+import anim_seq "haati:packages/animation/sequencer"
 
 @(component={menu="Demo/TimelineAnimatorDemo"})
 @(typ_guid={guid = "7c7a5a92-7ea8-4409-a913-2252a0f48a21"})

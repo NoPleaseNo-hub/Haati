@@ -34,8 +34,8 @@ import "core:os"
 import "core:slice"
 import "core:strings"
 import cgltf "vendor:cgltf"
-import engine "moonhug:engine"
-import physics3d "moonhug:packages/physics3d"
+import engine "haati:engine"
+import physics3d "haati:packages/physics3d"
 
 Hand_Pose_Preset :: enum i32 {
 	Relaxed        = 0,

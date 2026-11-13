@@ -3,11 +3,11 @@ package sprites_sequencer_tests
 // The sprites fade tween (sprites/sequencer) as a TweenUnion variant.
 
 import "core:testing"
-import "moonhug:engine"
-import seq "moonhug:packages/sequencer"
-import sprites "moonhug:packages/sprites"
-import common "moonhug:tests/common"
-import sprites_seq "moonhug:packages/sprites/sequencer"
+import "haati:engine"
+import seq "haati:packages/sequencer"
+import sprites "haati:packages/sprites"
+import common "haati:tests/common"
+import sprites_seq "haati:packages/sprites/sequencer"
 
 // The PLUGIN path: TweenFadeTo lives in packages/sprites and reaches the
 // union only through tween_gen's scan — the sequencer never imports sprites.

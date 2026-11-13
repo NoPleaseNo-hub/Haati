@@ -14,12 +14,12 @@ import "core:os"
 import "core:path/filepath"
 import "core:slice"
 import "core:strings"
-import im "moonhug:external/odin-imgui"
-import engine "moonhug:engine"
-import gfx "moonhug:engine/gfx"
-import "moonhug:editor/widgets"
-import wnd "moonhug:editor/window"
-import cad_csg "moonhug:packages/cad_csg"
+import im "haati:external/odin-imgui"
+import engine "haati:engine"
+import gfx "haati:engine/gfx"
+import "haati:editor/widgets"
+import wnd "haati:editor/window"
+import cad_csg "haati:packages/cad_csg"
 
 UV_Select_Mode :: enum u8 {
 	Face   = 0,
@@ -1386,8 +1386,8 @@ apply_dropped_material_or_texture :: proc(
 	rel_p = strings.trim_prefix(rel_p, "./")
 	if strings.has_prefix(rel_p, "plugins/") {
 		rel_p = fmt.tprintf("packages/%s", strings.trim_prefix(rel_p, "plugins/"))
-	} else if strings.has_prefix(rel_p, "moonhug/") {
-		rel_p = strings.trim_prefix(rel_p, "moonhug/")
+	} else if strings.has_prefix(rel_p, "haati/") {
+		rel_p = strings.trim_prefix(rel_p, "haati/")
 	}
 
 	ext := strings.to_lower(filepath.ext(rel_p), context.temp_allocator)

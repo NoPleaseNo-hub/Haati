@@ -25,7 +25,7 @@ import "core:slice"
 import "core:strconv"
 import "core:strings"
 import "core:time"
-import ow "moonhug:engine/overwatch_ipc"
+import ow "haati:engine/overwatch_ipc"
 
 Engine_Health :: enum u8 {
 	Connecting = 0,
@@ -85,6 +85,14 @@ Recorder_Session :: struct {
 	alert_thresh_ms:   f32,
 	hang_duration_ms:  f64,
 	crash_log_excerpt: string,
+
+	// Multi-core job system snapshot
+	worker_count:      u32,
+	frame_jobs:        u32,
+	total_jobs:        u64,
+	total_steals:      u64,
+	main_assist_jobs:  u64,
+	worker_jobs:       [16]u64,
 
 	last_md_flush:     time.Tick,
 	finalized:         bool,
@@ -199,7 +207,7 @@ _init_output_files :: proc(s: ^Recorder_Session) {
 	}
 
 	// Place under `<repo_root>/moonhug/<rel_out>` if `<repo_root>/moonhug` exists, else `<repo_root>/<rel_out>`
-	mh_sub, _ := filepath.join({s.repo_root, "moonhug"}, context.temp_allocator)
+	mh_sub, _ := filepath.join({s.repo_root, "haati"}, context.temp_allocator)
 	base_dir := os.exists(mh_sub) ? mh_sub : s.repo_root
 	out_abs, _ := filepath.join({base_dir, rel_out}, context.temp_allocator)
 	os.make_directory_all(out_abs)
@@ -247,6 +255,15 @@ session_poll_and_drain :: proc(s: ^Recorder_Session) {
 	s.last_selected = strings.clone(ow.read_fixed_str(blk.header.selected_object[:]))
 	delete(s.last_pawn_state)
 	s.last_pawn_state = strings.clone(ow.read_fixed_str(blk.header.pawn_state[:]))
+
+	s.worker_count     = intrinsics.atomic_load_explicit(&blk.header.worker_count, .Relaxed)
+	s.frame_jobs       = intrinsics.atomic_load_explicit(&blk.header.frame_jobs_dispatched, .Relaxed)
+	s.total_jobs       = intrinsics.atomic_load_explicit(&blk.header.total_jobs_executed, .Relaxed)
+	s.total_steals     = intrinsics.atomic_load_explicit(&blk.header.total_work_steals, .Relaxed)
+	s.main_assist_jobs = intrinsics.atomic_load_explicit(&blk.header.main_assist_jobs, .Relaxed)
+	for wi in 0 ..< len(s.worker_jobs) {
+		s.worker_jobs[wi] = intrinsics.atomic_load_explicit(&blk.header.worker_jobs[wi], .Relaxed)
+	}
 
 	// 2. Drain lock-free Frame Ring Buffer
 	f_write := intrinsics.atomic_load_explicit(&blk.header.frame_write_seq, .Acquire)
@@ -405,7 +422,8 @@ _record_top_spike :: proc(s: ^Recorder_Session, sample: ow.Overwatch_Frame_Sampl
 
 @(private = "file")
 _try_attach_crash_log :: proc(s: ^Recorder_Session) {
-	candidates := [2]string{
+	candidates := [3]string{
+		fmt.tprintf("%s/haati/logs/crash_%d.log", s.repo_root, s.engine_pid),
 		fmt.tprintf("%s/moonhug/logs/crash_%d.log", s.repo_root, s.engine_pid),
 		fmt.tprintf("%s/logs/crash_%d.log", s.repo_root, s.engine_pid),
 	}
@@ -431,7 +449,7 @@ _write_markdown_report :: proc(s: ^Recorder_Session) {
 	case .Stopped:    status_str = "COMPLETED CLEANLY (Hooks Retracted)"
 	}
 
-	fmt.sbprintfln(&b, "# MoonHug Overwatch Flight Recording & Performance Autopsy")
+	fmt.sbprintfln(&b, "# Haati Overwatch Flight Recording & Performance Autopsy")
 	fmt.sbprintln(&b)
 	fmt.sbprintfln(&b, "- **Session Status:** %s", status_str)
 	fmt.sbprintfln(&b, "- **Engine PID:** `%d` | **Recorder PID:** `%d`", s.engine_pid, os.get_pid())
@@ -465,6 +483,26 @@ _write_markdown_report :: proc(s: ^Recorder_Session) {
 	fmt.sbprintfln(&b, "| Worst Frame Spike (`max`) | `%.2f ms` |", s.max_dt_ms)
 	fmt.sbprintfln(&b, "| Spikes (`>= %.1f ms` / `>= 33.3 ms`) | `%d` warn / `%d` severe |", s.alert_thresh_ms, s.total_spikes, s.severe_spikes)
 	fmt.sbprintfln(&b, "| Process Working Set RAM | `%.1f MB` → `%.1f MB` |", s.min_mem_mb, s.max_mem_mb)
+	fmt.sbprintln(&b)
+
+	fmt.sbprintln(&b, "### Multi-Core Job System Telemetry")
+	fmt.sbprintln(&b)
+	fmt.sbprintln(&b, "| Metric | Value |")
+	fmt.sbprintln(&b, "|---|---|")
+	fmt.sbprintfln(&b, "| Worker Threads | `%d` |", s.worker_count)
+	fmt.sbprintfln(&b, "| Last Frame Jobs | `%d` |", s.frame_jobs)
+	fmt.sbprintfln(&b, "| Total Jobs Executed | `%d` |", s.total_jobs)
+	fmt.sbprintfln(&b, "| Total Work Steals | `%d` |", s.total_steals)
+	fmt.sbprintfln(&b, "| Main-Thread Assist Jobs | `%d` |", s.main_assist_jobs)
+	if s.worker_count > 0 {
+		fmt.sbprint(&b, "| Per-Worker Jobs | `")
+		wc := min(int(s.worker_count), len(s.worker_jobs))
+		for wi in 0 ..< wc {
+			if wi > 0 do fmt.sbprint(&b, ", ")
+			fmt.sbprintf(&b, "W%d:%d", wi, s.worker_jobs[wi])
+		}
+		fmt.sbprintln(&b, "` |")
+	}
 	fmt.sbprintln(&b)
 
 	// Top Spikes Table

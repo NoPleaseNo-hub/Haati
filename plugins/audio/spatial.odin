@@ -9,7 +9,7 @@ package audio
 
 import "core:math"
 import "core:math/linalg"
-import engine "moonhug:engine"
+import engine "haati:engine"
 
 Audio_Rolloff_Mode :: enum u8 {
 	Logarithmic   = 0, // Unity default: mn / clamp(d, mn, mx)

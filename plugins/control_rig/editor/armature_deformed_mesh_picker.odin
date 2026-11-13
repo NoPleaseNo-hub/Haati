@@ -5,11 +5,11 @@ package control_rig_editor
 
 import "core:math"
 import "core:math/linalg"
-import engine "moonhug:engine"
-import "moonhug:engine/gizmos"
-import handles "moonhug:editor/handles"
-import physics3d "moonhug:packages/physics3d"
-import crig "moonhug:packages/control_rig"
+import engine "haati:engine"
+import "haati:engine/gizmos"
+import handles "haati:editor/handles"
+import physics3d "haati:packages/physics3d"
+import crig "haati:packages/control_rig"
 
 @(phase={key=engine.Phase.EditorInit, order=1, mode=Editor})
 armature_deformed_mesh_picker_init :: proc() {

@@ -17,11 +17,11 @@ import "core:os"
 import "core:path/filepath"
 import "core:strings"
 import stbi "vendor:stb/image"
-import "moonhug:engine"
-import gfx "moonhug:engine/gfx"
-import im "moonhug:external/odin-imgui"
-import "moonhug:editor/inspector"
-import wnd "moonhug:editor/window"
+import "haati:engine"
+import gfx "haati:engine/gfx"
+import im "haati:external/odin-imgui"
+import "haati:editor/inspector"
+import wnd "haati:editor/window"
 
 _SE_Mode :: enum {
 	Automatic,

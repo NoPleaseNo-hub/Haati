@@ -1,7 +1,7 @@
 package mhgui
 
 import "core:math"
-import "moonhug:engine"
+import "haati:engine"
 
 Layout_Direction :: enum u8 {
 	Horizontal, // children in a row, left to right

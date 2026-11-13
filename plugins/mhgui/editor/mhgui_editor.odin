@@ -9,13 +9,13 @@ import "core:fmt"
 import "core:math"
 import "core:math/linalg"
 import "core:strings"
-import im "moonhug:external/odin-imgui"
-import "moonhug:engine"
-import "moonhug:editor/handles"
-import "moonhug:engine/gizmos"
-import "moonhug:editor/inspector"
-import "moonhug:editor/undo"
-import mhgui "moonhug:packages/mhgui"
+import im "haati:external/odin-imgui"
+import "haati:engine"
+import "haati:editor/handles"
+import "haati:engine/gizmos"
+import "haati:editor/inspector"
+import "haati:editor/undo"
+import mhgui "haati:packages/mhgui"
 
 @(private = "file") _NONE :: engine.Transform_Handle{}
 
@@ -553,7 +553,7 @@ _placed :: proc(tH: engine.Transform_Handle) -> (p: _Placed, ok: bool) {
 	canvas := _canvas_of(tH)
 	if canvas == _NONE || canvas == tH do return
 	_, _, in_world := engine.canvas_placement(canvas, engine.canvas_game_viewport())
-	if !in_world do return
+	if !in_world && engine.canvas_suppress_overlay_in_scene_3d() do return
 	w := engine.ctx_world()
 	t := engine.pool_get(&w.transforms, engine.Handle(tH))
 	if t == nil do return

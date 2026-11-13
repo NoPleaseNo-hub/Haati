@@ -9,16 +9,16 @@ import "core:math"
 import "core:os"
 import "core:strings"
 import "core:testing"
-import "moonhug:engine"
-import "moonhug:engine_editor/asset_pipeline"
-import anim "moonhug:packages/animation"
-import seq "moonhug:packages/sequencer"
-import audio "moonhug:packages/audio"
-import audio_editor "moonhug:packages/audio/editor"
-import "moonhug:editor/inspector"
-import "moonhug:editor/undo"
-import common "moonhug:tests/common"
-import audio_seq "moonhug:packages/audio/sequencer"
+import "haati:engine"
+import "haati:engine_editor/asset_pipeline"
+import anim "haati:packages/animation"
+import seq "haati:packages/sequencer"
+import audio "haati:packages/audio"
+import audio_editor "haati:packages/audio/editor"
+import "haati:editor/inspector"
+import "haati:editor/undo"
+import common "haati:tests/common"
+import audio_seq "haati:packages/audio/sequencer"
 
 _SAMPLE_RATE :: 22050
 _FRAMES :: 2205 // 0.1 s
@@ -82,7 +82,7 @@ test_audio_timeline_track :: proc(t: ^testing.T) {
 	defer anim.animation_clip_cache_shutdown()
 	audio_seq.audio_track_init()
 
-	src_dir :: "moonhug/tests/fixtures/_audio_track_tmp"
+	src_dir :: "haati/tests/fixtures/_audio_track_tmp"
 	wav :: src_dir + "/probe.wav"
 	os.make_directory(src_dir)
 	testing.expect(t, _write_test_wav(wav))
@@ -160,7 +160,7 @@ test_audio_track_enters_span_at_offset :: proc(t: ^testing.T) {
 	defer anim.animation_clip_cache_shutdown()
 	audio_seq.audio_track_init()
 
-	src_dir :: "moonhug/tests/fixtures/_audio_seek_tmp"
+	src_dir :: "haati/tests/fixtures/_audio_seek_tmp"
 	wav :: src_dir + "/probe.wav"
 	os.make_directory(src_dir)
 	testing.expect(t, _write_test_wav(wav))
@@ -228,7 +228,7 @@ test_audio_track_overlap_crossfades :: proc(t: ^testing.T) {
 	defer anim.animation_clip_cache_shutdown()
 	audio_seq.audio_track_init()
 
-	src_dir :: "moonhug/tests/fixtures/_audio_xfade_tmp"
+	src_dir :: "haati/tests/fixtures/_audio_xfade_tmp"
 	wav :: src_dir + "/probe.wav"
 	os.make_directory(src_dir)
 	testing.expect(t, _write_test_wav(wav))
@@ -374,7 +374,7 @@ test_audio_preview_play :: proc(t: ^testing.T) {
 	defer anim.animation_clip_cache_shutdown()
 	audio_seq.audio_track_init()
 
-	src_dir :: "moonhug/tests/fixtures/_audio_preview_tmp"
+	src_dir :: "haati/tests/fixtures/_audio_preview_tmp"
 	wav :: src_dir + "/probe.wav"
 	os.make_directory(src_dir)
 	testing.expect(t, _write_test_wav(wav))

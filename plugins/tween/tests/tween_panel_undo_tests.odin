@@ -6,10 +6,10 @@ package tween_tests
 // mechanism it relies on.
 
 import "core:encoding/json"
-import undo "moonhug:editor/undo"
-import "moonhug:engine"
-import tween "moonhug:packages/tween"
-import common "moonhug:tests/common"
+import undo "haati:editor/undo"
+import "haati:engine"
+import tween "haati:packages/tween"
+import common "haati:tests/common"
 import "core:testing"
 
 @(private)

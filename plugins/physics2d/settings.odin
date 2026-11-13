@@ -1,6 +1,6 @@
 package physics2d
 
-import "moonhug:engine"
+import "haati:engine"
 
 // Physics 2D project settings — a tab in the editor's Project Settings window
 // (docs/Plugins.md "Project settings"). Consumed by polling in physics_step:

@@ -2,12 +2,12 @@ package control_rig_editor
 
 import "core:fmt"
 import "core:strings"
-import im "moonhug:external/odin-imgui"
-import wnd "moonhug:editor/window"
-import "moonhug:editor/widgets"
-import engine "moonhug:engine"
-import physics3d "moonhug:packages/physics3d"
-import crig "moonhug:packages/control_rig"
+import im "haati:external/odin-imgui"
+import wnd "haati:editor/window"
+import "haati:editor/widgets"
+import engine "haati:engine"
+import physics3d "haati:packages/physics3d"
+import crig "haati:packages/control_rig"
 
 // =============================================================================
 // CHARACTER COMPONENT POINTER RESOLVER

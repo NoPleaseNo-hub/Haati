@@ -20,18 +20,7 @@ layout(location = 3) in vec3 frag_world_pos;
 
 layout(set = 2, binding = 0) uniform sampler2D tex;
 
-#define MAX_LIGHTS 8
-struct GpuLight {
-    vec4 pos_type;    // xyz = position, w = kind (0 dir, 1 point, 2 spot)
-    vec4 dir_range;   // xyz = normalized travel direction, w = range
-    vec4 color_outer; // rgb premultiplied by intensity, w = cos outer half-angle
-    vec4 params;      // x = cos inner half-angle, yzw reserved
-};
-layout(set = 3, binding = 0) uniform LightUBO {
-    vec4 ambient_count; // x = ambient floor, y = light count
-    vec4 cam_pos;       // xyz = camera world position
-    GpuLight lights[MAX_LIGHTS];
-};
+#include "lighting_common.glsl"
 
 layout(set = 3, binding = 1) uniform MaterialUBO {
     vec4  spec_color;
@@ -42,23 +31,39 @@ layout(location = 0) out vec4 out_color;
 
 void main() {
     vec3 n = normalize(frag_normal);
-    vec3 to_light = -lights[0].dir_range.xyz;
-    vec3 to_cam   = normalize(cam_pos.xyz - frag_world_pos);
-
-    // Same diffuse as the built-in lit shader.
-    float diffuse = max(dot(n, to_light), 0.0);
+    vec3 to_cam = normalize(cam_pos.xyz - frag_world_pos);
     float ambient = ambient_count.x;
-    vec3 light = vec3(ambient) + lights[0].color_outer.rgb * ((1.0 - ambient) * diffuse);
+    int count = int(ambient_count.y);
+    vec3 light = vec3(ambient);
+    vec3 spec_contrib = vec3(0.0);
 
     vec4 sc = spec_color;
     if (sc == vec4(0.0)) sc = vec4(1.0); // unset: white, full strength
     float shiny = shininess <= 0.0 ? 32.0 : shininess;
 
-    // Blinn-phong: highlight where the half-vector aligns with the normal.
-    vec3 half_dir = normalize(to_light + to_cam);
-    float spec = pow(max(dot(n, half_dir), 0.0), shiny) * step(0.0, diffuse);
+    if (count > 0) {
+        GpuLight l = lights[0];
+        vec3 L;
+        float dist = 0.0;
+        if (l.pos_type.w < 0.5) {
+            L = l.dir_range.xyz;
+        } else {
+            vec3 d = frag_world_pos - l.pos_type.xyz;
+            dist = length(d);
+            L = d / max(dist, 1e-6);
+        }
+        vec3 to_light = -L;
+        float diffuse = max(dot(n, to_light), 0.0);
+        float atten = light_attenuation(l, L, dist);
+        float shadow = eval_light_shadow(0, l, frag_world_pos, n, L, diffuse);
+        light += l.color_outer.rgb * ((1.0 - ambient) * diffuse * atten * shadow);
+
+        vec3 half_dir = normalize(to_light + to_cam);
+        float spec = pow(max(dot(n, half_dir), 0.0), shiny) * step(0.0, diffuse);
+        spec_contrib = l.color_outer.rgb * sc.rgb * (spec * clamp(sc.a, 0.0, 1.0) * atten * shadow);
+    }
 
     vec4 base = texture(tex, frag_uv) * frag_color;
-    vec3 rgb = base.rgb * light + lights[0].color_outer.rgb * sc.rgb * (spec * clamp(sc.a, 0.0, 1.0));
+    vec3 rgb = base.rgb * light + spec_contrib;
     out_color = vec4(rgb, base.a);
 }

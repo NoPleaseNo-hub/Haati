@@ -1,7 +1,7 @@
 package sprites_tests
 
-import "moonhug:engine"
-import sprites "moonhug:packages/sprites"
+import "haati:engine"
+import sprites "haati:packages/sprites"
 import "core:testing"
 
 // sprite_quad resolves slices from Texture2D.sprites: corners sized by the

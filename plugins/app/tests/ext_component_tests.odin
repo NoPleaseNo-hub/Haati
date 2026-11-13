@@ -5,9 +5,9 @@ package app_tests
 // component object in `ext_components` with an extra "__type" guid key, so
 // every JSON-level walker (diff/apply/lid-collect) sees the same shape.
 
-import app "moonhug:packages/app"
-import "moonhug:engine"
-import common "moonhug:tests/common"
+import app "haati:packages/app"
+import "haati:engine"
+import common "haati:tests/common"
 
 import "core:encoding/json"
 import "core:encoding/uuid"
@@ -52,7 +52,7 @@ test_ext_component_json_diff_and_apply :: proc(t: ^testing.T) {
 test_ext_component_override_round_trip :: proc(t: ^testing.T) {
 	PREFAB_GUID :: "aaaaaaa1-bbb2-4cc3-8dd4-eeeeeeeeeee5"
 
-	dir := "moonhug/tests/_tmp_ext_override"
+	dir := "haati/tests/_tmp_ext_override"
 	mkerr := os.make_directory(dir)
 	testing.expect(t, mkerr == nil || os.exists(dir), fmt.tprintf("temp dir: %v", mkerr))
 
@@ -154,7 +154,7 @@ test_ext_component_override_round_trip :: proc(t: ^testing.T) {
 test_ext_component_nested_intra_prefab_refs :: proc(t: ^testing.T) {
 	PREFAB_GUID :: "bbbbbbb1-ccc2-4dd3-8ee4-fffffffffff6"
 
-	dir := "moonhug/tests/_tmp_ext_nested_refs"
+	dir := "haati/tests/_tmp_ext_nested_refs"
 	mkerr := os.make_directory(dir)
 	testing.expect(t, mkerr == nil || os.exists(dir), fmt.tprintf("temp dir: %v", mkerr))
 
@@ -263,7 +263,7 @@ test_ext_component_nested_intra_prefab_refs :: proc(t: ^testing.T) {
 test_ext_component_ref_override_round_trip :: proc(t: ^testing.T) {
 	PREFAB_GUID :: "ccccccc1-ddd2-4ee3-8ff4-000000000007"
 
-	dir := "moonhug/tests/_tmp_ext_ref_override"
+	dir := "haati/tests/_tmp_ext_ref_override"
 	mkerr := os.make_directory(dir)
 	testing.expect(t, mkerr == nil || os.exists(dir), fmt.tprintf("temp dir: %v", mkerr))
 
@@ -424,7 +424,7 @@ test_ext_component_ref_override_round_trip :: proc(t: ^testing.T) {
 test_host_ref_into_nested_instance_round_trip :: proc(t: ^testing.T) {
 	PREFAB_GUID :: "ddddddd1-eee2-4ff3-8004-000000000008"
 
-	dir := "moonhug/tests/_tmp_host_ref_nested"
+	dir := "haati/tests/_tmp_host_ref_nested"
 	mkerr := os.make_directory(dir)
 	testing.expect(t, mkerr == nil || os.exists(dir), fmt.tprintf("temp dir: %v", mkerr))
 

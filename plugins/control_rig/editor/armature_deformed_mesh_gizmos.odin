@@ -11,11 +11,11 @@ package control_rig_editor
 //      bind-pose geometry even before bones are extracted, so the user instantly sees the skeleton upon selecting any mesh.
 
 import "core:math/linalg"
-import "moonhug:engine"
-import "moonhug:engine/gizmos"
-import "moonhug:editor/handles"
-import crig "moonhug:packages/control_rig"
-import physics3d "moonhug:packages/physics3d"
+import "haati:engine"
+import "haati:engine/gizmos"
+import "haati:editor/handles"
+import crig "haati:packages/control_rig"
+import physics3d "haati:packages/physics3d"
 
 @(private = "file")
 _draw_unreal_bone :: proc(a, b: [3]f32, selected: bool, ambient: bool, dimmed := false, dim_alpha: f32 = 0.15) {

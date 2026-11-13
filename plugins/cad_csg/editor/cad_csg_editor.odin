@@ -25,16 +25,16 @@ import "core:math"
 import "core:math/linalg"
 import "core:strconv"
 import "core:strings"
-import im "moonhug:external/odin-imgui"
-import engine "moonhug:engine"
-import "moonhug:engine/gizmos"
-import input "moonhug:engine/input"
-import "moonhug:editor/handles"
-import "moonhug:editor/icons"
-import "moonhug:editor/widgets"
-import wnd "moonhug:editor/window"
-import cad_csg "moonhug:packages/cad_csg"
-import control_rig_ed "moonhug:packages/control_rig/editor"
+import im "haati:external/odin-imgui"
+import engine "haati:engine"
+import "haati:engine/gizmos"
+import input "haati:engine/input"
+import "haati:editor/handles"
+import "haati:editor/icons"
+import "haati:editor/widgets"
+import wnd "haati:editor/window"
+import cad_csg "haati:packages/cad_csg"
+import control_rig_ed "haati:packages/control_rig/editor"
 
 CAD_Sub_Tool :: enum u8 {
 	Spline_Poly_Sketch = 0, // 2D Polyline / Catmull-Rom Spline Sketcher -> 3D Extrude (Unreal / Blender / CAD style)
@@ -593,6 +593,12 @@ _resolve_active_volume :: proc(create_if_missing := false) -> (vol: ^cad_csg.CSG
 		return _ed.hover_vol, engine.Transform_Handle(_ed.hover_vol.owner)
 	}
 
+	if _mesh_ed.target_owner != {} && engine.pool_valid(&w.transforms, engine.Handle(_mesh_ed.target_owner)) {
+		if _, v := engine.transform_get_comp(_mesh_ed.target_owner, cad_csg.CSGVolume); v != nil && v.enabled {
+			return v, _mesh_ed.target_owner
+		}
+	}
+
 	if !create_if_missing do return nil, {}
 	scene := engine.sm_scene_get_active()
 	if scene == nil do return nil, {}
@@ -1047,7 +1053,7 @@ _raycast_workplane :: proc(ray: engine.Ray) -> (world_pt: [3]f32, uv: [2]f32, ok
 		} else if snap_res.is_para_prev {
 			_ed.snap_guide_label = fmt.tprintf("PARA %.0f°", snap_res.snapped_deg)
 		} else {
-			_ed.snap_guide_label = fmt.tprintf("∠ %.0f°", snap_res.snapped_deg)
+			_ed.snap_guide_label = fmt.tprintf("Ang %.0f°", snap_res.snapped_deg)
 		}
 		_ed.polar_arc_active  = !is_box_fp
 		_ed.polar_snapped_deg = snap_res.snapped_deg
@@ -2241,7 +2247,7 @@ cad_csg_scene_overlay :: proc(vertical: bool) {
 	}
 	if os_pushed do im.PopStyleColor(1)
 	widgets.ui_tool_script_loc(#location(_find_osnap_world_point), "Magnetic Object Snap (Vertex / Midpoint / Face Center)")
-	widgets.tooltip("Magnetic OSNAP onto existing CSG corners (□ Vertex), edge midpoints (△ Midpoint), and face centers (◎ Center). Hold Alt to bypass.")
+	widgets.tooltip("Magnetic OSNAP onto existing CSG corners ([Vertex]), edge midpoints ([Midpoint]), and face centers ([Center]). Hold Alt to bypass.")
 	im.SameLine(0, 3)
 
 	// Metric Grid Snap Step
@@ -2353,7 +2359,7 @@ draw_cad_bottom_telemetry_hud :: proc(img_min, img_max: im.Vec2) {
 			d := _ed.hover_uv - last_uv
 			seg_l := linalg.length(d)
 			seg_a := math.atan2(d.y, d.x) * (180.0 / math.PI)
-			readout = fmt.tprintf("Pts: %d  |  L: %.2f m   ∠ %+.1f°", len(_ed.sketch_points), seg_l, seg_a)
+			readout = fmt.tprintf("Pts: %d  |  L: %.2f m   Ang: %+.1f°", len(_ed.sketch_points), seg_l, seg_a)
 		} else {
 			readout = fmt.tprintf("Pts: %d", len(_ed.sketch_points))
 		}
@@ -2379,7 +2385,7 @@ draw_cad_bottom_telemetry_hud :: proc(img_min, img_max: im.Vec2) {
 	}
 	polar_tag := fmt.tprintf("Polar %.0f°", _ed.polar_step_deg) if _ed.axis_snap_enabled else "Polar Off"
 	plane_tag := "Locked" if _ed.plane_locked else ("Surface" if _ed.plane.is_custom else "Ground")
-	full_txt  := fmt.ctprintf("%s   ·   %s   ·   %s | Plane:%s%s   ·   Shift:15°/Sq  Alt:Free  Tab:L/∠  Bksp:Undo", tool_str, readout, polar_tag, plane_tag, osnap_tag)
+	full_txt  := fmt.ctprintf("%s   ·   %s   ·   %s | Plane:%s%s   ·   Shift:15°/Sq  Alt:Free  Tab:L/Ang  Bksp:Undo", tool_str, readout, polar_tag, plane_tag, osnap_tag)
 
 	ts := im.CalcTextSize(full_txt)
 	pad_x :: f32(14.0)
@@ -3713,7 +3719,7 @@ _draw_spline_sketch_preview :: proc(wp_ok: bool, wp_uv: [2]f32) {
 		ang_deg := math.atan2(dv, du) * (180.0 / math.PI)
 		mid_uv := (last_uv + wp_uv) * 0.5
 		mid_3d := o + u * mid_uv.x + v * mid_uv.y
-		seg_lbl := fmt.tprintf("%.2f m  ∠ %+.1f°", seg_len, ang_deg)
+		seg_lbl := fmt.tprintf("%.2f m  (%+.1f°)", seg_len, ang_deg)
 		_draw_3d_tracked_pill(mid_3d, seg_lbl, {0.55, 0.92, 1.0, 1.0})
 
 		if !_ed.spline_wall_strip && len(_ed.sketch_points) >= 3 && linalg.length(wp_uv - _ed.sketch_points[0].uv) <= max(_ed.snap_step * 0.45, 0.22) {
@@ -3724,7 +3730,7 @@ _draw_spline_sketch_preview :: proc(wp_ok: bool, wp_uv: [2]f32) {
 
 	if _ed.num_len > 0 || _ed.hud_locked_len_valid {
 		num_str := string(_ed.num_buf[:_ed.num_len])
-		tag := fmt.tprintf("∠ %s_°", num_str) if _ed.hud_angle_field_active else fmt.tprintf("L: %s_ m", num_str)
+		tag := fmt.tprintf("Ang: %s_°", num_str) if _ed.hud_angle_field_active else fmt.tprintf("L: %s_ m", num_str)
 		_draw_3d_tracked_pill(o + u * wp_uv.x + v * wp_uv.y + n * 0.42, tag, {1.0, 0.65, 1.0, 1.0})
 	}
 }
