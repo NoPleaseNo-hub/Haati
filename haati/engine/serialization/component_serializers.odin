@@ -49,12 +49,15 @@ register_component_serializers :: proc() {
     for tid in _pending_unions {
         json.register_user_marshaler(tid, union_marshal)
         json.register_user_unmarshaler(tid, union_unmarshal)
+        engine.register_value_unmarshaler(tid, union_from_value)
     }
 
     json.register_user_marshaler(engine.Asset_GUID, asset_guid_marshal)
     json.register_user_unmarshaler(engine.Asset_GUID, asset_guid_unmarshal)
+    engine.register_value_unmarshaler(engine.Asset_GUID, asset_guid_from_value)
     json.register_user_marshaler(matrix[4, 4]f32, mat4_marshal)
     json.register_user_unmarshaler(matrix[4, 4]f32, mat4_unmarshal)
+    engine.register_value_unmarshaler(matrix[4, 4]f32, mat4_from_value)
 
     // Pointer typeids needed by nested-scene deep-override application
     // (`_nested_patch_live_field` calls `get_pointer_typeid_by_typeid` to

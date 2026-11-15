@@ -21,7 +21,17 @@ import "core:strings"
 SHADER_DIR :: "haati/engine/gfx/shaders"
 
 // Stage comes from the second extension: "world.vert" -> vert.
-SHADERS := []string{"world.vert", "world.frag", "lit.frag", "depth.frag", "skin.comp"}
+SHADERS := []string{
+	"world.vert",
+	"world.frag",
+	"lit.frag",
+	"depth.frag",
+	"skin.comp",
+	"postfx.vert",
+	"bloom_downsample.frag",
+	"bloom_upsample.frag",
+	"composite_tonemap.frag",
+}
 
 cmd_shaders :: proc(args: []string) -> int {
 	missing := false

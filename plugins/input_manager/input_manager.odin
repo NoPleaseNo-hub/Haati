@@ -332,7 +332,7 @@ _save_persisted_actions :: proc() {
 @(private = "file")
 _load_persisted_actions :: proc() {
 	context.allocator = runtime.default_allocator()
-	data, read_err := os.read_entire_file(INPUT_ACTIONS_SAVE_PATH, context.temp_allocator)
+	data, read_err := engine.vfs_read_entire_file(INPUT_ACTIONS_SAVE_PATH, context.temp_allocator)
 	if read_err != nil do return
 	loaded: [dynamic]Action_Item
 	if json.unmarshal(data, &loaded, allocator = context.temp_allocator) != nil do return
@@ -678,28 +678,44 @@ release_all_for_owner :: proc(owner: rawptr) {
 // STATE QUERIES
 // ─────────────────────────────────────────────────────────────
 
-is_action_down_idx :: proc(idx: int) -> bool {
+@(private = "file")
+_eval_action_trigger :: proc(idx: int, just_pressed: bool) -> bool {
 	_ensure_initialized()
 	if idx < 0 || idx >= len(_actions) do return false
 	m := _actions[idx].mapping
+	ui_blocks_mouse := !(_game_mouse_captured || input.is_mouse_relative()) && engine.ui_is_pointer_over_ui()
 
 	if m.primary_mouse || m.use_mouse_btn {
-		btn := m.primary_mbtn if m.primary_mouse else m.mouse_btn
-		if input.mouse_down(btn) do return true
+		if !ui_blocks_mouse {
+			btn := m.primary_mbtn if m.primary_mouse else m.mouse_btn
+			hit := input.mouse_pressed(btn) if just_pressed else input.mouse_down(btn)
+			if hit do return true
+		}
 	} else if m.primary_key != .UNKNOWN {
-		if input.key_down(m.primary_key) do return true
+		hit := input.key_pressed(m.primary_key) if just_pressed else input.key_down(m.primary_key)
+		if hit do return true
 	}
 
 	if m.secondary_mouse {
-		if input.mouse_down(m.secondary_mbtn) do return true
+		if !ui_blocks_mouse {
+			hit := input.mouse_pressed(m.secondary_mbtn) if just_pressed else input.mouse_down(m.secondary_mbtn)
+			if hit do return true
+		}
 	} else if m.secondary_key != .UNKNOWN {
-		if input.key_down(m.secondary_key) do return true
+		hit := input.key_pressed(m.secondary_key) if just_pressed else input.key_down(m.secondary_key)
+		if hit do return true
 	}
 
 	// Legacy fallback
-	if idx == int(Action.Wheel_Up) && input.wheel() > 0 do return true
-	if idx == int(Action.Wheel_Down) && input.wheel() < 0 do return true
+	if !ui_blocks_mouse {
+		if idx == int(Action.Wheel_Up) && input.wheel() > 0 do return true
+		if idx == int(Action.Wheel_Down) && input.wheel() < 0 do return true
+	}
 	return false
+}
+
+is_action_down_idx :: proc(idx: int) -> bool {
+	return _eval_action_trigger(idx, false)
 }
 
 is_action_down :: proc(action: Action) -> bool {
@@ -707,26 +723,7 @@ is_action_down :: proc(action: Action) -> bool {
 }
 
 is_action_pressed_idx :: proc(idx: int) -> bool {
-	_ensure_initialized()
-	if idx < 0 || idx >= len(_actions) do return false
-	m := _actions[idx].mapping
-
-	if m.primary_mouse || m.use_mouse_btn {
-		btn := m.primary_mbtn if m.primary_mouse else m.mouse_btn
-		if input.mouse_pressed(btn) do return true
-	} else if m.primary_key != .UNKNOWN {
-		if input.key_pressed(m.primary_key) do return true
-	}
-
-	if m.secondary_mouse {
-		if input.mouse_pressed(m.secondary_mbtn) do return true
-	} else if m.secondary_key != .UNKNOWN {
-		if input.key_pressed(m.secondary_key) do return true
-	}
-
-	if idx == int(Action.Wheel_Up) && input.wheel() > 0 do return true
-	if idx == int(Action.Wheel_Down) && input.wheel() < 0 do return true
-	return false
+	return _eval_action_trigger(idx, true)
 }
 
 is_action_pressed :: proc(action: Action) -> bool {
@@ -839,7 +836,7 @@ input_manager_dispatch :: proc(dt: f32) {
 					_game_mouse_captured = false
 					input.set_mouse_relative(false)
 				}
-			} else if _mouse_unlocked_by_escape && input.mouse_pressed(.Left) && input.mouse_in_viewport() {
+			} else if _mouse_unlocked_by_escape && input.mouse_pressed(.Left) && input.mouse_in_viewport() && !engine.ui_is_pointer_over_ui() {
 				_mouse_unlocked_by_escape = false
 			}
 

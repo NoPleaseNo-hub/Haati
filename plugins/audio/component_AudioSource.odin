@@ -31,10 +31,7 @@ AudioSource :: struct {
 	track:            ^mix.Track `json:"-" inspect:"-"`,
 	started:          bool `json:"-" inspect:"-"`,
 	occlusion_factor: f32 `json:"-" inspect:"-"`,
-	lpf_coeffs:       Audio_Biquad_Coeffs `json:"-" inspect:"-"`,
-	lpf_active:       bool `json:"-" inspect:"-"`,
-	lpf_z1:           [2]f32 `json:"-" inspect:"-"`,
-	lpf_z2:           [2]f32 `json:"-" inspect:"-"`,
+	lpf:              Audio_Atomic_Biquad `json:"-" inspect:"-"`,
 }
 
 reset_AudioSource :: proc(comp: ^AudioSource) {

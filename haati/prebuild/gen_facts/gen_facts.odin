@@ -118,9 +118,13 @@ Kind_GenComp :: struct {
 	kind: DeclKind,
 }
 
+Proc_Param :: gen_core.Proc_Param
+Proc_Sig   :: gen_core.Proc_Sig
+
 // Proc_GenComp is attached only to entities whose decl is a proc literal.
 Proc_GenComp :: struct {
 	no_args: bool, // true if the proc takes no parameters (phase_gen needs this)
+	sig:     Proc_Sig,
 }
 
 // Struct_GenComp is attached only to entities whose decl is a struct or union.
@@ -168,7 +172,10 @@ classify :: proc(w: ^db.World) -> bool {
 				if pt, ok_type := pv.type.derived.(^ast.Proc_Type); ok_type {
 					no_args = pt.params == nil || len(pt.params.list) == 0
 				}
-				db.set(procs, e, Proc_GenComp{no_args = no_args})
+				db.set(procs, e, Proc_GenComp{
+					no_args = no_args,
+					sig     = gen_core.ExtractProcSignature(v),
+				})
 			case ^ast.Struct_Type:
 				kind = .Struct
 				db.set(structs, e, Struct_GenComp{is_union = false})

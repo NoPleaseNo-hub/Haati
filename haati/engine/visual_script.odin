@@ -21,6 +21,7 @@ package engine
 
 import "base:runtime"
 import "core:encoding/json"
+import "core:encoding/uuid"
 import "core:fmt"
 import "core:math"
 import "core:math/linalg"
@@ -30,6 +31,8 @@ import "core:strconv"
 import "core:strings"
 import hot "hot_api"
 import "input"
+
+VG_MAX_LOOP_ITERATIONS :: 10_000
 
 VG_Node_Kind :: enum u8 {
 	// Legacy / Core Node IDs (0..10 preserved for 100% `.mhgraph` backward compatibility)
@@ -82,7 +85,29 @@ VG_Node_Kind :: enum u8 {
 
 	// V5 Unreal-Style Flow Control
 	Sequence                 = 38, // Multi-pin sequential execution (`Then 0`, `Then 1`, ... + `+ Add Pin`)
-	For_Loop                 = 39, // `First Index .. Last Index` inclusive loop (`Loop Body`, `Index: i32`, `Completed`)
+	For_Loop                 = 39, // Universal 4-Mode Odin `for` loop (`Range`, `For_In_Value`, `For_In_Ref`, `Condition`)
+
+	// V6 Odin-Native Type Power, Universal Loops, Auto-Casts, Timers & Real Gameplay Bridges (40..59)
+	Break_Loop               = 40, // Breaks out of the enclosing `For_Loop`
+	Continue_Loop            = 41, // Jumps to next iteration of the enclosing `For_Loop`
+	Switch_Value             = 42, // Exhaustive Odin `switch val { case ... }` multi-pin router
+	BitSet_Op                = 43, // `bit_set[Enum; u8]` operations (`Set_Flag`, `Clear_Flag`, `Toggle_Flag`, `Has_Flag`, `Is_Empty`)
+	Make_Struct              = 44, // Packs a user-declared POD `struct` from its field pins
+	Break_Struct             = 45, // Unpacks a user-declared POD `struct` into field output pins
+	Array_Op                 = 46, // Fixed `[N]T` & `Bounded_Array` operations (`Get_Copy`, `Get_Ref`, `Set`, `Append`, `Pop`, `Clear`, `Len`, `Swap_Remove`)
+	Defer_Exec               = 47, // Odin `defer { ... }` scoped cleanup execution pin on exit from scope
+	Or_Branch                = 48, // Odin `val, ok -> Valid / Failed` multi-return error branch
+	Auto_Cast                = 49, // Compact implicit numeric conversion / `.xy` / `.xz` vector swizzle micro-pill
+	Reroute_Knot             = 50, // Zero-overhead wire reroute junction dot
+	Delay_Timer              = 51, // Hot-swap-safe elapsed timer (`Duration`, `Reset` -> `Elapsed`, `Completed`)
+	Cooldown_Gate            = 52, // Hot-swap-safe cooldown gate (`Duration`, `Reset` -> `Ready`, `Blocked`, `Remaining`)
+	Spawn_Prefab             = 53, // Instantiates a prefab scene by GUID/path at `Pos` & `Rot`
+	Destroy_Entity           = 54, // Safely destroys target `Hot_Entity` at frame boundary
+	Physics_Raycast          = 55, // Jolt channel-masked narrowphase raycast (`Hit`, `Point`, `Normal`, `Dist`, `Entity`)
+	Physics_Overlap_Sphere   = 56, // Sphere overlap query returning count & closest entity
+	Physics_Add_Impulse      = 57, // Applies impulse or velocity change to target `Rigidbody`
+	Event_On_Trigger         = 58, // Event fired when Jolt trigger sensor / contact begins on `self` (`Exec`, `Other Entity`)
+	CSG_Brush_Stamp          = 59, // Runtime Faker-CSG / Destructible CSG spherical cut/stamp on active scene volumes
 }
 
 VG_Graph_Domain :: enum u8 {
@@ -102,29 +127,94 @@ VG_Math_Op :: enum u8 {
 	Damp     = 5, // exponential damp `a` toward `b`
 }
 
+VG_For_Mode :: enum u8 {
+	Range_Inclusive = 0, // `for i in first..=last` (legacy default)
+	Range_Half_Open = 1, // `for i in first..<last`
+	For_In_Value    = 2, // `for elem, i in arr`
+	For_In_Ref      = 3, // `for &elem, i in arr` (exposes addressable `◆ Element (^T)`)
+	Condition       = 4, // `for cond` (Odin while loop)
+}
+
+VG_Array_Op_Mode :: enum u8 {
+	Get_Copy    = 0,
+	Get_Ref     = 1,
+	Set_Elem    = 2,
+	Append      = 3,
+	Pop         = 4,
+	Clear       = 5,
+	Len         = 6,
+	Swap_Remove = 7,
+}
+
+VG_BitSet_Op_Mode :: enum u8 {
+	Set_Flag    = 0,
+	Clear_Flag  = 1,
+	Toggle_Flag = 2,
+	Has_Flag    = 3,
+	Is_Empty    = 4,
+}
+
+VG_Enum_Decl :: struct {
+	name:        string,
+	variants:    [dynamic]string,
+	has_bitset:  bool,
+	bitset_name: string,
+}
+
+VG_Struct_Field :: struct {
+	name:         string,
+	pin_type:     hot.Hot_Pin_Type,
+	custom_type:  string,
+	default_f32:  f32,
+	default_int:  i32,
+	default_u64:  u64,
+	default_f64:  f64,
+	default_bool: bool,
+	default_vec2: [2]f32,
+	default_vec3: [3]f32,
+	default_vec4: [4]f32,
+}
+
+VG_Struct_Decl :: struct {
+	name:              string,
+	using_parent_name: string,
+	fields:            [dynamic]VG_Struct_Field,
+}
+
 VG_Pin_Def :: struct {
-	name:           string,
-	pin_type:       hot.Hot_Pin_Type,
-	pass_mode:      hot.Hot_Pass_Mode, // `.Copy_Value` (`●`) or `.By_Reference` (`◆ ^T`)
-	is_addressable: bool,              // For output pins: `true` if output carries a mutable lvalue pointer (`^T`)
-	is_array:       bool,              // Fixed-size `[8]T` array pin
-	default_f32:    f32,
-	default_int:    i32,
-	default_i64:    i64,
-	default_bool:   bool,
-	default_vec2:   [2]f32,
-	default_vec3:   [3]f32,
-	default_vec4:   [4]f32,
-	default_str:    string,
+	name:              string,
+	pin_type:          hot.Hot_Pin_Type,
+	pass_mode:         hot.Hot_Pass_Mode, // `.Copy_Value` (`●`) or `.By_Reference` (`◆ ^T`)
+	is_addressable:    bool,              // For output pins: `true` if output carries a mutable lvalue pointer (`^T`)
+	is_array:          bool,              // Fixed-size `[N]T` or `Bounded_Array` pin
+	custom_type_name:  string,            // Enum / BitSet / Struct type name when applicable
+	default_f32:       f32,
+	default_int:       i32,
+	default_i64:       i64,
+	default_u64:       u64,
+	default_f64:       f64,
+	default_bool:      bool,
+	default_vec2:      [2]f32,
+	default_vec3:      [3]f32,
+	default_vec4:      [4]f32,
+	default_str:       string,
+	split_expanded:    bool,   // Original pin expanded inline into sub-pins
+	split_parent_name: string, // Non-empty on child sub-pins created by splitting `split_parent_name`
+	split_field_name:  string, // Component (`x`,`y`,`z`,`w`) or struct field name on split child pins
 }
 
 VG_Var_Decl :: struct {
 	name:              string,
 	pin_type:          hot.Hot_Pin_Type,
-	is_array:          bool,   // `[8]T` array variable
+	is_array:          bool,   // Fixed `[N]T` or Bounded `[Cap]T` array variable
+	array_count:       int,    // `0` -> legacy `[8]T` when `is_array`; `> 0` -> `[array_count]T`
+	array_is_bounded:  bool,   // `true` -> zero-heap C-ABI `struct { data: [Cap]T, count: i32 }`
+	custom_type_name:  string, // Enum / BitSet / Struct type name
 	default_f32:       f32,
 	default_int:       i32,
 	default_i64:       i64,
+	default_u64:       u64,
+	default_f64:       f64,
 	default_bool:      bool,
 	default_vec2:      [2]f32,
 	default_vec3:      [3]f32,
@@ -154,6 +244,12 @@ VG_Node :: struct {
 	hot_proc_target:    string,               // `Call_Hot_Proc` / `Odin_Function_Node` / `Custom_Proc_Entry` / fallback target
 	odin_body:          string,               // `Odin_Function_Node` / `Custom_Proc_Entry`: scoped Odin body statements!
 
+	// V6 Loop / Switch / Array / Struct / Cast configuration
+	for_mode:           VG_For_Mode,
+	loop_reverse:       bool,
+	sub_op:             int,                  // `VG_Array_Op_Mode` / `VG_BitSet_Op_Mode` / `Switch_Value` case count
+	target_var_or_type: string,               // Var name (`Array_Op`/`For_Loop`), Enum name (`Switch`/`BitSet_Op`), or Struct name (`Make`/`Break_Struct`)
+
 	// V3 Input & Odin Delegate configuration
 	action_name:       string,               // `Bind_Input_Action` / `Unbind_Input_Action` (e.g. `"Jump"`, `"Interact"`)
 	trigger_edge:      hot.Hot_Trigger_Edge, // `.Pressed`, `.Released`, `.Both`
@@ -181,6 +277,8 @@ Visual_Graph :: struct {
 	next_uid:       int,
 	using_spaces:   [dynamic]string, // Active `Using / Import` spaces (`"self"`, `"hot"`, `"math"`, `"linalg"`, ...)
 	delegates:      [dynamic]string, // User-declared Odin Delegate slots in *My Blueprint*
+	enums:          [dynamic]VG_Enum_Decl,
+	structs:        [dynamic]VG_Struct_Decl,
 	variables:      [dynamic]VG_Var_Decl,
 	nodes:          [dynamic]VG_Node,
 	wires:          [dynamic]VG_Wire,
@@ -189,22 +287,35 @@ Visual_Graph :: struct {
 // Runtime Blackboard held per entity (or preview session) for Tier-1 & Tier-2 execution.
 VG_MAX_VARS :: 32
 
+VG_Timer_Entry :: struct {
+	remaining:       f32,
+	is_cooldown:     bool,
+	last_tick_epoch: u64,
+}
+
 VG_Runtime_Blackboard :: struct {
-	initialized:      bool,
-	slots:            [VG_MAX_VARS]hot.Hot_Slot,
-	str_bufs:         [VG_MAX_VARS][128]u8,
-	loop_indices:     [8]struct{ node_uid: int, cur_idx: i32, active: bool },
-	last_exec_path:   [dynamic]int,
-	last_payload_f32: f32,
-	last_payload_v2:  [2]f32,
-	last_pressed:     bool,
+	initialized:             bool,
+	slots:                   [VG_MAX_VARS]hot.Hot_Slot,
+	str_bufs:                [VG_MAX_VARS][128]u8,
+	var_blobs:               map[string][dynamic]u8,
+	node_timers:             map[u32]VG_Timer_Entry,
+	live_pin_values:         map[u64]hot.Hot_Slot,
+	loop_indices:            [8]struct{ node_uid: int, cur_idx: i32, elem_ptr: rawptr, elem_pin_type: hot.Hot_Pin_Type, active: bool },
+	loop_break_requested:    bool,
+	loop_continue_requested: bool,
+	loop_fuse_tripped_uid:   int,
+	trigger_other_entity:    Transform_Handle,
+	last_exec_path:          [dynamic]int,
+	last_payload_f32:        f32,
+	last_payload_v2:         [2]f32,
+	last_pressed:            bool,
 }
 
 // =============================================================================
 // ECS `@(component)` Visual Script / Blueprint Runner
 // =============================================================================
 
-@(component={max=256, menu="Scripting/Blueprint Script Runner"})
+@(component={max=1024, menu="Scripting/Blueprint Script Runner"})
 @(typ_guid={guid = "7b84c3d2-51e9-4a8c-94f2-6d1820ab39c4"})
 VisualScriptRunner :: struct {
 	using base: CompData `inspect:"-"`,
@@ -267,6 +378,47 @@ _vs_input_bridge: Visual_Script_Input_Bridge
 visual_script_install_input_bridge :: proc(bridge: Visual_Script_Input_Bridge) {
 	_vs_input_bridge = bridge
 }
+
+Visual_Script_Trigger_Hit :: struct {
+	self_entity:  Transform_Handle,
+	other_entity: Transform_Handle,
+}
+
+Visual_Script_Physics_Bridge :: struct {
+	raycast_masked: proc(origin, dir: [3]f32, max_dist: f32, mask: u32, ignore_owner: Transform_Handle) -> (hit: hot.Hot_Raycast_Hit, ok: bool),
+	overlap_sphere: proc(center: [3]f32, radius: f32, mask: u32, ignore_owner: Transform_Handle) -> (count: i32, closest: Transform_Handle),
+	add_impulse:    proc(target: Transform_Handle, impulse: [3]f32, is_velocity_change: bool),
+	poll_triggers:  proc(allocator: runtime.Allocator) -> []Visual_Script_Trigger_Hit,
+}
+
+Visual_Script_Audio_Bridge :: struct {
+	bus_send:        proc(bus_name: string, volume, cutoff_hz: f32),
+	play_spatial_3d: proc(self: Transform_Handle, cue_name: string, pos: [3]f32, volume, pitch: f32),
+}
+
+Visual_Script_VFX_Bridge :: struct {
+	emitter_spawn: proc(target: Transform_Handle, emitter_name: string, rate: f32, burst_count: i32),
+}
+
+Visual_Script_Anim_Bridge :: struct {
+	set_ik_target: proc(target: Transform_Handle, effector_name: string, effector_pos: [3]f32, weight: f32),
+}
+
+Visual_Script_CSG_Bridge :: struct {
+	brush_stamp: proc(world_pos: [3]f32, radius, impulse: f32, cut_mat_str: string) -> i32,
+}
+
+@(private = "file") _vs_physics_bridge: Visual_Script_Physics_Bridge
+@(private = "file") _vs_audio_bridge:   Visual_Script_Audio_Bridge
+@(private = "file") _vs_vfx_bridge:     Visual_Script_VFX_Bridge
+@(private = "file") _vs_anim_bridge:    Visual_Script_Anim_Bridge
+@(private = "file") _vs_csg_bridge:     Visual_Script_CSG_Bridge
+
+visual_script_install_physics_bridge :: proc(b: Visual_Script_Physics_Bridge) { _vs_physics_bridge = b }
+visual_script_install_audio_bridge   :: proc(b: Visual_Script_Audio_Bridge)   { _vs_audio_bridge = b }
+visual_script_install_vfx_bridge     :: proc(b: Visual_Script_VFX_Bridge)     { _vs_vfx_bridge = b }
+visual_script_install_anim_bridge    :: proc(b: Visual_Script_Anim_Bridge)    { _vs_anim_bridge = b }
+visual_script_install_csg_bridge     :: proc(b: Visual_Script_CSG_Bridge)     { _vs_csg_bridge = b }
 
 // Returns live action names from `input_manager` (or sensible standard defaults if uninstalled).
 visual_script_list_input_actions :: proc(allocator := context.temp_allocator) -> []string {
@@ -331,14 +483,16 @@ _VS_Entity_State :: struct {
 
 @(private = "file")
 _VS_Runtime_State :: struct {
-	initialized:     bool,
-	next_token_id:   u32,
-	action_bindings: [dynamic]_VS_Action_Binding,
-	vector_bindings: [dynamic]_VS_Vector_Binding,
-	debug_bindings:  [dynamic]_VS_Debug_Key_Binding,
-	entities:        map[u64]^_VS_Entity_State,
-	disk_graphs:     map[string]^Visual_Graph,
-	last_dt:         f32,
+	initialized:         bool,
+	next_token_id:       u32,
+	tick_epoch:          u64,
+	inside_runners_tick: bool,
+	action_bindings:     [dynamic]_VS_Action_Binding,
+	vector_bindings:     [dynamic]_VS_Vector_Binding,
+	debug_bindings:      [dynamic]_VS_Debug_Key_Binding,
+	entities:            map[u64]^_VS_Entity_State,
+	disk_graphs:         map[string]^Visual_Graph,
+	last_dt:             f32,
 }
 
 @(private = "file")
@@ -391,25 +545,36 @@ _get_or_load_disk_graph :: proc(rel_or_abs: string) -> ^Visual_Graph {
 		return g
 	}
 	abs_p := rel_or_abs
-	if !filepath.is_abs(abs_p) {
-		root := resolve_repo_root(context.temp_allocator)
-		abs_p, _ = filepath.join({root, rel_or_abs}, context.temp_allocator)
-		if !os.exists(abs_p) {
-			alt_moon, _ := filepath.join({root, "haati", rel_or_abs}, context.temp_allocator)
-			if os.exists(alt_moon) do abs_p = alt_moon
+	if !vfs_has_file(rel_or_abs) && !filepath.is_abs(abs_p) {
+		if vfs_exists(rel_or_abs) {
+			abs_p = rel_or_abs
+			if os.exists(rel_or_abs) {
+				abs_p, _ = filepath.abs(rel_or_abs, context.temp_allocator)
+			}
+		} else if proj_dir := active_project_root(); proj_dir != "" {
+			proj_cand, _ := filepath.join({proj_dir, rel_or_abs}, context.temp_allocator)
+			if vfs_exists(proj_cand) do abs_p = proj_cand
+		}
+		if !vfs_exists(abs_p) {
+			root := resolve_repo_root(context.temp_allocator)
+			abs_p, _ = filepath.join({root, rel_or_abs}, context.temp_allocator)
+			if !vfs_exists(abs_p) {
+				alt_moon, _ := filepath.join({root, "haati", rel_or_abs}, context.temp_allocator)
+				if vfs_exists(alt_moon) do abs_p = alt_moon
+			}
 		}
 		// Seamless `.bodin` <-> `.mhgraph` fallback so older saved scenes and upgraded `.bodin` assets both resolve!
-		if !os.exists(abs_p) {
+		if !vfs_exists(abs_p) {
 			if strings.has_suffix(abs_p, ".mhgraph") {
 				cand := fmt.tprintf("%s.bodin", strings.trim_suffix(abs_p, ".mhgraph"))
-				if os.exists(cand) do abs_p = cand
+				if vfs_exists(cand) do abs_p = cand
 			} else if strings.has_suffix(abs_p, ".bodin") {
 				cand := fmt.tprintf("%s.mhgraph", strings.trim_suffix(abs_p, ".bodin"))
-				if os.exists(cand) do abs_p = cand
+				if vfs_exists(cand) do abs_p = cand
 			}
 		}
 	}
-	if !os.exists(abs_p) do return nil
+	if !vfs_exists(abs_p) do return nil
 
 	context.allocator = runtime.default_allocator()
 	g := new(Visual_Graph)
@@ -448,24 +613,114 @@ visual_script_invalidate_cached_graph :: proc(graph_path: string = "") {
 }
 
 // Parses `instance_overrides` (`"speed=12.5;is_boss=true;offset=1,2,3"`) onto a Blackboard!
+_is_unescaped_at :: proc(s: string, idx: int) -> bool {
+	bs := 0
+	for j := idx - 1; j >= 0 && s[j] == '\\'; j -= 1 {
+		bs += 1
+	}
+	return (bs & 1) == 0
+}
+
+_split_unescaped_semicolons :: proc(s: string, allocator := context.temp_allocator) -> []string {
+	out := make([dynamic]string, 0, 8, allocator)
+	start := 0
+	for i := 0; i < len(s); i += 1 {
+		if s[i] == ';' && _is_unescaped_at(s, i) {
+			append(&out, s[start:i])
+			start = i + 1
+		}
+	}
+	append(&out, s[start:])
+	return out[:]
+}
+
+_index_unescaped_byte :: proc(s: string, needle: u8) -> int {
+	for i := 0; i < len(s); i += 1 {
+		if s[i] == needle && _is_unescaped_at(s, i) {
+			return i
+		}
+	}
+	return -1
+}
+
+// Escapes `\`, `;`, and `=` in `instance_overrides` names/values so literal delimiters round-trip safely.
+vg_escape_override_token :: proc(s: string, allocator := context.temp_allocator) -> string {
+	if !strings.contains_any(s, "\\;=") {
+		return strings.clone(s, allocator)
+	}
+	sb := strings.builder_make(0, len(s) + 8, allocator)
+	for i := 0; i < len(s); i += 1 {
+		c := s[i]
+		if c == '\\' || c == ';' || c == '=' {
+			strings.write_byte(&sb, '\\')
+		}
+		strings.write_byte(&sb, c)
+	}
+	return strings.to_string(sb)
+}
+
+// Decodes `\\`, `\;`, and `\=` escapes while keeping legacy unescaped backslashes intact.
+vg_unescape_override_token :: proc(s: string, allocator := context.temp_allocator) -> string {
+	if strings.index_byte(s, '\\') < 0 {
+		return strings.clone(s, allocator)
+	}
+	sb := strings.builder_make(0, len(s), allocator)
+	for i := 0; i < len(s); i += 1 {
+		if s[i] == '\\' && i + 1 < len(s) {
+			nxt := s[i + 1]
+			if nxt == '\\' || nxt == ';' || nxt == '=' {
+				strings.write_byte(&sb, nxt)
+				i += 1
+				continue
+			}
+		}
+		strings.write_byte(&sb, s[i])
+	}
+	return strings.to_string(sb)
+}
+
 vg_apply_instance_overrides :: proc(g: ^Visual_Graph, bb: ^VG_Runtime_Blackboard, overrides_str: string) {
 	if g == nil || bb == nil || overrides_str == "" do return
-	for pair in strings.split(overrides_str, ";", context.temp_allocator) {
+	for pair in _split_unescaped_semicolons(overrides_str, context.temp_allocator) {
 		kv := strings.trim_space(pair)
 		if kv == "" do continue
-		eq := strings.index_byte(kv, '=')
+		eq := _index_unescaped_byte(kv, '=')
 		if eq <= 0 do continue
-		vname := strings.trim_space(kv[:eq])
-		vval  := strings.trim_space(kv[eq + 1:])
+		vname := vg_unescape_override_token(strings.trim_space(kv[:eq]), context.temp_allocator)
+		vval  := vg_unescape_override_token(strings.trim_space(kv[eq + 1:]), context.temp_allocator)
 		vi := vg_find_var_index(g, vname)
 		if vi < 0 || vi >= VG_MAX_VARS do continue
 		#partial switch g.variables[vi].pin_type {
 		case .Float:
 			if f, ok := strconv.parse_f32(vval); ok do bb.slots[vi].val_f32 = f
+		case .F64:
+			if f, ok := strconv.parse_f64(vval); ok do bb.slots[vi].val_f64 = f
 		case .Int:
 			if iv, ok := strconv.parse_int(vval); ok do bb.slots[vi].val_int = i32(iv)
 		case .Int64:
 			if iv, ok := strconv.parse_i64(vval); ok do bb.slots[vi].val_i64 = iv
+		case .U8:
+			if uv, ok := strconv.parse_u64(vval); ok do bb.slots[vi].val_u8 = u8(clamp(uv, 0, 255))
+		case .I8:
+			if iv, ok := strconv.parse_i64(vval); ok do bb.slots[vi].val_i8 = i8(clamp(iv, -128, 127))
+		case .U16:
+			if uv, ok := strconv.parse_u64(vval); ok do bb.slots[vi].val_u16 = u16(clamp(uv, 0, 65535))
+		case .I16:
+			if iv, ok := strconv.parse_i64(vval); ok do bb.slots[vi].val_i16 = i16(clamp(iv, -32768, 32767))
+		case .U32:
+			if uv, ok := strconv.parse_u64(vval); ok do bb.slots[vi].val_u32 = u32(uv)
+		case .U64:
+			if uv, ok := strconv.parse_u64(vval); ok do bb.slots[vi].val_u64 = uv
+		case .Enum_U8, .BitSet_U8:
+			if uv, ok := strconv.parse_u64(vval); ok {
+				bb.slots[vi].val_u8 = u8(clamp(uv, 0, 255))
+			} else if g.variables[vi].pin_type == .Enum_U8 {
+				if ed := vg_find_enum_decl(g, g.variables[vi].custom_type_name); ed != nil {
+					for vname, eidx in ed.variants {
+						if vname == vval { bb.slots[vi].val_u8 = u8(eidx); break }
+					}
+				}
+			}
 		case .Bool:
 			bb.slots[vi].val_bool = (vval == "true" || vval == "1")
 		case .Vec2:
@@ -511,15 +766,17 @@ vg_apply_instance_overrides :: proc(g: ^Visual_Graph, bb: ^VG_Runtime_Blackboard
 vg_set_instance_override_value :: proc(existing: string, var_name: string, formatted_val: string, allocator := context.allocator) -> string {
 	entries := make([dynamic]string, 0, 8, context.temp_allocator)
 	replaced := false
-	for pair in strings.split(existing, ";", context.temp_allocator) {
+	esc_key := vg_escape_override_token(var_name, context.temp_allocator)
+	for pair in _split_unescaped_semicolons(existing, context.temp_allocator) {
 		kv := strings.trim_space(pair)
 		if kv == "" do continue
-		eq := strings.index_byte(kv, '=')
+		eq := _index_unescaped_byte(kv, '=')
 		if eq <= 0 do continue
-		k := strings.trim_space(kv[:eq])
+		k := vg_unescape_override_token(strings.trim_space(kv[:eq]), context.temp_allocator)
 		if k == var_name {
 			if formatted_val != "" {
-				append(&entries, fmt.tprintf("%s=%s", var_name, formatted_val))
+				esc_val := vg_escape_override_token(formatted_val, context.temp_allocator)
+				append(&entries, fmt.tprintf("%s=%s", esc_key, esc_val))
 			}
 			replaced = true
 		} else {
@@ -527,19 +784,21 @@ vg_set_instance_override_value :: proc(existing: string, var_name: string, forma
 		}
 	}
 	if !replaced && formatted_val != "" {
-		append(&entries, fmt.tprintf("%s=%s", var_name, formatted_val))
+		esc_val := vg_escape_override_token(formatted_val, context.temp_allocator)
+		append(&entries, fmt.tprintf("%s=%s", esc_key, esc_val))
 	}
 	return strings.join(entries[:], ";", allocator)
 }
 
-vg_get_instance_override_value :: proc(existing: string, var_name: string) -> (val: string, found: bool) {
-	for pair in strings.split(existing, ";", context.temp_allocator) {
+vg_get_instance_override_value :: proc(existing: string, var_name: string, allocator := context.temp_allocator) -> (val: string, found: bool) {
+	for pair in _split_unescaped_semicolons(existing, context.temp_allocator) {
 		kv := strings.trim_space(pair)
 		if kv == "" do continue
-		eq := strings.index_byte(kv, '=')
+		eq := _index_unescaped_byte(kv, '=')
 		if eq <= 0 do continue
-		if strings.trim_space(kv[:eq]) == var_name {
-			return strings.trim_space(kv[eq + 1:]), true
+		k := vg_unescape_override_token(strings.trim_space(kv[:eq]), context.temp_allocator)
+		if k == var_name {
+			return vg_unescape_override_token(strings.trim_space(kv[eq + 1:]), allocator), true
 		}
 	}
 	return "", false
@@ -553,8 +812,11 @@ _get_or_create_entity_state :: proc(tH: Transform_Handle, g_opt: ^Visual_Graph =
 	if !exists || st == nil {
 		context.allocator = runtime.default_allocator()
 		st = new(_VS_Entity_State)
-		st.bb.last_exec_path = make([dynamic]int, 0, 16)
-		st.custom_delegates  = make(map[string][dynamic]_VS_Custom_Delegate_Listener, 4)
+		st.bb.last_exec_path  = make([dynamic]int, 0, 16)
+		st.bb.var_blobs       = make(map[string][dynamic]u8, 4)
+		st.bb.node_timers     = make(map[u32]VG_Timer_Entry, 4)
+		st.bb.live_pin_values = make(map[u64]hot.Hot_Slot, 16)
+		st.custom_delegates   = make(map[string][dynamic]_VS_Custom_Delegate_Listener, 4)
 		for i in 0 ..< VG_MAX_VARS {
 			st.bb.slots[i].pin_type = .Float
 		}
@@ -580,26 +842,295 @@ _get_or_create_entity_state :: proc(tH: Transform_Handle, g_opt: ^Visual_Graph =
 	return st
 }
 
-// Returns a direct addressable raw pointer (`^f32`, `^i32`, `^bool`, `^[3]f32`) to per-entity
+@(private = "file")
+_bb_live_key :: #force_inline proc(uid, pin_idx: int) -> u64 {
+	return (u64(u32(uid)) << 16) | u64(u16(pin_idx))
+}
+
+_bb_set_live_pin :: proc(bb: ^VG_Runtime_Blackboard, uid, pin_idx: int, slot: hot.Hot_Slot) {
+	if bb == nil do return
+	if bb.live_pin_values == nil {
+		context.allocator = runtime.default_allocator()
+		bb.live_pin_values = make(map[u64]hot.Hot_Slot, 16)
+	}
+	bb.live_pin_values[_bb_live_key(uid, pin_idx)] = slot
+}
+
+_bb_get_live_pin :: proc(bb: ^VG_Runtime_Blackboard, uid, pin_idx: int) -> (slot: hot.Hot_Slot, ok: bool) {
+	if bb == nil || bb.live_pin_values == nil do return {}, false
+	return bb.live_pin_values[_bb_live_key(uid, pin_idx)]
+}
+
+visual_script_get_entity_bb :: proc(tH: Transform_Handle) -> ^VG_Runtime_Blackboard {
+	if !_vs_rt.initialized do return nil
+	if st, ok := _vs_rt.entities[_entity_key(tH)]; ok && st != nil {
+		return &st.bb
+	}
+	return nil
+}
+
+visual_script_get_live_pin_value :: proc(tH: Transform_Handle, node_uid, out_pin_idx: int) -> (hot.Hot_Slot, bool) {
+	bb := visual_script_get_entity_bb(tH)
+	if bb == nil do return {}, false
+	return _bb_get_live_pin(bb, node_uid, out_pin_idx)
+}
+
+visual_script_reset_loop_fuse :: proc(tH: Transform_Handle) {
+	if bb := visual_script_get_entity_bb(tH); bb != nil {
+		bb.loop_fuse_tripped_uid = 0
+	}
+}
+
+visual_script_report_loop_fuse :: proc(tH: Transform_Handle, node_uid: u32) {
+	st := _get_or_create_entity_state(tH)
+	st.bb.loop_fuse_tripped_uid = int(node_uid)
+}
+
+// Returns a direct addressable raw pointer (`^f32`, `^i32`, `^bool`, `^[3]f32`, `^u8`, ...) to per-entity
 // Blueprint state variable `var_index`, allowing `On_Init`, `On_Tick`, AND bound `Input` / `Delegate`
 // `@(hot_proc)` callbacks to read & mutate persistent `self.<var>` fields at native pointer speed!
-visual_script_get_entity_var_ptr :: proc(tH: Transform_Handle, var_index: int) -> rawptr {
-	if var_index < 0 || var_index >= VG_MAX_VARS do return nil
-	st := _get_or_create_entity_state(tH)
-	s := &st.bb.slots[var_index]
-	#partial switch s.pin_type {
-	case .Bool:   return &s.val_bool
-	case .Int:    return &s.val_int
-	case .Int64:  return &s.val_i64
-	case .Float:  return &s.val_f32
-	case .Vec2:   return &s.val_vec2
-	case .Vec3:   return &s.val_vec3
-	case .Vec4:   return &s.val_vec4
-	case .Quat:   return &s.val_quat
-	case .Entity: return &s.val_ent
+_bb_slot_value_ptr :: proc(bb: ^VG_Runtime_Blackboard, var_index: int, fallback_pt: hot.Hot_Pin_Type = .Float) -> rawptr {
+	if bb == nil || var_index < 0 || var_index >= VG_MAX_VARS do return nil
+	s := &bb.slots[var_index]
+	pt := s.pin_type != .Exec ? s.pin_type : fallback_pt
+	#partial switch pt {
+	case .Bool:       return &s.val_bool
+	case .Int:        return &s.val_int
+	case .Int64:      return &s.val_i64
+	case .Float:      return &s.val_f32
+	case .Vec2:       return &s.val_vec2
+	case .Vec3:       return &s.val_vec3
+	case .Vec4:       return &s.val_vec4
+	case .Quat:       return &s.val_quat
+	case .Entity:     return &s.val_ent
+	case .Delegate:   return &s.val_delegate
+	case .U8, .Enum_U8, .BitSet_U8: return &s.val_u8
+	case .I8:         return &s.val_i8
+	case .U16:        return &s.val_u16
+	case .I16:        return &s.val_i16
+	case .U32:        return &s.val_u32
+	case .U64:        return &s.val_u64
+	case .F64:        return &s.val_f64
+	case .Struct_Val: return &s.val_bytes[0]
 	case .String, .Asset: return &s.val_cstr
 	}
 	return &s.val_f32
+}
+
+visual_script_get_entity_var_ptr :: proc(tH: Transform_Handle, var_index: int) -> rawptr {
+	if var_index < 0 || var_index >= VG_MAX_VARS do return nil
+	st := _get_or_create_entity_state(tH)
+	return _bb_slot_value_ptr(&st.bb, var_index)
+}
+
+visual_script_get_entity_var_blob_ptr :: proc(tH: Transform_Handle, var_name: string, byte_size: int) -> rawptr {
+	if var_name == "" do return nil
+	st := _get_or_create_entity_state(tH)
+	sz := max(byte_size, 1)
+	if buf, exists := st.bb.var_blobs[var_name]; exists {
+		if len(buf) < sz {
+			context.allocator = runtime.default_allocator()
+			resize(&buf, sz)
+			st.bb.var_blobs[var_name] = buf
+		}
+		return rawptr(&buf[0])
+	}
+	context.allocator = runtime.default_allocator()
+	if st.bb.var_blobs == nil {
+		st.bb.var_blobs = make(map[string][dynamic]u8, 4)
+	}
+	buf := make([dynamic]u8, sz, runtime.default_allocator())
+	st.bb.var_blobs[strings.clone(var_name, runtime.default_allocator())] = buf
+	return rawptr(&buf[0])
+}
+
+visual_script_get_entity_var_ptr_raw :: proc(tH: Transform_Handle, var_name: string, pin_type: hot.Hot_Pin_Type) -> rawptr {
+	if var_name == "" do return nil
+	if w := ctx_world(); w != nil && pool_valid(&w.transforms, Handle(tH)) {
+		if _, r := transform_get_comp(tH, VisualScriptRunner); r != nil && r.graph_path != "" {
+			if g := _get_or_load_disk_graph(r.graph_path); g != nil {
+				if vi := vg_find_var_index(g, var_name); vi >= 0 && vi < VG_MAX_VARS {
+					return visual_script_get_entity_var_ptr(tH, vi)
+				}
+			}
+		}
+	}
+	// Headless / standalone Cartridge fallback: allocate named POD backing storage!
+	blob_key := fmt.tprintf("__raw_%s", var_name)
+	_ = pin_type
+	return visual_script_get_entity_var_blob_ptr(tH, blob_key, 64)
+}
+
+visual_script_timer_step_runtime :: proc(
+	tH:          Transform_Handle,
+	node_uid:    u32,
+	duration:    f32,
+	dt:          f32,
+	reset:       bool,
+	is_cooldown: bool,
+) -> (ready: bool, rem: f32) {
+	st := _get_or_create_entity_state(tH)
+	if st.bb.node_timers == nil {
+		context.allocator = runtime.default_allocator()
+		st.bb.node_timers = make(map[u32]VG_Timer_Entry, 4)
+	}
+	dur := max(duration, f32(0.0))
+	if is_cooldown {
+		if reset {
+			delete_key(&st.bb.node_timers, node_uid)
+			return true, f32(0.0)
+		}
+		entry, exists := st.bb.node_timers[node_uid]
+		if exists && entry.remaining > 0.0 && (!_vs_rt.inside_runners_tick || entry.last_tick_epoch != _vs_rt.tick_epoch) {
+			entry.remaining = max(entry.remaining - dt, f32(0.0))
+			entry.last_tick_epoch = _vs_rt.tick_epoch
+			st.bb.node_timers[node_uid] = entry
+		}
+		if !exists || entry.remaining <= 0.0 {
+			st.bb.node_timers[node_uid] = VG_Timer_Entry{
+				remaining       = dur,
+				is_cooldown     = true,
+				last_tick_epoch = _vs_rt.tick_epoch,
+			}
+			return true, dur
+		}
+		return false, entry.remaining
+	}
+
+	// Delay Timer
+	entry, exists := st.bb.node_timers[node_uid]
+	if !exists || reset {
+		entry = VG_Timer_Entry{
+			remaining       = dur,
+			is_cooldown     = false,
+			last_tick_epoch = _vs_rt.tick_epoch,
+		}
+		if reset {
+			st.bb.node_timers[node_uid] = entry
+			return dur <= 0.0, entry.remaining
+		}
+		entry.last_tick_epoch = 0
+	}
+	if entry.remaining > 0.0 && (!_vs_rt.inside_runners_tick || entry.last_tick_epoch != _vs_rt.tick_epoch) {
+		entry.remaining = max(entry.remaining - dt, f32(0.0))
+		entry.last_tick_epoch = _vs_rt.tick_epoch
+	}
+	st.bb.node_timers[node_uid] = entry
+	return entry.remaining <= 0.0, entry.remaining
+}
+
+visual_script_spawn_prefab_runtime :: proc(prefab_guid_str: string, world_pos: [3]f32, world_rot: [4]f32) -> Transform_Handle {
+	w := ctx_world()
+	if w == nil do return {}
+	parent: Transform_Handle
+	if sc := sm_scene_get_active(); sc != nil {
+		parent = Transform_Handle(sc.root.handle)
+	}
+	res: Transform_Handle
+	if prefab_guid_str != "" && prefab_guid_str != "__empty_entity__" {
+		guid: Asset_GUID
+		has_guid := false
+		if parsed, perr := uuid.read(prefab_guid_str); perr == nil {
+			guid = Asset_GUID(parsed)
+			has_guid = true
+		} else if found, gok := asset_db_get_guid(prefab_guid_str); gok {
+			guid = Asset_GUID(found)
+			has_guid = true
+		}
+		if has_guid && parent != {} {
+			res = scene_instantiate_guid(guid, parent)
+		}
+	}
+	if res == {} && (prefab_guid_str == "" || prefab_guid_str == "__empty_entity__") {
+		res = transform_new("SpawnedEntity", parent)
+	}
+	if res != {} && pool_valid(&w.transforms, Handle(res)) {
+		transform_set_world_position(res, world_pos)
+		if world_rot != ([4]f32{0, 0, 0, 0}) {
+			transform_set_world_rotation(res, world_rot)
+		}
+	}
+	return res
+}
+
+visual_script_destroy_entity_runtime :: proc(target: Transform_Handle) {
+	if target == {} do return
+	if w := ctx_world(); w != nil && pool_valid(&w.transforms, Handle(target)) {
+		transform_destroy(target)
+	}
+}
+
+visual_script_ai_move_runtime :: proc(tH: Transform_Handle, goal_pos: [3]f32, speed_override: f32) -> bool {
+	w := ctx_world()
+	if w == nil || !pool_valid(&w.transforms, Handle(tH)) do return false
+	if _, ag := transform_get_comp(tH, NavMeshAgent); ag != nil {
+		if speed_override > 0 do ag.speed = speed_override
+		return nav_agent_set_destination(w, tH, goal_pos)
+	}
+	return false
+}
+
+visual_script_ai_arrived_runtime :: proc(tH: Transform_Handle, accept_radius: f32) -> bool {
+	w := ctx_world()
+	if w == nil || !pool_valid(&w.transforms, Handle(tH)) do return false
+	if nav_agent_has_arrived(w, tH) do return true
+	if _, ag := transform_get_comp(tH, NavMeshAgent); ag != nil && ag.has_destination {
+		tw := transform_world(tH)
+		return linalg.distance(tw.position, ag.target_position) <= max(accept_radius, ag.stopping_distance)
+	}
+	return false
+}
+
+visual_script_physics_raycast_runtime :: proc(ignore_self: Transform_Handle, origin, dir: [3]f32, max_dist: f32, channel_mask: u32) -> hot.Hot_Raycast_Hit {
+	if _vs_physics_bridge.raycast_masked != nil {
+		hit, _ := _vs_physics_bridge.raycast_masked(origin, dir, max_dist, channel_mask, ignore_self)
+		return hit
+	}
+	return {}
+}
+
+visual_script_physics_overlap_sphere_runtime :: proc(ignore_self: Transform_Handle, center: [3]f32, radius: f32, channel_mask: u32) -> (i32, Transform_Handle) {
+	if _vs_physics_bridge.overlap_sphere != nil {
+		return _vs_physics_bridge.overlap_sphere(center, radius, channel_mask, ignore_self)
+	}
+	return 0, {}
+}
+
+visual_script_physics_add_impulse_runtime :: proc(target: Transform_Handle, impulse: [3]f32, is_vel_change: bool) {
+	if _vs_physics_bridge.add_impulse != nil {
+		_vs_physics_bridge.add_impulse(target, impulse, is_vel_change)
+	}
+}
+
+visual_script_audio_play_3d_runtime :: proc(tH: Transform_Handle, cue_str: string, world_pos: [3]f32, volume: f32, pitch: f32) {
+	if _vs_audio_bridge.play_spatial_3d != nil {
+		_vs_audio_bridge.play_spatial_3d(tH, cue_str, world_pos, volume, pitch)
+	}
+}
+
+visual_script_audio_bus_send_runtime :: proc(bus_name: string, send_level: f32, lowpass_hz: f32) {
+	if _vs_audio_bridge.bus_send != nil {
+		_vs_audio_bridge.bus_send(bus_name, send_level, lowpass_hz)
+	}
+}
+
+visual_script_vfx_spawn_runtime :: proc(tH: Transform_Handle, vfx_str: string, spawn_rate: f32, burst_count: i32) {
+	if _vs_vfx_bridge.emitter_spawn != nil {
+		_vs_vfx_bridge.emitter_spawn(tH, vfx_str, spawn_rate, burst_count)
+	}
+}
+
+visual_script_anim_ik_target_runtime :: proc(tH: Transform_Handle, effector_name: string, world_target: [3]f32, weight: f32) {
+	if _vs_anim_bridge.set_ik_target != nil {
+		_vs_anim_bridge.set_ik_target(tH, effector_name, world_target, weight)
+	}
+}
+
+visual_script_csg_stamp_runtime :: proc(world_pos: [3]f32, radius: f32, impulse: f32, cut_mat_str: string) -> i32 {
+	if _vs_csg_bridge.brush_stamp != nil {
+		return _vs_csg_bridge.brush_stamp(world_pos, radius, impulse, cut_mat_str)
+	}
+	return 0
 }
 
 visual_script_set_entity_string_var :: proc(tH: Transform_Handle, var_index: int, val: string) {
@@ -929,6 +1460,37 @@ visual_script_broadcast_custom_delegate_runtime :: proc(tH: Transform_Handle, de
 	}
 }
 
+vg_destroy_blackboard :: proc(bb: ^VG_Runtime_Blackboard) {
+	if bb == nil do return
+	context.allocator = runtime.default_allocator()
+	delete(bb.last_exec_path)
+	for k, v in bb.var_blobs {
+		delete(k)
+		delete(v)
+	}
+	delete(bb.var_blobs)
+	delete(bb.node_timers)
+	delete(bb.live_pin_values)
+	bb^ = {}
+}
+
+@(private = "file")
+_free_entity_state :: proc(st: ^_VS_Entity_State) {
+	if st == nil do return
+	context.allocator = runtime.default_allocator()
+	vg_destroy_blackboard(&st.bb)
+	if st.graph_path_bound != "" do delete(st.graph_path_bound)
+	for k, list in st.custom_delegates {
+		delete(k)
+		for item in list {
+			if item.target_proc != "" do delete(item.target_proc)
+		}
+		delete(list)
+	}
+	delete(st.custom_delegates)
+	free(st)
+}
+
 visual_script_destroy_entity_state :: proc(tH: Transform_Handle) {
 	if !_vs_rt.initialized do return
 	visual_script_unbind_all_for_entity(tH)
@@ -936,17 +1498,7 @@ visual_script_destroy_entity_state :: proc(tH: Transform_Handle) {
 	if st, ok := _vs_rt.entities[ek]; ok && st != nil {
 		context.allocator = runtime.default_allocator()
 		delete_key(&_vs_rt.entities, ek)
-		delete(st.bb.last_exec_path)
-		if st.graph_path_bound != "" do delete(st.graph_path_bound)
-		for k, list in st.custom_delegates {
-			delete(k)
-			for item in list {
-				if item.target_proc != "" do delete(item.target_proc)
-			}
-			delete(list)
-		}
-		delete(st.custom_delegates)
-		free(st)
+		_free_entity_state(st)
 	}
 }
 
@@ -984,18 +1536,7 @@ visual_script_reset_runtime_state :: proc() {
 	clear(&_vs_rt.debug_bindings)
 
 	for _, st in _vs_rt.entities {
-		if st == nil do continue
-		delete(st.bb.last_exec_path)
-		if st.graph_path_bound != "" do delete(st.graph_path_bound)
-		for k, list in st.custom_delegates {
-			delete(k)
-			for item in list {
-				if item.target_proc != "" do delete(item.target_proc)
-			}
-			delete(list)
-		}
-		delete(st.custom_delegates)
-		free(st)
+		_free_entity_state(st)
 	}
 	clear(&_vs_rt.entities)
 
@@ -1094,6 +1635,20 @@ visual_script_runners_tick :: proc(dt: f32) {
 	if w == nil do return
 	_ensure_vs_rt()
 	_vs_rt.last_dt = dt
+	_vs_rt.tick_epoch += 1
+	_vs_rt.inside_runners_tick = true
+	defer _vs_rt.inside_runners_tick = false
+
+	// 0. Advance active Blueprint Delay & Cooldown timers ONCE per tick frame.
+	for _, st in _vs_rt.entities {
+		if st == nil || st.bb.node_timers == nil do continue
+		for _, &entry in st.bb.node_timers {
+			if entry.remaining > 0.0 && entry.last_tick_epoch != _vs_rt.tick_epoch {
+				entry.remaining = max(entry.remaining - dt, f32(0.0))
+				entry.last_tick_epoch = _vs_rt.tick_epoch
+			}
+		}
+	}
 
 	// 1. Poll `[DEV]` Debug Key Bindings (`0 ns` when `len(_vs_rt.debug_bindings) == 0`!)
 	if len(_vs_rt.debug_bindings) > 0 {
@@ -1108,6 +1663,27 @@ visual_script_runners_tick :: proc(dt: f32) {
 				_dispatch_bound_target(b.entity, b.target_proc, b.proc_slot, b.node_uid, 1.0, {}, true)
 			} else if kr && (b.trigger == .Released || b.trigger == .Both) {
 				_dispatch_bound_target(b.entity, b.target_proc, b.proc_slot, b.node_uid, 0.0, {}, false)
+			}
+		}
+	}
+
+	// 1b. Poll Physics trigger / contact begin events for `.Event_On_Trigger`
+	if _vs_physics_bridge.poll_triggers != nil {
+		hits := _vs_physics_bridge.poll_triggers(context.temp_allocator)
+		for h in hits {
+			if h.self_entity == {} || !pool_valid(&w.transforms, Handle(h.self_entity)) do continue
+			if _, r := transform_get_comp(h.self_entity, VisualScriptRunner); r != nil && r.enabled {
+				st := _get_or_create_entity_state(h.self_entity, nil, r)
+				st.bb.trigger_other_entity = h.other_entity
+				trig_sym := fmt.tprintf("%s__on_trigger", r.compiled_proc_name)
+				if r.compiled_proc_name != "" && hot_proc_exists(trig_sym) {
+					frame: hot.Hot_Call_Frame
+					frame.inputs[0] = {pin_type = .Entity, val_ent = transform_to_hot_entity(h.other_entity)}
+					frame.input_count = 1
+					hot_proc_invoke(trig_sym, h.self_entity, dt, &frame)
+				} else if g_disk := _get_or_load_disk_graph(r.graph_path); g_disk != nil {
+					vg_eval_event_live(g_disk, &st.bb, h.self_entity, dt, .Event_On_Trigger)
+				}
 			}
 		}
 	}
@@ -1167,41 +1743,217 @@ visual_script_runners_tick :: proc(dt: f32) {
 
 @(rodata)
 _PIN_ODIN_SCALAR_TYPE := [hot.Hot_Pin_Type]string{
-	.Exec     = "exec",
-	.Bool     = "bool",
-	.Int      = "i32",
-	.Int64    = "i64",
-	.Float    = "f32",
-	.Vec2     = "[2]f32",
-	.Vec3     = "[3]f32",
-	.Vec4     = "[4]f32",
-	.Quat     = "[4]f32",
-	.String   = "cstring",
-	.Asset    = "cstring",
-	.Entity   = "hot.Hot_Entity",
-	.Delegate = "hot.Hot_Delegate",
+	.Exec       = "exec",
+	.Bool       = "bool",
+	.Int        = "i32",
+	.Float      = "f32",
+	.Vec3       = "[3]f32",
+	.Quat       = "[4]f32",
+	.Entity     = "hot.Hot_Entity",
+	.Delegate   = "hot.Hot_Delegate",
+	.Vec2       = "[2]f32",
+	.Vec4       = "[4]f32",
+	.Int64      = "i64",
+	.String     = "cstring",
+	.Asset      = "cstring",
+	.U8         = "u8",
+	.I8         = "i8",
+	.U16        = "u16",
+	.I16        = "i16",
+	.U32        = "u32",
+	.U64        = "u64",
+	.F64        = "f64",
+	.Enum_U8    = "u8",
+	.BitSet_U8  = "u8",
+	.Struct_Val = "rawptr",
 }
 
 @(rodata)
 _PIN_ODIN_ARRAY_TYPE := [hot.Hot_Pin_Type]string{
-	.Exec     = "exec",
-	.Bool     = "[8]bool",
-	.Int      = "[8]i32",
-	.Int64    = "[8]i64",
-	.Float    = "[8]f32",
-	.Vec2     = "[8][2]f32",
-	.Vec3     = "[8][3]f32",
-	.Vec4     = "[8][4]f32",
-	.Quat     = "[8][4]f32",
-	.String   = "[8]cstring",
-	.Asset    = "[8]cstring",
-	.Entity   = "[8]hot.Hot_Entity",
-	.Delegate = "hot.Hot_Delegate",
+	.Exec       = "exec",
+	.Bool       = "[8]bool",
+	.Int        = "[8]i32",
+	.Float      = "[8]f32",
+	.Vec3       = "[8][3]f32",
+	.Quat       = "[8][4]f32",
+	.Entity     = "[8]hot.Hot_Entity",
+	.Delegate   = "hot.Hot_Delegate",
+	.Vec2       = "[8][2]f32",
+	.Vec4       = "[8][4]f32",
+	.Int64      = "[8]i64",
+	.String     = "[8]cstring",
+	.Asset      = "[8]cstring",
+	.U8         = "[8]u8",
+	.I8         = "[8]i8",
+	.U16        = "[8]u16",
+	.I16        = "[8]i16",
+	.U32        = "[8]u32",
+	.U64        = "[8]u64",
+	.F64        = "[8]f64",
+	.Enum_U8    = "[8]u8",
+	.BitSet_U8  = "[8]u8",
+	.Struct_Val = "[8]rawptr",
 }
 
 vg_pin_odin_type :: proc(pt: hot.Hot_Pin_Type, is_array: bool = false) -> string {
 	if is_array do return _PIN_ODIN_ARRAY_TYPE[pt]
 	return _PIN_ODIN_SCALAR_TYPE[pt]
+}
+
+vg_sanitize_bp_token :: proc(raw: string, allocator := context.temp_allocator) -> string {
+	if raw == "" do return strings.clone("raw", allocator)
+	switch raw {
+	case "[2]f32": return strings.clone("Vec2", allocator)
+	case "[3]f32": return strings.clone("Vec3", allocator)
+	case "[4]f32": return strings.clone("Vec4", allocator)
+	}
+	b := strings.builder_make(0, len(raw), allocator)
+	for i in 0 ..< len(raw) {
+		ch := raw[i]
+		is_ok := (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_'
+		strings.write_byte(&b, is_ok ? ch : '_')
+	}
+	return strings.to_string(b)
+}
+
+vg_find_enum_decl :: proc(g: ^Visual_Graph, name: string) -> ^VG_Enum_Decl {
+	if g == nil || name == "" do return nil
+	for &e in g.enums {
+		if e.name == name || (e.bitset_name != "" && e.bitset_name == name) do return &e
+	}
+	return nil
+}
+
+vg_find_struct_decl :: proc(g: ^Visual_Graph, name: string) -> ^VG_Struct_Decl {
+	if g == nil || name == "" do return nil
+	for &s in g.structs {
+		if s.name == name do return &s
+	}
+	return nil
+}
+
+VG_Struct_Field_Layout :: struct {
+	name:        string,
+	pin_type:    hot.Hot_Pin_Type,
+	custom_type: string,
+	offset:      int,
+	size:        int,
+	align:       int,
+}
+
+vg_scalar_type_size :: proc(g: ^Visual_Graph, pt: hot.Hot_Pin_Type, custom_type: string = "", depth: int = 0) -> (size: int, align: int) {
+	switch pt {
+	case .Exec:       return 0, 1
+	case .Bool, .U8, .I8, .Enum_U8, .BitSet_U8: return 1, 1
+	case .U16, .I16:  return 2, 2
+	case .Int, .U32, .Float: return 4, 4
+	case .Int64, .U64, .F64: return 8, 8
+	case .Vec2:       return 8, 4
+	case .Vec3:       return 12, 4
+	case .Vec4, .Quat:return 16, 4
+	case .Entity:     return size_of(hot.Hot_Entity), align_of(hot.Hot_Entity)
+	case .Delegate:   return size_of(hot.Hot_Delegate), align_of(hot.Hot_Delegate)
+	case .String, .Asset: return size_of(cstring), align_of(cstring)
+	case .Struct_Val:
+		if depth >= 4 || g == nil || custom_type == "" do return 16, 4
+		_, total_sz, total_al := vg_struct_layout(g, custom_type, context.temp_allocator, depth + 1)
+		return max(total_sz, 1), max(total_al, 1)
+	}
+	return 4, 4
+}
+
+vg_struct_layout :: proc(
+	g:           ^Visual_Graph,
+	struct_name: string,
+	allocator := context.temp_allocator,
+	depth:       int = 0,
+) -> (fields: []VG_Struct_Field_Layout, total_size: int, total_align: int) {
+	if g == nil || struct_name == "" || depth >= 4 do return nil, 0, 1
+	sd := vg_find_struct_decl(g, struct_name)
+	if sd == nil do return nil, 0, 1
+
+	out := make([dynamic]VG_Struct_Field_Layout, 0, len(sd.fields) + 4, allocator)
+	cur_off := 0
+	max_align := 1
+
+	if sd.using_parent_name != "" && sd.using_parent_name != struct_name {
+		p_fields, p_size, p_align := vg_struct_layout(g, sd.using_parent_name, allocator, depth + 1)
+		for pf in p_fields {
+			append(&out, pf)
+		}
+		cur_off = p_size
+		max_align = max(max_align, p_align)
+	}
+
+	for f in sd.fields {
+		f_sz, f_al := vg_scalar_type_size(g, f.pin_type, f.custom_type, depth + 1)
+		f_al = max(f_al, 1)
+		cur_off = (cur_off + f_al - 1) &~ (f_al - 1)
+		append(&out, VG_Struct_Field_Layout{
+			name        = f.name,
+			pin_type    = f.pin_type,
+			custom_type = f.custom_type,
+			offset      = cur_off,
+			size        = f_sz,
+			align       = f_al,
+		})
+		cur_off += f_sz
+		max_align = max(max_align, f_al)
+	}
+
+	aligned_total := cur_off == 0 ? 0 : ((cur_off + max_align - 1) &~ (max_align - 1))
+	return out[:], aligned_total, max_align
+}
+
+vg_bounded_array_count_offset :: proc(g: ^Visual_Graph, v: VG_Var_Decl) -> int {
+	elem_sz, _ := vg_scalar_type_size(g, v.pin_type, v.custom_type_name)
+	cnt := v.array_count > 0 ? v.array_count : 8
+	data_bytes := cnt * max(elem_sz, 1)
+	return (data_bytes + 3) &~ 3
+}
+
+vg_var_byte_size :: proc(g: ^Visual_Graph, v: VG_Var_Decl) -> int {
+	elem_sz, elem_al := vg_scalar_type_size(g, v.pin_type, v.custom_type_name)
+	elem_sz = max(elem_sz, 1)
+	elem_al = max(elem_al, 1)
+	if !v.is_array do return elem_sz
+	cnt := v.array_count > 0 ? v.array_count : 8
+	if v.array_is_bounded {
+		cnt_off := vg_bounded_array_count_offset(g, v)
+		st_al := max(elem_al, 4)
+		return ((cnt_off + 4) + st_al - 1) &~ (st_al - 1)
+	}
+	return cnt * elem_sz
+}
+
+vg_var_odin_type_ex :: proc(g: ^Visual_Graph, v: VG_Var_Decl, allocator := context.temp_allocator) -> string {
+	base := vg_pin_odin_type(v.pin_type, false)
+	if v.pin_type == .Enum_U8 && v.custom_type_name != "" {
+		base = v.custom_type_name
+	} else if v.pin_type == .BitSet_U8 && v.custom_type_name != "" {
+		if ed := vg_find_enum_decl(g, v.custom_type_name); ed != nil {
+			if ed.bitset_name != "" {
+				base = ed.bitset_name
+			} else {
+				base = fmt.tprintf("bit_set[%s; u8]", ed.name)
+			}
+		} else {
+			base = v.custom_type_name
+		}
+	} else if v.pin_type == .Struct_Val && v.custom_type_name != "" {
+		base = v.custom_type_name
+	}
+	if !v.is_array {
+		return strings.clone(base, allocator)
+	}
+	cnt := v.array_count > 0 ? v.array_count : 8
+	if v.array_is_bounded {
+		return fmt.aprintf("BP_Bounded_%s_%d", vg_sanitize_bp_token(base, context.temp_allocator), cnt, allocator = allocator)
+	}
+	if v.array_count <= 0 && v.pin_type not_in (bit_set[hot.Hot_Pin_Type]{.Enum_U8, .BitSet_U8, .Struct_Val}) {
+		return strings.clone(vg_pin_odin_type(v.pin_type, true), allocator)
+	}
+	return fmt.aprintf("[%d]%s", cnt, base, allocator = allocator)
 }
 
 vg_has_tick_event :: proc(g: ^Visual_Graph) -> bool {
@@ -1222,7 +1974,6 @@ vg_has_using_space :: proc(g: ^Visual_Graph, space_id: string) -> bool {
 
 vg_toggle_using_space :: proc(g: ^Visual_Graph, space_id: string) -> bool {
 	if g == nil || space_id == "" do return false
-	context.allocator = runtime.default_allocator()
 	for s, i in g.using_spaces {
 		if s == space_id {
 			delete(s)
@@ -1242,6 +1993,14 @@ vg_ensure_default_spaces :: proc(g: ^Visual_Graph) {
 	append(&g.using_spaces, strings.clone("linalg"))
 }
 
+_vg_destroy_pin_strings :: proc(p: ^VG_Pin_Def) {
+	delete(p.name)
+	delete(p.default_str)
+	delete(p.custom_type_name)
+	delete(p.split_parent_name)
+	delete(p.split_field_name)
+}
+
 vg_destroy_node :: proc(n: ^VG_Node) {
 	delete(n.title)
 	delete(n.owner_proc)
@@ -1250,14 +2009,9 @@ vg_destroy_node :: proc(n: ^VG_Node) {
 	delete(n.odin_body)
 	delete(n.action_name)
 	delete(n.delegate_name)
-	for p in n.inputs {
-		delete(p.name)
-		delete(p.default_str)
-	}
-	for p in n.outputs {
-		delete(p.name)
-		delete(p.default_str)
-	}
+	delete(n.target_var_or_type)
+	for &p in n.inputs  do _vg_destroy_pin_strings(&p)
+	for &p in n.outputs do _vg_destroy_pin_strings(&p)
 	delete(n.inputs)
 	delete(n.outputs)
 	n^ = {}
@@ -1270,9 +2024,27 @@ vg_destroy_graph :: proc(g: ^Visual_Graph) {
 	delete(g.using_spaces)
 	for d in g.delegates do delete(d)
 	delete(g.delegates)
+	for &e in g.enums {
+		delete(e.name)
+		delete(e.bitset_name)
+		for v in e.variants do delete(v)
+		delete(e.variants)
+	}
+	delete(g.enums)
+	for &s in g.structs {
+		delete(s.name)
+		delete(s.using_parent_name)
+		for &f in s.fields {
+			delete(f.name)
+			delete(f.custom_type)
+		}
+		delete(s.fields)
+	}
+	delete(g.structs)
 	for v in g.variables {
 		delete(v.name)
 		delete(v.default_str)
+		delete(v.custom_type_name)
 		delete(v.category)
 		delete(v.tooltip_text)
 	}
@@ -1281,6 +2053,169 @@ vg_destroy_graph :: proc(g: ^Visual_Graph) {
 	delete(g.nodes)
 	delete(g.wires)
 	g^ = {}
+}
+
+@(private = "file")
+_vg_clone_pin :: proc(p: ^VG_Pin_Def, allocator: runtime.Allocator) -> VG_Pin_Def {
+	out := p^
+	out.name              = p.name != "" ? strings.clone(p.name, allocator) : ""
+	out.default_str       = p.default_str != "" ? strings.clone(p.default_str, allocator) : ""
+	out.custom_type_name  = p.custom_type_name != "" ? strings.clone(p.custom_type_name, allocator) : ""
+	out.split_parent_name = p.split_parent_name != "" ? strings.clone(p.split_parent_name, allocator) : ""
+	out.split_field_name  = p.split_field_name != "" ? strings.clone(p.split_field_name, allocator) : ""
+	return out
+}
+
+@(private = "file")
+_vg_pins_equal :: proc(a, b: []VG_Pin_Def) -> bool {
+	if len(a) != len(b) do return false
+	for i in 0 ..< len(a) {
+		pa, pb := a[i], b[i]
+		if pa.pin_type != pb.pin_type || pa.pass_mode != pb.pass_mode || pa.is_addressable != pb.is_addressable || pa.is_array != pb.is_array {
+			return false
+		}
+		if pa.default_f32 != pb.default_f32 || pa.default_int != pb.default_int || pa.default_i64 != pb.default_i64 || pa.default_u64 != pb.default_u64 || pa.default_f64 != pb.default_f64 || pa.default_bool != pb.default_bool {
+			return false
+		}
+		if pa.default_vec2 != pb.default_vec2 || pa.default_vec3 != pb.default_vec3 || pa.default_vec4 != pb.default_vec4 || pa.split_expanded != pb.split_expanded {
+			return false
+		}
+		if pa.name != pb.name || pa.default_str != pb.default_str || pa.custom_type_name != pb.custom_type_name || pa.split_parent_name != pb.split_parent_name || pa.split_field_name != pb.split_field_name {
+			return false
+		}
+	}
+	return true
+}
+
+vg_clone_graph :: proc(src: ^Visual_Graph, allocator := context.allocator) -> Visual_Graph {
+	if src == nil do return {}
+	dst := Visual_Graph{
+		name           = src.name != "" ? strings.clone(src.name, allocator) : "",
+		domain         = src.domain,
+		package_target = src.package_target != "" ? strings.clone(src.package_target, allocator) : "",
+		next_uid       = src.next_uid,
+		using_spaces   = make([dynamic]string, len(src.using_spaces), allocator),
+		delegates      = make([dynamic]string, len(src.delegates), allocator),
+		enums          = make([dynamic]VG_Enum_Decl, len(src.enums), allocator),
+		structs        = make([dynamic]VG_Struct_Decl, len(src.structs), allocator),
+		variables      = make([dynamic]VG_Var_Decl, len(src.variables), allocator),
+		nodes          = make([dynamic]VG_Node, len(src.nodes), allocator),
+		wires          = make([dynamic]VG_Wire, len(src.wires), allocator),
+	}
+	for s, i in src.using_spaces {
+		dst.using_spaces[i] = s != "" ? strings.clone(s, allocator) : ""
+	}
+	for d, i in src.delegates {
+		dst.delegates[i] = d != "" ? strings.clone(d, allocator) : ""
+	}
+	for &e, ei in src.enums {
+		ce := VG_Enum_Decl{
+			name        = e.name != "" ? strings.clone(e.name, allocator) : "",
+			variants    = make([dynamic]string, len(e.variants), allocator),
+			has_bitset  = e.has_bitset,
+			bitset_name = e.bitset_name != "" ? strings.clone(e.bitset_name, allocator) : "",
+		}
+		for v, vi in e.variants {
+			ce.variants[vi] = v != "" ? strings.clone(v, allocator) : ""
+		}
+		dst.enums[ei] = ce
+	}
+	for &s, si in src.structs {
+		cs := VG_Struct_Decl{
+			name              = s.name != "" ? strings.clone(s.name, allocator) : "",
+			using_parent_name = s.using_parent_name != "" ? strings.clone(s.using_parent_name, allocator) : "",
+			fields            = make([dynamic]VG_Struct_Field, len(s.fields), allocator),
+		}
+		for &f, fi in s.fields {
+			cf := f
+			cf.name        = f.name != "" ? strings.clone(f.name, allocator) : ""
+			cf.custom_type = f.custom_type != "" ? strings.clone(f.custom_type, allocator) : ""
+			cs.fields[fi] = cf
+		}
+		dst.structs[si] = cs
+	}
+	for &v, vi in src.variables {
+		cv := v
+		cv.name             = v.name != "" ? strings.clone(v.name, allocator) : ""
+		cv.default_str      = v.default_str != "" ? strings.clone(v.default_str, allocator) : ""
+		cv.custom_type_name = v.custom_type_name != "" ? strings.clone(v.custom_type_name, allocator) : ""
+		cv.category         = v.category != "" ? strings.clone(v.category, allocator) : ""
+		cv.tooltip_text     = v.tooltip_text != "" ? strings.clone(v.tooltip_text, allocator) : ""
+		dst.variables[vi] = cv
+	}
+	for &n, ni in src.nodes {
+		cn := n
+		cn.title              = n.title != "" ? strings.clone(n.title, allocator) : ""
+		cn.owner_proc         = n.owner_proc != "" ? strings.clone(n.owner_proc, allocator) : ""
+		cn.var_name           = n.var_name != "" ? strings.clone(n.var_name, allocator) : ""
+		cn.hot_proc_target    = n.hot_proc_target != "" ? strings.clone(n.hot_proc_target, allocator) : ""
+		cn.odin_body          = n.odin_body != "" ? strings.clone(n.odin_body, allocator) : ""
+		cn.action_name        = n.action_name != "" ? strings.clone(n.action_name, allocator) : ""
+		cn.delegate_name      = n.delegate_name != "" ? strings.clone(n.delegate_name, allocator) : ""
+		cn.target_var_or_type = n.target_var_or_type != "" ? strings.clone(n.target_var_or_type, allocator) : ""
+		cn.inputs             = make([dynamic]VG_Pin_Def, len(n.inputs), allocator)
+		cn.outputs            = make([dynamic]VG_Pin_Def, len(n.outputs), allocator)
+		for &p, pi in n.inputs  do cn.inputs[pi] = _vg_clone_pin(&p, allocator)
+		for &p, pi in n.outputs do cn.outputs[pi] = _vg_clone_pin(&p, allocator)
+		dst.nodes[ni] = cn
+	}
+	copy(dst.wires[:], src.wires[:])
+	return dst
+}
+
+vg_graphs_equal :: proc(a, b: ^Visual_Graph) -> bool {
+	if a == nil || b == nil do return a == b
+	if a.domain != b.domain || a.next_uid != b.next_uid || a.name != b.name || a.package_target != b.package_target {
+		return false
+	}
+	if len(a.using_spaces) != len(b.using_spaces) || len(a.delegates) != len(b.delegates) || len(a.enums) != len(b.enums) || len(a.structs) != len(b.structs) || len(a.variables) != len(b.variables) || len(a.nodes) != len(b.nodes) || len(a.wires) != len(b.wires) {
+		return false
+	}
+	for i in 0 ..< len(a.using_spaces) do if a.using_spaces[i] != b.using_spaces[i] do return false
+	for i in 0 ..< len(a.delegates)    do if a.delegates[i] != b.delegates[i]       do return false
+	for i in 0 ..< len(a.enums) {
+		ea, eb := &a.enums[i], &b.enums[i]
+		if ea.name != eb.name || ea.has_bitset != eb.has_bitset || ea.bitset_name != eb.bitset_name || len(ea.variants) != len(eb.variants) do return false
+		for vi in 0 ..< len(ea.variants) do if ea.variants[vi] != eb.variants[vi] do return false
+	}
+	for i in 0 ..< len(a.structs) {
+		sa, sb := &a.structs[i], &b.structs[i]
+		if sa.name != sb.name || sa.using_parent_name != sb.using_parent_name || len(sa.fields) != len(sb.fields) do return false
+		for fi in 0 ..< len(sa.fields) {
+			fa, fb := sa.fields[fi], sb.fields[fi]
+			if fa.name != fb.name || fa.pin_type != fb.pin_type || fa.custom_type != fb.custom_type || fa.default_f32 != fb.default_f32 || fa.default_int != fb.default_int || fa.default_u64 != fb.default_u64 || fa.default_f64 != fb.default_f64 || fa.default_bool != fb.default_bool || fa.default_vec2 != fb.default_vec2 || fa.default_vec3 != fb.default_vec3 || fa.default_vec4 != fb.default_vec4 {
+				return false
+			}
+		}
+	}
+	for i in 0 ..< len(a.variables) {
+		va, vb := &a.variables[i], &b.variables[i]
+		if va.pin_type != vb.pin_type || va.is_array != vb.is_array || va.array_count != vb.array_count || va.array_is_bounded != vb.array_is_bounded || va.instance_editable != vb.instance_editable || va.slider_min != vb.slider_min || va.slider_max != vb.slider_max {
+			return false
+		}
+		if va.default_f32 != vb.default_f32 || va.default_int != vb.default_int || va.default_i64 != vb.default_i64 || va.default_u64 != vb.default_u64 || va.default_f64 != vb.default_f64 || va.default_bool != vb.default_bool || va.default_vec2 != vb.default_vec2 || va.default_vec3 != vb.default_vec3 || va.default_vec4 != vb.default_vec4 {
+			return false
+		}
+		if va.name != vb.name || va.default_str != vb.default_str || va.custom_type_name != vb.custom_type_name || va.category != vb.category || va.tooltip_text != vb.tooltip_text {
+			return false
+		}
+	}
+	for i in 0 ..< len(a.nodes) {
+		na, nb := &a.nodes[i], &b.nodes[i]
+		if na.uid != nb.uid || na.kind != nb.kind || na.pos != nb.pos || na.enabled != nb.enabled || na.proc_use_odin_body != nb.proc_use_odin_body || na.var_as_ref != nb.var_as_ref || na.math_op != nb.math_op || na.per_object_ts != nb.per_object_ts || na.for_mode != nb.for_mode || na.loop_reverse != nb.loop_reverse || na.sub_op != nb.sub_op || na.trigger_edge != nb.trigger_edge || na.input_priority != nb.input_priority || na.consume_input != nb.consume_input || na.is_look_vector != nb.is_look_vector || na.debug_key_code != nb.debug_key_code {
+			return false
+		}
+		if na.title != nb.title || na.owner_proc != nb.owner_proc || na.var_name != nb.var_name || na.hot_proc_target != nb.hot_proc_target || na.odin_body != nb.odin_body || na.action_name != nb.action_name || na.delegate_name != nb.delegate_name || na.target_var_or_type != nb.target_var_or_type {
+			return false
+		}
+		if !_vg_pins_equal(na.inputs[:], nb.inputs[:]) || !_vg_pins_equal(na.outputs[:], nb.outputs[:]) {
+			return false
+		}
+	}
+	for i in 0 ..< len(a.wires) {
+		if a.wires[i] != b.wires[i] do return false
+	}
+	return true
 }
 
 vg_find_node :: proc(g: ^Visual_Graph, uid: int) -> ^VG_Node {
@@ -1317,6 +2252,12 @@ vg_can_connect_pins :: proc(src: VG_Pin_Def, dst: VG_Pin_Def) -> (ok: bool, reas
 		}
 		return false, "Pin data types do not match"
 	}
+	if src.is_array != dst.is_array {
+		return false, "Array pin cannot connect directly to scalar pin"
+	}
+	if src.custom_type_name != "" && dst.custom_type_name != "" && src.custom_type_name != dst.custom_type_name {
+		return false, "Custom enum/struct types do not match"
+	}
 	if src.pin_type == .Exec || src.pin_type == .Delegate {
 		return true, ""
 	}
@@ -1327,21 +2268,201 @@ vg_can_connect_pins :: proc(src: VG_Pin_Def, dst: VG_Pin_Def) -> (ok: bool, reas
 	return true, ""
 }
 
+_vg_is_scalar_castable :: #force_inline proc(pt: hot.Hot_Pin_Type) -> bool {
+	return pt in (bit_set[hot.Hot_Pin_Type]{.Int, .Int64, .Float, .U8, .I8, .U16, .I16, .U32, .U64, .F64, .Enum_U8})
+}
+
+vg_are_types_autocastable :: proc(src: VG_Pin_Def, dst: VG_Pin_Def) -> bool {
+	if src.pin_type == dst.pin_type do return false
+	if src.is_array || dst.is_array do return false
+	if dst.pass_mode == .By_Reference do return false
+	if src.pin_type in (bit_set[hot.Hot_Pin_Type]{.Exec, .Delegate, .Bool, .Struct_Val, .BitSet_U8, .String, .Asset, .Entity}) do return false
+	if dst.pin_type in (bit_set[hot.Hot_Pin_Type]{.Exec, .Delegate, .Bool, .Struct_Val, .BitSet_U8, .String, .Asset, .Entity}) do return false
+	if _vg_is_scalar_castable(src.pin_type) && _vg_is_scalar_castable(dst.pin_type) do return true
+	// Vector component demotion (Vec4->Vec3/Vec2/Float, Vec3->Vec2/Float, Vec2->Float)
+	if (src.pin_type == .Vec4 && dst.pin_type in (bit_set[hot.Hot_Pin_Type]{.Vec3, .Vec2, .Float})) do return true
+	if (src.pin_type == .Vec3 && dst.pin_type in (bit_set[hot.Hot_Pin_Type]{.Vec2, .Float})) do return true
+	if (src.pin_type == .Vec2 && dst.pin_type == .Float) do return true
+	// Scalar splat to vector (Float/F64 -> Vec2/Vec3/Vec4)
+	if (src.pin_type == .Float || src.pin_type == .F64) && dst.pin_type in (bit_set[hot.Hot_Pin_Type]{.Vec2, .Vec3, .Vec4}) do return true
+	return false
+}
+
+vg_can_connect_or_autocast_pins :: proc(src: VG_Pin_Def, dst: VG_Pin_Def) -> (direct_ok: bool, needs_cast: bool, reason: string) {
+	if ok, r := vg_can_connect_pins(src, dst); ok {
+		return true, false, ""
+	} else {
+		if vg_are_types_autocastable(src, dst) {
+			return false, true, ""
+		}
+		return false, false, r
+	}
+}
+
+vg_can_split_pin :: proc(g: ^Visual_Graph, p: VG_Pin_Def) -> bool {
+	if p.split_expanded || p.split_parent_name != "" || p.is_array || p.pass_mode == .By_Reference {
+		return false
+	}
+	#partial switch p.pin_type {
+	case .Vec2, .Vec3, .Vec4, .Quat:
+		return true
+	case .Struct_Val:
+		if sd := vg_find_struct_decl(g, p.custom_type_name); sd != nil {
+			fields, _, _ := vg_struct_layout(g, p.custom_type_name, context.temp_allocator)
+			return len(fields) > 0
+		}
+	}
+	return false
+}
+
+_remove_wires_on_pin_and_shift :: proc(g: ^Visual_Graph, node_uid: int, is_output: bool, pin_idx: int) {
+	if g == nil do return
+	for wi := len(g.wires) - 1; wi >= 0; wi -= 1 {
+		w := &g.wires[wi]
+		if is_output {
+			if w.from_uid == node_uid {
+				if w.from_pin == pin_idx {
+					ordered_remove(&g.wires, wi)
+				} else if w.from_pin > pin_idx {
+					w.from_pin -= 1
+				}
+			}
+		} else {
+			if w.to_uid == node_uid {
+				if w.to_pin == pin_idx {
+					ordered_remove(&g.wires, wi)
+				} else if w.to_pin > pin_idx {
+					w.to_pin -= 1
+				}
+			}
+		}
+	}
+}
+
+vg_split_pin_inline :: proc(g: ^Visual_Graph, node_uid: int, is_output: bool, pin_idx: int) -> bool {
+	n := vg_find_node(g, node_uid)
+	if n == nil do return false
+	pins := is_output ? &n.outputs : &n.inputs
+	if pin_idx < 0 || pin_idx >= len(pins^) do return false
+	p := &pins^[pin_idx]
+	if !vg_can_split_pin(g, p^) do return false
+
+	// Disconnect any wire previously bound directly to the parent pin
+	for wi := len(g.wires) - 1; wi >= 0; wi -= 1 {
+		w := g.wires[wi]
+		if (is_output && w.from_uid == node_uid && w.from_pin == pin_idx) ||
+		   (!is_output && w.to_uid == node_uid && w.to_pin == pin_idx) {
+			ordered_remove(&g.wires, wi)
+		}
+	}
+
+	parent_name := strings.clone(p.name, context.temp_allocator)
+	parent_addr := p.is_addressable
+	p.split_expanded = true
+
+	#partial switch p.pin_type {
+	case .Vec2:
+		comps := [2]struct{ f: string, def: f32 }{{"x", p.default_vec2.x}, {"y", p.default_vec2.y}}
+		for c in comps {
+			append(pins, VG_Pin_Def{
+				name              = strings.clone(fmt.tprintf("%s.%s", parent_name, c.f)),
+				pin_type          = .Float,
+				is_addressable    = is_output && parent_addr,
+				default_f32       = c.def,
+				split_parent_name = strings.clone(parent_name),
+				split_field_name  = strings.clone(c.f),
+			})
+		}
+	case .Vec3:
+		comps := [3]struct{ f: string, def: f32 }{{"x", p.default_vec3.x}, {"y", p.default_vec3.y}, {"z", p.default_vec3.z}}
+		for c in comps {
+			append(pins, VG_Pin_Def{
+				name              = strings.clone(fmt.tprintf("%s.%s", parent_name, c.f)),
+				pin_type          = .Float,
+				is_addressable    = is_output && parent_addr,
+				default_f32       = c.def,
+				split_parent_name = strings.clone(parent_name),
+				split_field_name  = strings.clone(c.f),
+			})
+		}
+	case .Vec4, .Quat:
+		def4 := p.pin_type == .Quat && p.default_vec4 == ({0, 0, 0, 0}) ? [4]f32{0, 0, 0, 1} : p.default_vec4
+		comps := [4]struct{ f: string, def: f32 }{{"x", def4.x}, {"y", def4.y}, {"z", def4.z}, {"w", def4.w}}
+		for c in comps {
+			append(pins, VG_Pin_Def{
+				name              = strings.clone(fmt.tprintf("%s.%s", parent_name, c.f)),
+				pin_type          = .Float,
+				is_addressable    = is_output && parent_addr,
+				default_f32       = c.def,
+				split_parent_name = strings.clone(parent_name),
+				split_field_name  = strings.clone(c.f),
+			})
+		}
+	case .Struct_Val:
+		fl, _, _ := vg_struct_layout(g, p.custom_type_name, context.temp_allocator)
+		for f in fl {
+			append(pins, VG_Pin_Def{
+				name              = strings.clone(fmt.tprintf("%s.%s", parent_name, f.name)),
+				pin_type          = f.pin_type,
+				custom_type_name  = f.custom_type != "" ? strings.clone(f.custom_type) : "",
+				is_addressable    = is_output && parent_addr,
+				split_parent_name = strings.clone(parent_name),
+				split_field_name  = strings.clone(f.name),
+			})
+		}
+	}
+	return true
+}
+
+vg_recombine_split_pin :: proc(g: ^Visual_Graph, node_uid: int, is_output: bool, pin_idx: int) -> bool {
+	n := vg_find_node(g, node_uid)
+	if n == nil do return false
+	pins := is_output ? &n.outputs : &n.inputs
+	if pin_idx < 0 || pin_idx >= len(pins^) do return false
+	if !pins^[pin_idx].split_expanded do return false
+
+	parent_name := strings.clone(pins^[pin_idx].name, context.temp_allocator)
+	for i := len(pins^) - 1; i >= 0; i -= 1 {
+		if pins^[i].split_parent_name == parent_name {
+			_remove_wires_on_pin_and_shift(g, node_uid, is_output, i)
+			_vg_destroy_pin_strings(&pins^[i])
+			ordered_remove(pins, i)
+		}
+	}
+	// Refresh parent index (in case any earlier pins shifted, though child pins always sit after parent)
+	for &p in pins^ {
+		if p.name == parent_name {
+			p.split_expanded = false
+		}
+	}
+	return true
+}
+
 // Returns the index (>= 0) of the first opposite-direction pin on `cand` that can legally
-// connect with `drag_pin` (respecting `pin_type` AND `Copy T` vs `^Ref ^T` addressability),
+// connect with `drag_pin` (respecting `pin_type`, `is_array`, `custom_type_name`, `Copy T` vs `^Ref ^T`, and `Auto_Cast`),
 // or `-1` if `cand` has no compatible pin.
-vg_find_compatible_pin_on_node :: proc(drag_from_out: bool, drag_pin: VG_Pin_Def, cand: ^VG_Node) -> int {
+vg_find_compatible_pin_on_node :: proc(drag_from_out: bool, drag_pin: VG_Pin_Def, cand: ^VG_Node, allow_autocast: bool = true) -> int {
 	if cand == nil do return -1
 	if drag_from_out {
 		for ip, ii in cand.inputs {
-			if ok, _ := vg_can_connect_pins(drag_pin, ip); ok {
-				return ii
+			if ip.split_expanded do continue
+			if ok, _ := vg_can_connect_pins(drag_pin, ip); ok do return ii
+		}
+		if allow_autocast {
+			for ip, ii in cand.inputs {
+				if ip.split_expanded do continue
+				if vg_are_types_autocastable(drag_pin, ip) do return ii
 			}
 		}
 	} else {
 		for op, oi in cand.outputs {
-			if ok, _ := vg_can_connect_pins(op, drag_pin); ok {
-				return oi
+			if op.split_expanded do continue
+			if ok, _ := vg_can_connect_pins(op, drag_pin); ok do return oi
+		}
+		if allow_autocast {
+			for op, oi in cand.outputs {
+				if op.split_expanded do continue
+				if vg_are_types_autocastable(op, drag_pin) do return oi
 			}
 		}
 	}
@@ -1365,6 +2486,14 @@ vg_probe_compatible_pin :: proc(g: ^Visual_Graph, kind: VG_Node_Kind, custom_nam
 			scratch.delegates = make([dynamic]string, len(g.delegates), context.temp_allocator)
 			copy(scratch.delegates[:], g.delegates[:])
 		}
+		if len(g.enums) > 0 {
+			scratch.enums = make([dynamic]VG_Enum_Decl, len(g.enums), context.temp_allocator)
+			copy(scratch.enums[:], g.enums[:])
+		}
+		if len(g.structs) > 0 {
+			scratch.structs = make([dynamic]VG_Struct_Decl, len(g.structs), context.temp_allocator)
+			copy(scratch.structs[:], g.structs[:])
+		}
 		if len(g.nodes) > 0 {
 			scratch.nodes = make([dynamic]VG_Node, len(g.nodes), len(g.nodes) + 1, context.temp_allocator)
 			copy(scratch.nodes[:], g.nodes[:])
@@ -1372,7 +2501,7 @@ vg_probe_compatible_pin :: proc(g: ^Visual_Graph, kind: VG_Node_Kind, custom_nam
 	}
 	uid := vg_add_node(&scratch, kind, {}, custom_name)
 	cand := vg_find_node(&scratch, uid)
-	return vg_find_compatible_pin_on_node(drag_from_out, drag_pin, cand)
+	return vg_find_compatible_pin_on_node(drag_from_out, drag_pin, cand, false)
 }
 
 // =============================================================================
@@ -1524,30 +2653,34 @@ vg_add_node :: proc(g: ^Visual_Graph, kind: VG_Node_Kind, pos: [2]f32, custom_na
 		vname := custom_name != "" ? custom_name : (len(g.variables) > 0 ? g.variables[0].name : "phase")
 		vtype := hot.Hot_Pin_Type.Float
 		varr  := false
+		vct   := ""
 		if vi := vg_find_var_index(g, vname); vi >= 0 {
 			vtype = g.variables[vi].pin_type
 			varr  = g.variables[vi].is_array
+			vct   = g.variables[vi].custom_type_name
 		}
 		n.var_name   = strings.clone(vname)
 		n.var_as_ref = false
 		n.title      = strings.clone(fmt.tprintf("Get %s", vname))
-		append(&n.outputs, VG_Pin_Def{name = strings.clone("Value (Copy)"), pin_type = vtype, is_array = varr, pass_mode = .Copy_Value,   is_addressable = false})
-		append(&n.outputs, VG_Pin_Def{name = strings.clone("Ref (^Ptr)"),   pin_type = vtype, is_array = varr, pass_mode = .By_Reference, is_addressable = true})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Value (Copy)"), pin_type = vtype, is_array = varr, custom_type_name = vct != "" ? strings.clone(vct) : "", pass_mode = .Copy_Value,   is_addressable = false})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Ref (^Ptr)"),   pin_type = vtype, is_array = varr, custom_type_name = vct != "" ? strings.clone(vct) : "", pass_mode = .By_Reference, is_addressable = true})
 
 	case .Set_Variable:
 		vname := custom_name != "" ? custom_name : (len(g.variables) > 0 ? g.variables[0].name : "phase")
 		vtype := hot.Hot_Pin_Type.Float
 		varr  := false
+		vct   := ""
 		if vi := vg_find_var_index(g, vname); vi >= 0 {
 			vtype = g.variables[vi].pin_type
 			varr  = g.variables[vi].is_array
+			vct   = g.variables[vi].custom_type_name
 		}
 		n.var_name = strings.clone(vname)
 		n.title    = strings.clone(fmt.tprintf("Set %s", vname))
 		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Exec"),  pin_type = .Exec})
-		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Value"), pin_type = vtype, is_array = varr, pass_mode = .Copy_Value})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Value"), pin_type = vtype, is_array = varr, custom_type_name = vct != "" ? strings.clone(vct) : "", pass_mode = .Copy_Value})
 		append(&n.outputs, VG_Pin_Def{name = strings.clone("Exec"),  pin_type = .Exec})
-		append(&n.outputs, VG_Pin_Def{name = strings.clone("Out"),   pin_type = vtype, is_array = varr, pass_mode = .Copy_Value})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Out"),   pin_type = vtype, is_array = varr, custom_type_name = vct != "" ? strings.clone(vct) : "", pass_mode = .Copy_Value})
 
 	case .Get_Transform_Pos:
 		n.title = strings.clone("Transform Position")
@@ -1590,14 +2723,43 @@ vg_add_node :: proc(g: ^Visual_Graph, kind: VG_Node_Kind, pos: [2]f32, custom_na
 
 	case .Call_Hot_Proc:
 		pname := custom_name != "" ? custom_name : "hot_harmonic_hover"
-		n.title           = strings.clone(fmt.tprintf("Call %s", pname))
-		n.hot_proc_target = strings.clone(pname)
-		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Exec"),      pin_type = .Exec})
-		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Amp"),       pin_type = .Float, pass_mode = .Copy_Value,   default_f32 = 0.30})
-		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Freq"),      pin_type = .Float, pass_mode = .Copy_Value,   default_f32 = 2.00})
-		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Phase Ref"), pin_type = .Float, pass_mode = .By_Reference, default_f32 = 0.00})
-		append(&n.outputs, VG_Pin_Def{name = strings.clone("Exec"),      pin_type = .Exec})
-		append(&n.outputs, VG_Pin_Def{name = strings.clone("Out"),       pin_type = .Float})
+		if meta, has_meta := hot_proc_find_sig_meta(pname); has_meta {
+			n.title           = strings.clone(meta.display_title != "" ? meta.display_title : fmt.tprintf("Call %s", meta.proc_name))
+			n.hot_proc_target = strings.clone(meta.proc_name)
+			if !meta.is_pure {
+				append(&n.inputs,  VG_Pin_Def{name = strings.clone("Exec"), pin_type = .Exec})
+				append(&n.outputs, VG_Pin_Def{name = strings.clone("Exec"), pin_type = .Exec})
+			}
+			for pm in meta.pins {
+				p := VG_Pin_Def{
+					name             = strings.clone(pm.name),
+					pin_type         = pm.pin_type,
+					pass_mode        = pm.by_ref ? .By_Reference : .Copy_Value,
+					is_addressable   = pm.is_output && pm.by_ref,
+					custom_type_name = pm.custom_type != "" ? strings.clone(pm.custom_type) : "",
+					default_f32      = pm.default_f32,
+					default_f64      = f64(pm.default_f32),
+					default_int      = i32(pm.default_i64),
+					default_i64      = pm.default_i64,
+					default_u64      = u64(pm.default_i64),
+					default_bool     = pm.default_bool,
+				}
+				if pm.is_output {
+					append(&n.outputs, p)
+				} else {
+					append(&n.inputs, p)
+				}
+			}
+		} else {
+			n.title           = strings.clone(fmt.tprintf("Call %s", pname))
+			n.hot_proc_target = strings.clone(pname)
+			append(&n.inputs,  VG_Pin_Def{name = strings.clone("Exec"),      pin_type = .Exec})
+			append(&n.inputs,  VG_Pin_Def{name = strings.clone("Amp"),       pin_type = .Float, pass_mode = .Copy_Value,   default_f32 = 0.30})
+			append(&n.inputs,  VG_Pin_Def{name = strings.clone("Freq"),      pin_type = .Float, pass_mode = .Copy_Value,   default_f32 = 2.00})
+			append(&n.inputs,  VG_Pin_Def{name = strings.clone("Phase Ref"), pin_type = .Float, pass_mode = .By_Reference, default_f32 = 0.00})
+			append(&n.outputs, VG_Pin_Def{name = strings.clone("Exec"),      pin_type = .Exec})
+			append(&n.outputs, VG_Pin_Def{name = strings.clone("Out"),       pin_type = .Float})
+		}
 
 	case .Odin_Function_Node:
 		fn_title := custom_name != "" ? custom_name : fmt.tprintf("Odin Wrangle #%d", uid)
@@ -1724,16 +2886,386 @@ vg_add_node :: proc(g: ^Visual_Graph, kind: VG_Node_Kind, pos: [2]f32, custom_na
 
 	case .For_Loop:
 		n.title = strings.clone("For Loop")
-		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Exec"),        pin_type = .Exec})
-		append(&n.inputs,  VG_Pin_Def{name = strings.clone("First Index"), pin_type = .Int, default_int = 0})
-		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Last Index"),  pin_type = .Int, default_int = 4})
-		append(&n.outputs, VG_Pin_Def{name = strings.clone("Loop Body"),   pin_type = .Exec})
-		append(&n.outputs, VG_Pin_Def{name = strings.clone("Index"),       pin_type = .Int})
-		append(&n.outputs, VG_Pin_Def{name = strings.clone("Completed"),   pin_type = .Exec})
+		vg_configure_for_loop(g, &n, .Range_Inclusive, custom_name)
+
+	case .Break_Loop:
+		n.title = strings.clone("Break Loop")
+		append(&n.inputs, VG_Pin_Def{name = strings.clone("Exec"), pin_type = .Exec})
+
+	case .Continue_Loop:
+		n.title = strings.clone("Continue Loop")
+		append(&n.inputs, VG_Pin_Def{name = strings.clone("Exec"), pin_type = .Exec})
+
+	case .Switch_Value:
+		vg_configure_switch_node(g, &n, custom_name)
+
+	case .BitSet_Op:
+		vg_configure_bitset_op(g, &n, .Set_Flag, custom_name)
+
+	case .Make_Struct:
+		vg_sync_struct_node_pins(g, &n, custom_name)
+
+	case .Break_Struct:
+		vg_sync_struct_node_pins(g, &n, custom_name)
+
+	case .Array_Op:
+		vg_configure_array_op(g, &n, .Get_Copy, custom_name)
+
+	case .Defer_Exec:
+		n.title = strings.clone("Defer (Scoped Cleanup)")
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Exec"),             pin_type = .Exec})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Exec"),             pin_type = .Exec})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Deferred Cleanup"), pin_type = .Exec})
+
+	case .Or_Branch:
+		n.title = strings.clone("Or Else (val, ok)")
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Exec"),  pin_type = .Exec})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Value"), pin_type = .Float, default_f32 = 0.0})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Ok"),    pin_type = .Bool,  default_bool = true})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Valid"),  pin_type = .Exec})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Failed"), pin_type = .Exec})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Value"),  pin_type = .Float})
+
+	case .Auto_Cast:
+		n.title = strings.clone("Cast")
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("In"),  pin_type = .Float})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Out"), pin_type = .Int})
+
+	case .Reroute_Knot:
+		n.title = strings.clone("Reroute")
+		pt := custom_name == "Exec" ? hot.Hot_Pin_Type.Exec : hot.Hot_Pin_Type.Float
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("In"),  pin_type = pt})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Out"), pin_type = pt})
+
+	case .Delay_Timer:
+		n.title = strings.clone("Delay Timer")
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Exec"),     pin_type = .Exec})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Duration"), pin_type = .Float, default_f32 = 1.0})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Reset"),    pin_type = .Bool,  default_bool = false})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Active"),    pin_type = .Exec})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Completed"), pin_type = .Exec})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Elapsed"),   pin_type = .Float})
+
+	case .Cooldown_Gate:
+		n.title = strings.clone("Cooldown Gate")
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Exec"),     pin_type = .Exec})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Duration"), pin_type = .Float, default_f32 = 1.0})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Reset"),    pin_type = .Bool,  default_bool = false})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Ready"),     pin_type = .Exec})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Blocked"),   pin_type = .Exec})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Remaining"), pin_type = .Float})
+
+	case .Spawn_Prefab:
+		n.title = strings.clone("Spawn Prefab")
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Exec"),   pin_type = .Exec})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Prefab"), pin_type = .Asset, default_str = strings.clone(custom_name)})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Pos"),    pin_type = .Vec3})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Rot"),    pin_type = .Quat,  default_vec4 = {0, 0, 0, 1}})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Exec"),    pin_type = .Exec})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Spawned"), pin_type = .Entity})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Success"), pin_type = .Bool})
+
+	case .Destroy_Entity:
+		n.title = strings.clone("Destroy Entity")
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Exec"),   pin_type = .Exec})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Target"), pin_type = .Entity})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Exec"),   pin_type = .Exec})
+
+	case .Physics_Raycast:
+		n.title = strings.clone("[Physics] Raycast")
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Exec"),     pin_type = .Exec})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Origin"),   pin_type = .Vec3})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Dir"),      pin_type = .Vec3,  default_vec3 = {0, -1, 0}})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Max Dist"), pin_type = .Float, default_f32  = 100.0})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Mask"),     pin_type = .U32,   default_u64  = 0xFFFFFFFF})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Exec"),   pin_type = .Exec})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Hit"),    pin_type = .Bool})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Point"),  pin_type = .Vec3})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Normal"), pin_type = .Vec3})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Dist"),   pin_type = .Float})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Entity"), pin_type = .Entity})
+
+	case .Physics_Overlap_Sphere:
+		n.title = strings.clone("[Physics] Overlap Sphere")
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Exec"),   pin_type = .Exec})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Center"), pin_type = .Vec3})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Radius"), pin_type = .Float, default_f32 = 3.0})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Mask"),   pin_type = .U32,   default_u64 = 0xFFFFFFFF})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Exec"),           pin_type = .Exec})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Count"),          pin_type = .Int})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Closest Entity"), pin_type = .Entity})
+
+	case .Physics_Add_Impulse:
+		n.title = strings.clone("[Physics] Add Impulse")
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Exec"),       pin_type = .Exec})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Target"),     pin_type = .Entity})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Impulse"),    pin_type = .Vec3, default_vec3 = {0, 8, 0}})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Vel Change"), pin_type = .Bool, default_bool = false})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Exec"),       pin_type = .Exec})
+
+	case .Event_On_Trigger:
+		n.title = strings.clone("Event: On Trigger")
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Exec"),         pin_type = .Exec})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Other Entity"), pin_type = .Entity})
+
+	case .CSG_Brush_Stamp:
+		n.title = strings.clone("[CSG] Stamp Blast / Cut")
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Exec"),      pin_type = .Exec})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("World Pos"), pin_type = .Vec3})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Radius"),    pin_type = .Float, default_f32 = 1.6})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Impulse"),   pin_type = .Float, default_f32 = 12.0})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Exec"),           pin_type = .Exec})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Affected Count"), pin_type = .Int})
 	}
 
 	append(&g.nodes, n)
 	return uid
+}
+
+_vg_clear_node_pins :: proc(n: ^VG_Node) {
+	for &p in n.inputs  do _vg_destroy_pin_strings(&p)
+	for &p in n.outputs do _vg_destroy_pin_strings(&p)
+	clear(&n.inputs)
+	clear(&n.outputs)
+}
+
+_vg_find_first_array_var :: proc(g: ^Visual_Graph) -> string {
+	if g == nil do return ""
+	for v in g.variables {
+		if v.is_array do return v.name
+	}
+	return ""
+}
+
+_vg_resolve_array_elem_type :: proc(g: ^Visual_Graph, var_name: string) -> (pt: hot.Hot_Pin_Type, custom_t: string) {
+	if vi := vg_find_var_index(g, var_name); vi >= 0 {
+		return g.variables[vi].pin_type, g.variables[vi].custom_type_name
+	}
+	return .Float, ""
+}
+
+vg_configure_for_loop :: proc(g: ^Visual_Graph, n: ^VG_Node, mode: VG_For_Mode, target_var: string = "") {
+	if n == nil do return
+	n.for_mode = mode
+	vname := target_var
+	if vname == "" && n.target_var_or_type != "" {
+		vname = n.target_var_or_type
+	} else if vname == "" && (mode == .For_In_Value || mode == .For_In_Ref) {
+		vname = _vg_find_first_array_var(g)
+	}
+	if n.target_var_or_type != vname {
+		delete(n.target_var_or_type)
+		n.target_var_or_type = vname != "" ? strings.clone(vname) : ""
+	}
+	_vg_clear_node_pins(n)
+	append(&n.inputs, VG_Pin_Def{name = strings.clone("Exec"), pin_type = .Exec})
+	append(&n.outputs, VG_Pin_Def{name = strings.clone("Loop Body"), pin_type = .Exec})
+	append(&n.outputs, VG_Pin_Def{name = strings.clone("Index"),     pin_type = .Int})
+	append(&n.outputs, VG_Pin_Def{name = strings.clone("Completed"), pin_type = .Exec})
+	delete(n.title)
+	switch mode {
+	case .Range_Inclusive:
+		n.title = strings.clone("For Loop")
+		append(&n.inputs, VG_Pin_Def{name = strings.clone("First Index"), pin_type = .Int, default_int = 0})
+		append(&n.inputs, VG_Pin_Def{name = strings.clone("Last Index"),  pin_type = .Int, default_int = 4})
+	case .Range_Half_Open:
+		n.title = strings.clone("For Loop (..<)")
+		append(&n.inputs, VG_Pin_Def{name = strings.clone("First Index"), pin_type = .Int, default_int = 0})
+		append(&n.inputs, VG_Pin_Def{name = strings.clone("End (<)"),     pin_type = .Int, default_int = 4})
+	case .For_In_Value, .For_In_Ref:
+		elem_pt, elem_ct := _vg_resolve_array_elem_type(g, vname)
+		is_ref := (mode == .For_In_Ref)
+		n.title = strings.clone(fmt.tprintf(is_ref ? "For &Elem in %s" : "For Elem in %s", vname != "" ? vname : "arr"))
+		append(&n.outputs, VG_Pin_Def{
+			name             = strings.clone(is_ref ? "Element (^Ref)" : "Element"),
+			pin_type         = elem_pt,
+			custom_type_name = elem_ct != "" ? strings.clone(elem_ct) : "",
+			pass_mode        = is_ref ? .By_Reference : .Copy_Value,
+			is_addressable   = is_ref,
+		})
+	case .Condition:
+		n.title = strings.clone("For (While Condition)")
+		append(&n.inputs, VG_Pin_Def{name = strings.clone("Condition"), pin_type = .Bool, default_bool = true})
+	}
+}
+
+vg_configure_array_op :: proc(g: ^Visual_Graph, n: ^VG_Node, mode: VG_Array_Op_Mode, target_var: string = "") {
+	if n == nil do return
+	n.sub_op = int(mode)
+	vname := target_var
+	if vname == "" && n.target_var_or_type != "" {
+		vname = n.target_var_or_type
+	} else if vname == "" {
+		vname = _vg_find_first_array_var(g)
+	}
+	if n.target_var_or_type != vname {
+		delete(n.target_var_or_type)
+		n.target_var_or_type = vname != "" ? strings.clone(vname) : ""
+	}
+	elem_pt, elem_ct := _vg_resolve_array_elem_type(g, vname)
+	_vg_clear_node_pins(n)
+	delete(n.title)
+
+	ct := elem_ct != "" ? strings.clone(elem_ct) : ""
+	ct2 := elem_ct != "" ? strings.clone(elem_ct) : ""
+	switch mode {
+	case .Get_Copy:
+		delete(ct2)
+		n.title = strings.clone(fmt.tprintf("Array Get: %s", vname != "" ? vname : "arr"))
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Index"), pin_type = .Int, default_int = 0})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Value"), pin_type = elem_pt, custom_type_name = ct, pass_mode = .Copy_Value})
+	case .Get_Ref:
+		delete(ct2)
+		n.title = strings.clone(fmt.tprintf("Array Get Ref (^T): %s", vname != "" ? vname : "arr"))
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Index"),      pin_type = .Int, default_int = 0})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Elem (^Ptr)"), pin_type = elem_pt, custom_type_name = ct, pass_mode = .By_Reference, is_addressable = true})
+	case .Len:
+		delete(ct); delete(ct2)
+		n.title = strings.clone(fmt.tprintf("Array Len: %s", vname != "" ? vname : "arr"))
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Count"), pin_type = .Int})
+	case .Set_Elem:
+		delete(ct2)
+		n.title = strings.clone(fmt.tprintf("Array Set: %s", vname != "" ? vname : "arr"))
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Exec"),  pin_type = .Exec})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Index"), pin_type = .Int, default_int = 0})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Value"), pin_type = elem_pt, custom_type_name = ct})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Exec"),  pin_type = .Exec})
+	case .Append:
+		delete(ct2)
+		n.title = strings.clone(fmt.tprintf("Array Append: %s", vname != "" ? vname : "arr"))
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Exec"),  pin_type = .Exec})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Value"), pin_type = elem_pt, custom_type_name = ct})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Exec"),  pin_type = .Exec})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Ok"),    pin_type = .Bool})
+	case .Pop:
+		delete(ct2)
+		n.title = strings.clone(fmt.tprintf("Array Pop: %s", vname != "" ? vname : "arr"))
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Exec"),  pin_type = .Exec})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Exec"),  pin_type = .Exec})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Value"), pin_type = elem_pt, custom_type_name = ct})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Valid"), pin_type = .Bool})
+	case .Clear:
+		delete(ct); delete(ct2)
+		n.title = strings.clone(fmt.tprintf("Array Clear: %s", vname != "" ? vname : "arr"))
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Exec"), pin_type = .Exec})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Exec"), pin_type = .Exec})
+	case .Swap_Remove:
+		delete(ct); delete(ct2)
+		n.title = strings.clone(fmt.tprintf("Array Swap Remove: %s", vname != "" ? vname : "arr"))
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Exec"),  pin_type = .Exec})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Index"), pin_type = .Int, default_int = 0})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Exec"),  pin_type = .Exec})
+	}
+}
+
+vg_configure_bitset_op :: proc(g: ^Visual_Graph, n: ^VG_Node, mode: VG_BitSet_Op_Mode, enum_name: string = "") {
+	if n == nil do return
+	n.sub_op = int(mode)
+	en := enum_name
+	if en == "" && n.target_var_or_type != "" {
+		en = n.target_var_or_type
+	} else if en == "" && g != nil && len(g.enums) > 0 {
+		en = g.enums[0].name
+	}
+	if n.target_var_or_type != en {
+		delete(n.target_var_or_type)
+		n.target_var_or_type = en != "" ? strings.clone(en) : ""
+	}
+	_vg_clear_node_pins(n)
+	delete(n.title)
+	op_names := [VG_BitSet_Op_Mode]string{.Set_Flag = "BitSet +", .Clear_Flag = "BitSet -", .Toggle_Flag = "BitSet ~", .Has_Flag = "BitSet Has?", .Is_Empty = "BitSet Empty?"}
+	n.title = strings.clone(fmt.tprintf("%s %s", op_names[mode], en))
+	bs_ct := en != "" ? strings.clone(en) : ""
+	en_ct := en != "" ? strings.clone(en) : ""
+	out_ct := en != "" ? strings.clone(en) : ""
+	if mode == .Has_Flag || mode == .Is_Empty {
+		append(&n.inputs, VG_Pin_Def{name = strings.clone("Set"), pin_type = .BitSet_U8, custom_type_name = bs_ct})
+		if mode == .Has_Flag {
+			append(&n.inputs, VG_Pin_Def{name = strings.clone("Flag"), pin_type = .Enum_U8, custom_type_name = en_ct})
+		} else {
+			delete(en_ct)
+		}
+		delete(out_ct)
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Result"), pin_type = .Bool})
+	} else {
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Exec"),    pin_type = .Exec})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Set"),     pin_type = .BitSet_U8, custom_type_name = bs_ct})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Flag"),    pin_type = .Enum_U8,   custom_type_name = en_ct})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Exec"),    pin_type = .Exec})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Out Set"), pin_type = .BitSet_U8, custom_type_name = out_ct})
+	}
+}
+
+vg_configure_switch_node :: proc(g: ^Visual_Graph, n: ^VG_Node, enum_name: string = "") {
+	if n == nil do return
+	en := enum_name
+	if en == "" && n.target_var_or_type != "" {
+		en = n.target_var_or_type
+	}
+	ed := vg_find_enum_decl(g, en)
+	if n.target_var_or_type != en {
+		delete(n.target_var_or_type)
+		n.target_var_or_type = en != "" ? strings.clone(en) : ""
+	}
+	_vg_clear_node_pins(n)
+	delete(n.title)
+	append(&n.inputs, VG_Pin_Def{name = strings.clone("Exec"), pin_type = .Exec})
+	if ed != nil {
+		n.title = strings.clone(fmt.tprintf("Switch %s", ed.name))
+		append(&n.inputs, VG_Pin_Def{name = strings.clone("Value"), pin_type = .Enum_U8, custom_type_name = strings.clone(ed.name)})
+		for v in ed.variants {
+			append(&n.outputs, VG_Pin_Def{name = strings.clone(v), pin_type = .Exec})
+		}
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Default"), pin_type = .Exec})
+		n.sub_op = len(ed.variants)
+	} else {
+		cnt := clamp(n.sub_op > 0 ? n.sub_op : 2, 1, 16)
+		n.sub_op = cnt
+		n.title = strings.clone("Switch (Int)")
+		append(&n.inputs, VG_Pin_Def{name = strings.clone("Selection"), pin_type = .Int, default_int = 0})
+		for c in 0 ..< cnt {
+			append(&n.outputs, VG_Pin_Def{name = strings.clone(fmt.tprintf("Case %d", c)), pin_type = .Exec})
+		}
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Default"), pin_type = .Exec})
+	}
+}
+
+vg_sync_struct_node_pins :: proc(g: ^Visual_Graph, n: ^VG_Node, struct_name: string = "") {
+	if n == nil do return
+	sn := struct_name
+	if sn == "" && n.target_var_or_type != "" {
+		sn = n.target_var_or_type
+	} else if sn == "" && g != nil && len(g.structs) > 0 {
+		sn = g.structs[0].name
+	}
+	if n.target_var_or_type != sn {
+		delete(n.target_var_or_type)
+		n.target_var_or_type = sn != "" ? strings.clone(sn) : ""
+	}
+	_vg_clear_node_pins(n)
+	delete(n.title)
+	fl, _, _ := vg_struct_layout(g, sn, context.temp_allocator)
+	if n.kind == .Make_Struct {
+		n.title = strings.clone(fmt.tprintf("Make %s", sn != "" ? sn : "Struct"))
+		for f in fl {
+			append(&n.inputs, VG_Pin_Def{
+				name             = strings.clone(f.name),
+				pin_type         = f.pin_type,
+				custom_type_name = f.custom_type != "" ? strings.clone(f.custom_type) : "",
+			})
+		}
+		append(&n.outputs, VG_Pin_Def{name = strings.clone(sn != "" ? sn : "Struct"), pin_type = .Struct_Val, custom_type_name = sn != "" ? strings.clone(sn) : ""})
+	} else {
+		n.title = strings.clone(fmt.tprintf("Break %s", sn != "" ? sn : "Struct"))
+		append(&n.inputs, VG_Pin_Def{name = strings.clone(sn != "" ? sn : "Struct"), pin_type = .Struct_Val, custom_type_name = sn != "" ? strings.clone(sn) : ""})
+		for f in fl {
+			append(&n.outputs, VG_Pin_Def{
+				name             = strings.clone(f.name),
+				pin_type         = f.pin_type,
+				custom_type_name = f.custom_type != "" ? strings.clone(f.custom_type) : "",
+			})
+		}
+	}
 }
 
 vg_sequence_add_pin :: proc(n: ^VG_Node) {
@@ -2073,7 +3605,7 @@ vg_save_to_file :: proc(g: ^Visual_Graph, path: string) -> bool {
 }
 
 vg_load_from_file :: proc(g: ^Visual_Graph, path: string) -> bool {
-	data, rerr := os.read_entire_file(path, context.temp_allocator)
+	data, rerr := vfs_read_entire_file(path, context.temp_allocator)
 	if rerr != nil do return false
 	payload := data
 	raw_str := string(data)
@@ -2133,13 +3665,178 @@ vg_load_from_file :: proc(g: ^Visual_Graph, path: string) -> bool {
 			}
 		}
 		vg_infer_missing_owner_procs(g)
+	} else {
+		vg_destroy_graph(g)
 	}
 	return ok
+}
+
+// Scrubs any `val_cstr` pointers inside entity blackboards that point outside
+// `bb.str_bufs[vi]` (e.g. `.rodata` string literals from a hot-reloaded DLL)
+// by copying them into host-owned inline `str_bufs` and clearing volatile
+// `live_pin_values` before unloading the cartridge DLLs.
+visual_script_scrub_external_cstrings :: proc() {
+	if !_vs_rt.initialized do return
+	for _, st in _vs_rt.entities {
+		if st == nil do continue
+		bb := &st.bb
+		for vi in 0 ..< VG_MAX_VARS {
+			slot := &bb.slots[vi]
+			if slot.pin_type != .String && slot.pin_type != .Asset do continue
+			if slot.val_cstr == nil do continue
+			buf_start := uintptr(&bb.str_bufs[vi][0])
+			buf_end   := buf_start + uintptr(len(bb.str_bufs[vi]))
+			ptr_val   := uintptr(rawptr(slot.val_cstr))
+			if ptr_val >= buf_start && ptr_val < buf_end do continue
+			s := string(slot.val_cstr)
+			ncopy := min(len(s), len(bb.str_bufs[vi]) - 1)
+			for k in 0 ..< len(bb.str_bufs[vi]) do bb.str_bufs[vi][k] = 0
+			if ncopy > 0 do copy(bb.str_bufs[vi][:ncopy], s[:ncopy])
+			slot.val_cstr = cstring(&bb.str_bufs[vi][0])
+		}
+		if bb.live_pin_values != nil {
+			clear(&bb.live_pin_values)
+		}
+	}
 }
 
 // =============================================================================
 // Tier-1 Crash-Proof In-RAM Graph Evaluator (`0.00 ms`, Zero Segfault Risk)
 // =============================================================================
+
+// Writes a scalar/vector/handle `Hot_Slot` value into a live cartridge variable pointer (shared by evaluator & inspector).
+vg_write_slot_to_var_ptr :: proc(dst: rawptr, pt: hot.Hot_Pin_Type, val: ^hot.Hot_Slot, copy_bytes: int = 0) {
+	_slot_write_to_ptr(dst, pt, val, copy_bytes)
+}
+
+_slot_write_to_ptr :: proc(dst: rawptr, pt: hot.Hot_Pin_Type, val: ^hot.Hot_Slot, copy_bytes: int = 0) {
+	if dst == nil || val == nil do return
+	#partial switch pt {
+	case .Bool:       (cast(^bool)dst)^           = hot.slot_read_bool(val)
+	case .Int:        (cast(^i32)dst)^            = hot.slot_read_int(val)
+	case .Int64:      (cast(^i64)dst)^            = hot.slot_read_i64(val)
+	case .Float:      (cast(^f32)dst)^            = hot.slot_read_f32(val)
+	case .F64:        (cast(^f64)dst)^            = hot.slot_read_f64(val)
+	case .U8, .Enum_U8, .BitSet_U8: (cast(^u8)dst)^ = hot.slot_read_u8(val)
+	case .I8:         (cast(^i8)dst)^             = hot.slot_read_i8(val)
+	case .U16:        (cast(^u16)dst)^            = hot.slot_read_u16(val)
+	case .I16:        (cast(^i16)dst)^            = hot.slot_read_i16(val)
+	case .U32:        (cast(^u32)dst)^            = hot.slot_read_u32(val)
+	case .U64:        (cast(^u64)dst)^            = hot.slot_read_u64(val)
+	case .Vec2:       (cast(^[2]f32)dst)^         = hot.slot_read_vec2(val)
+	case .Vec3:       (cast(^[3]f32)dst)^         = hot.slot_read_vec3(val)
+	case .Vec4:       (cast(^[4]f32)dst)^         = hot.slot_read_vec4(val)
+	case .Quat:       (cast(^[4]f32)dst)^         = hot.slot_read_quat(val)
+	case .Entity:     (cast(^hot.Hot_Entity)dst)^ = hot.slot_read_entity(val)
+	case .Delegate:   (cast(^hot.Hot_Delegate)dst)^ = hot.slot_read_delegate(val)
+	case .String, .Asset: (cast(^cstring)dst)^    = hot.slot_read_cstr(val)
+	case .Struct_Val:
+		nbytes := clamp(copy_bytes > 0 ? copy_bytes : int(val.val_byte_len), 0, hot.HOT_MAX_STRUCT_BYTES)
+		if nbytes > 0 {
+			src := hot.slot_ref_struct_bytes(val)
+			runtime.mem_copy(dst, src, nbytes)
+		}
+	}
+}
+
+_slot_read_from_ptr :: proc(src: rawptr, pt: hot.Hot_Pin_Type, by_ref: bool = false, copy_bytes: int = 0) -> hot.Hot_Slot {
+	out := hot.Hot_Slot{
+		pin_type  = pt,
+		pass_mode = by_ref ? .By_Reference : .Copy_Value,
+		ref_ptr   = by_ref ? src : nil,
+	}
+	if src == nil do return out
+	#partial switch pt {
+	case .Bool:       out.val_bool     = (cast(^bool)src)^
+	case .Int:        out.val_int      = (cast(^i32)src)^
+	case .Int64:      out.val_i64      = (cast(^i64)src)^
+	case .Float:      out.val_f32      = (cast(^f32)src)^
+	case .F64:        out.val_f64      = (cast(^f64)src)^
+	case .U8, .Enum_U8, .BitSet_U8: out.val_u8 = (cast(^u8)src)^
+	case .I8:         out.val_i8       = (cast(^i8)src)^
+	case .U16:        out.val_u16      = (cast(^u16)src)^
+	case .I16:        out.val_i16      = (cast(^i16)src)^
+	case .U32:        out.val_u32      = (cast(^u32)src)^
+	case .U64:        out.val_u64      = (cast(^u64)src)^
+	case .Vec2:       out.val_vec2     = (cast(^[2]f32)src)^
+	case .Vec3:       out.val_vec3     = (cast(^[3]f32)src)^
+	case .Vec4:       out.val_vec4     = (cast(^[4]f32)src)^
+	case .Quat:       out.val_quat     = (cast(^[4]f32)src)^
+	case .Entity:     out.val_ent      = (cast(^hot.Hot_Entity)src)^
+	case .Delegate:   out.val_delegate = (cast(^hot.Hot_Delegate)src)^
+	case .String, .Asset: out.val_cstr = (cast(^cstring)src)^
+	case .Struct_Val:
+		nbytes := clamp(copy_bytes > 0 ? copy_bytes : hot.HOT_MAX_STRUCT_BYTES, 0, hot.HOT_MAX_STRUCT_BYTES)
+		out.val_byte_len = u8(nbytes)
+		if nbytes > 0 {
+			runtime.mem_copy(&out.val_bytes[0], src, nbytes)
+		}
+	}
+	return out
+}
+
+_cast_hot_slot :: proc(in_s: hot.Hot_Slot, target_pt: hot.Hot_Pin_Type) -> hot.Hot_Slot {
+	s := in_s
+	out := hot.Hot_Slot{pin_type = target_pt, pass_mode = .Copy_Value}
+	#partial switch target_pt {
+	case .Bool:  out.val_bool = hot.slot_read_bool(&s)
+	case .Int:   out.val_int  = hot.slot_read_int(&s)
+	case .Int64: out.val_i64  = hot.slot_read_i64(&s)
+	case .Float: out.val_f32  = hot.slot_read_f32(&s)
+	case .F64:   out.val_f64  = hot.slot_read_f64(&s)
+	case .U8, .Enum_U8, .BitSet_U8: out.val_u8 = hot.slot_read_u8(&s)
+	case .I8:    out.val_i8   = hot.slot_read_i8(&s)
+	case .U16:   out.val_u16  = hot.slot_read_u16(&s)
+	case .I16:   out.val_i16  = hot.slot_read_i16(&s)
+	case .U32:   out.val_u32  = hot.slot_read_u32(&s)
+	case .U64:   out.val_u64  = hot.slot_read_u64(&s)
+	case .Vec2:
+		if s.pin_type == .Float || s.pin_type == .F64 {
+			fv := hot.slot_read_f32(&s)
+			out.val_vec2 = {fv, fv}
+		} else {
+			out.val_vec2 = hot.slot_read_vec2(&s)
+		}
+	case .Vec3:
+		if s.pin_type == .Float || s.pin_type == .F64 {
+			fv := hot.slot_read_f32(&s)
+			out.val_vec3 = {fv, fv, fv}
+		} else {
+			out.val_vec3 = hot.slot_read_vec3(&s)
+		}
+	case .Vec4:
+		if s.pin_type == .Float || s.pin_type == .F64 {
+			fv := hot.slot_read_f32(&s)
+			out.val_vec4 = {fv, fv, fv, fv}
+		} else {
+			out.val_vec4 = hot.slot_read_vec4(&s)
+		}
+	case .Quat: out.val_quat = hot.slot_read_quat(&s)
+	}
+	return out
+}
+
+_vg_get_var_blob :: proc(g: ^Visual_Graph, bb: ^VG_Runtime_Blackboard, var_name: string) -> (v: VG_Var_Decl, blob: []u8, ok: bool) {
+	vi := vg_find_var_index(g, var_name)
+	if vi < 0 || vi >= len(g.variables) do return {}, nil, false
+	v = g.variables[vi]
+	needed := vg_var_byte_size(g, v)
+	if bb.var_blobs == nil {
+		context.allocator = runtime.default_allocator()
+		bb.var_blobs = make(map[string][dynamic]u8, 4)
+	}
+	b, has := bb.var_blobs[v.name]
+	if !has {
+		context.allocator = runtime.default_allocator()
+		b = make([dynamic]u8, needed, runtime.default_allocator())
+		bb.var_blobs[strings.clone(v.name, runtime.default_allocator())] = b
+	} else if len(b) < needed {
+		context.allocator = runtime.default_allocator()
+		resize(&b, needed)
+		bb.var_blobs[v.name] = b
+	}
+	return v, b[:], true
+}
 
 vg_sync_blackboard :: proc(g: ^Visual_Graph, bb: ^VG_Runtime_Blackboard) {
 	if bb.initialized do return
@@ -2155,8 +3852,15 @@ vg_sync_blackboard :: proc(g: ^Visual_Graph, bb: ^VG_Runtime_Blackboard) {
 			pin_type  = v.pin_type,
 			pass_mode = .Copy_Value,
 			val_f32   = v.default_f32,
+			val_f64   = v.default_f64 != 0 ? v.default_f64 : f64(v.default_f32),
 			val_int   = v.default_int,
-			val_i64   = v.default_i64,
+			val_i64   = v.default_i64 != 0 ? v.default_i64 : i64(v.default_int),
+			val_u8    = u8(clamp(v.default_u64, 0, 255)),
+			val_i8    = i8(clamp(v.default_int, -128, 127)),
+			val_u16   = u16(clamp(v.default_u64, 0, 65535)),
+			val_i16   = i16(clamp(v.default_int, -32768, 32767)),
+			val_u32   = u32(v.default_u64),
+			val_u64   = v.default_u64,
 			val_bool  = v.default_bool,
 			val_vec2  = v.default_vec2,
 			val_vec3  = v.default_vec3,
@@ -2164,7 +3868,61 @@ vg_sync_blackboard :: proc(g: ^Visual_Graph, bb: ^VG_Runtime_Blackboard) {
 			val_quat  = v.pin_type == .Quat ? {0, 0, 0, 1} : v.default_vec4,
 			val_cstr  = cstring(&bb.str_bufs[i][0]),
 		}
+		if v.is_array || v.pin_type == .Struct_Val {
+			_, _, _ = _vg_get_var_blob(g, bb, v.name)
+		}
 	}
+}
+
+@(private = "file")
+_vg_extract_split_child :: proc(
+	g:             ^Visual_Graph,
+	parent_val:    hot.Hot_Slot,
+	parent_pt:     hot.Hot_Pin_Type,
+	parent_ct:     string,
+	child_pt:      hot.Hot_Pin_Type,
+	field_name:    string,
+	want_by_ref:   bool,
+) -> hot.Hot_Slot {
+	comp_idx := -1
+	if field_name == "x" do comp_idx = 0
+	else if field_name == "y" do comp_idx = 1
+	else if field_name == "z" do comp_idx = 2
+	else if field_name == "w" do comp_idx = 3
+
+	if comp_idx >= 0 && parent_pt in (bit_set[hot.Hot_Pin_Type]{.Vec2, .Vec3, .Vec4, .Quat}) {
+		val := f32(0)
+		if parent_pt == .Vec2 && comp_idx < 2      do val = parent_val.val_vec2[comp_idx]
+		else if parent_pt == .Vec3 && comp_idx < 3 do val = parent_val.val_vec3[comp_idx]
+		else if (parent_pt == .Vec4 || parent_pt == .Quat) && comp_idx < 4 do val = parent_val.val_quat[comp_idx]
+		if parent_pt == .Vec4 && comp_idx < 4 && parent_val.val_vec4 != ({0,0,0,0}) do val = parent_val.val_vec4[comp_idx]
+
+		rptr: rawptr = nil
+		if want_by_ref && parent_val.ref_ptr != nil {
+			rptr = rawptr(&(cast([^]f32)parent_val.ref_ptr)[comp_idx])
+		}
+		return {
+			pin_type  = .Float,
+			pass_mode = rptr != nil ? .By_Reference : .Copy_Value,
+			val_f32   = val,
+			ref_ptr   = rptr,
+		}
+	}
+
+	if parent_pt == .Struct_Val {
+		pv := parent_val
+		fl, _, _ := vg_struct_layout(g, parent_ct, context.temp_allocator)
+		for f in fl {
+			if f.name == field_name {
+				src_base := pv.ref_ptr != nil ? pv.ref_ptr : rawptr(&pv.val_bytes[0])
+				if f.offset + f.size <= hot.HOT_MAX_STRUCT_BYTES || pv.ref_ptr != nil {
+					f_ptr := rawptr(uintptr(src_base) + uintptr(f.offset))
+					return _slot_read_from_ptr(f_ptr, child_pt, want_by_ref && pv.ref_ptr != nil, f.size)
+				}
+			}
+		}
+	}
+	return {pin_type = child_pt}
 }
 
 @(private = "file")
@@ -2180,22 +3938,41 @@ _eval_pure_pin :: proc(
 	if depth > 24 do return {}
 	n := vg_find_node(g, node_uid)
 	if n == nil || !n.enabled do return {}
+	if out_pin_idx < 0 || out_pin_idx >= len(n.outputs) do return {}
+
+	// 1. Handle Split Child Output Pin transparently from parent output pin
+	op_def := n.outputs[out_pin_idx]
+	if op_def.split_parent_name != "" {
+		for pi in 0 ..< len(n.outputs) {
+			if n.outputs[pi].name == op_def.split_parent_name {
+				pv := _eval_pure_pin(g, bb, tH, raw_dt, node_uid, pi, depth + 1)
+				res := _vg_extract_split_child(g, pv, n.outputs[pi].pin_type, n.outputs[pi].custom_type_name, op_def.pin_type, op_def.split_field_name, op_def.pass_mode == .By_Reference || op_def.is_addressable)
+				_bb_set_live_pin(bb, n.uid, out_pin_idx, res)
+				return res
+			}
+		}
+	}
 
 	w := ctx_world()
 	obj_dt := w != nil && pool_valid(&w.transforms, Handle(tH)) ? transform_dt(tH, raw_dt) : raw_dt
 
+	res: hot.Hot_Slot
+	handled := true
+
 	#partial switch n.kind {
 	case .Event_Tick:
-		if out_pin_idx == 1 do return {pin_type = .Float, val_f32 = raw_dt}
-		if out_pin_idx == 2 do return {pin_type = .Float, val_f32 = obj_dt}
-		return {}
+		if out_pin_idx == 1      do res = {pin_type = .Float, val_f32 = raw_dt}
+		else if out_pin_idx == 2 do res = {pin_type = .Float, val_f32 = obj_dt}
+
+	case .Event_On_Trigger:
+		if out_pin_idx == 1 do res = {pin_type = .Entity, val_ent = transform_to_hot_entity(bb.trigger_other_entity)}
 
 	case .Custom_Proc_Entry:
 		if out_pin_idx == 0 {
 			clean_g := g.name != "" ? g.name : "custom_graph"
 			proc_sym := fmt.tprintf("mhgraph_%s__proc_%s", clean_g, n.hot_proc_target)
 			slot_i := hot_proc_slot_index(proc_sym, false)
-			return {
+			res = {
 				pin_type = .Delegate,
 				val_delegate = hot.Hot_Delegate{
 					entity    = transform_to_hot_entity(tH),
@@ -2203,159 +3980,251 @@ _eval_pure_pin :: proc(
 					node_uid  = i32(n.uid),
 				},
 			}
+		} else if out_pin_idx == 2 {
+			res = {pin_type = .Float, val_f32 = bb.last_payload_f32}
+		} else if out_pin_idx == 3 {
+			res = {pin_type = .Vec2, val_vec2 = bb.last_payload_v2}
+		} else if out_pin_idx == 4 {
+			res = {pin_type = .Bool, val_bool = bb.last_pressed}
 		}
-		if out_pin_idx == 2 do return {pin_type = .Float, val_f32  = bb.last_payload_f32}
-		if out_pin_idx == 3 do return {pin_type = .Vec2,  val_vec2 = bb.last_payload_v2}
-		if out_pin_idx == 4 do return {pin_type = .Bool,  val_bool = bb.last_pressed}
-		return {}
 
 	case .Get_Variable:
 		vi := vg_find_var_index(g, n.var_name)
-		if vi < 0 || vi >= VG_MAX_VARS do return {}
-		s := bb.slots[vi]
-		if out_pin_idx == 1 {
-			ptr: rawptr = nil
-			#partial switch s.pin_type {
-			case .Float: ptr = &bb.slots[vi].val_f32
-			case .Int:   ptr = &bb.slots[vi].val_int
-			case .Int64: ptr = &bb.slots[vi].val_i64
-			case .Bool:  ptr = &bb.slots[vi].val_bool
-			case .Vec2:  ptr = &bb.slots[vi].val_vec2
-			case .Vec3:  ptr = &bb.slots[vi].val_vec3
-			case .Vec4:  ptr = &bb.slots[vi].val_vec4
-			case .Quat:  ptr = &bb.slots[vi].val_quat
-			case .Entity: ptr = &bb.slots[vi].val_ent
-			case .String, .Asset: ptr = &bb.slots[vi].val_cstr
+		if vi >= 0 && vi < VG_MAX_VARS {
+			vdecl := g.variables[vi]
+			s := bb.slots[vi]
+			var_ptr := _bb_slot_value_ptr(bb, vi, vdecl.pin_type)
+			if vdecl.is_array || vdecl.pin_type == .Struct_Val {
+				_, blob, bok := _vg_get_var_blob(g, bb, vdecl.name)
+				if bok && len(blob) > 0 {
+					var_ptr = rawptr(&blob[0])
+					if vdecl.pin_type == .Struct_Val {
+						nc := min(len(blob), hot.HOT_MAX_STRUCT_BYTES)
+						s.val_byte_len = u8(nc)
+						runtime.mem_copy(&s.val_bytes[0], &blob[0], nc)
+					}
+				}
 			}
-			s.pass_mode = .By_Reference
-			s.ref_ptr   = ptr
-			return s
+			if out_pin_idx == 1 {
+				s.pass_mode = .By_Reference
+				s.ref_ptr   = var_ptr
+			} else {
+				s.pass_mode = .Copy_Value
+				s.ref_ptr   = nil
+			}
+			res = s
 		}
-		s.pass_mode = .Copy_Value
-		s.ref_ptr   = nil
-		return s
 
 	case .For_Loop:
-		if out_pin_idx == 1 {
-			for li in bb.loop_indices {
-				if li.active && li.node_uid == n.uid {
-					return {pin_type = .Int, val_int = li.cur_idx}
+		for li in bb.loop_indices {
+			if li.active && li.node_uid == n.uid {
+				if out_pin_idx == 1 {
+					res = {pin_type = .Int, val_int = li.cur_idx}
+				} else if out_pin_idx == 3 && li.elem_ptr != nil {
+					sz, _ := vg_scalar_type_size(g, li.elem_pin_type, op_def.custom_type_name)
+					res = _slot_read_from_ptr(li.elem_ptr, li.elem_pin_type, n.for_mode == .For_In_Ref, sz)
+				}
+				break
+			}
+		}
+		if res.pin_type == .Exec {
+			res = {pin_type = op_def.pin_type}
+		}
+
+	case .Get_Transform_Pos:
+		if w != nil {
+			if t := pool_get(&w.transforms, Handle(tH)); t != nil {
+				if out_pin_idx == 1 {
+					res = {pin_type = .Vec3, pass_mode = .By_Reference, val_vec3 = t.position, ref_ptr = &t.position}
+				} else {
+					res = {pin_type = .Vec3, pass_mode = .Copy_Value, val_vec3 = t.position}
 				}
 			}
 		}
-		return {pin_type = .Int, val_int = 0}
-
-	case .Get_Transform_Pos:
-		if w == nil do return {pin_type = .Vec3}
-		t := pool_get(&w.transforms, Handle(tH))
-		if t == nil do return {pin_type = .Vec3}
-		if out_pin_idx == 1 {
-			return {pin_type = .Vec3, pass_mode = .By_Reference, val_vec3 = t.position, ref_ptr = &t.position}
-		}
-		return {pin_type = .Vec3, pass_mode = .Copy_Value, val_vec3 = t.position}
+		if res.pin_type == .Exec do res = {pin_type = .Vec3}
 
 	case .Math_Float:
 		a_slot := _eval_node_input(g, bb, tH, raw_dt, n, 0, depth + 1)
 		b_slot := _eval_node_input(g, bb, tH, raw_dt, n, 1, depth + 1)
 		a := hot.slot_read_f32(&a_slot)
 		b := hot.slot_read_f32(&b_slot)
-		res: f32 = 0
+		val: f32 = 0
 		switch n.math_op {
-		case .Add:      res = a + b
-		case .Sub:      res = a - b
-		case .Mul:      res = a * b
-		case .Div:      res = abs(b) > 1e-6 ? (a / b) : 0
-		case .Sin_Wave: res = math.sin(a * math.TAU) * b
-		case .Damp:     res = hot.damp_f32(a, b, 8.0, obj_dt)
+		case .Add:      val = a + b
+		case .Sub:      val = a - b
+		case .Mul:      val = a * b
+		case .Div:      val = abs(b) > 1e-6 ? (a / b) : 0
+		case .Sin_Wave: val = math.sin(a * math.TAU) * b
+		case .Damp:     val = hot.damp_f32(a, b, 8.0, obj_dt)
 		}
-		return {pin_type = .Float, val_f32 = res}
+		res = {pin_type = .Float, val_f32 = val}
 
 	case .Vec3_Scale_Add:
 		base_s  := _eval_node_input(g, bb, tH, raw_dt, n, 0, depth + 1)
 		axis_s  := _eval_node_input(g, bb, tH, raw_dt, n, 1, depth + 1)
 		scale_s := _eval_node_input(g, bb, tH, raw_dt, n, 2, depth + 1)
-		v := hot.slot_read_vec3(&base_s) + hot.slot_read_vec3(&axis_s) * hot.slot_read_f32(&scale_s)
-		return {pin_type = .Vec3, val_vec3 = v}
+		res = {pin_type = .Vec3, val_vec3 = hot.slot_read_vec3(&base_s) + hot.slot_read_vec3(&axis_s) * hot.slot_read_f32(&scale_s)}
+
+	case .Auto_Cast:
+		in_s := _eval_node_input(g, bb, tH, raw_dt, n, 0, depth + 1)
+		res = _cast_hot_slot(in_s, op_def.pin_type)
+
+	case .Reroute_Knot:
+		res = _eval_node_input(g, bb, tH, raw_dt, n, 0, depth + 1)
+
+	case .Make_Struct:
+		fl, total_sz, _ := vg_struct_layout(g, n.target_var_or_type, context.temp_allocator)
+		res = {pin_type = .Struct_Val, val_byte_len = u8(clamp(total_sz, 0, hot.HOT_MAX_STRUCT_BYTES))}
+		for f, fi in fl {
+			if fi >= len(n.inputs) do break
+			in_s := _eval_node_input(g, bb, tH, raw_dt, n, fi, depth + 1)
+			if f.offset + f.size <= hot.HOT_MAX_STRUCT_BYTES {
+				_slot_write_to_ptr(&res.val_bytes[f.offset], f.pin_type, &in_s, f.size)
+			}
+		}
+
+	case .Break_Struct:
+		fl, _, _ := vg_struct_layout(g, n.target_var_or_type, context.temp_allocator)
+		if out_pin_idx < len(fl) {
+			in_s := _eval_node_input(g, bb, tH, raw_dt, n, 0, depth + 1)
+			f := fl[out_pin_idx]
+			src_base := in_s.ref_ptr != nil ? in_s.ref_ptr : rawptr(&in_s.val_bytes[0])
+			if f.offset + f.size <= hot.HOT_MAX_STRUCT_BYTES || in_s.ref_ptr != nil {
+				f_ptr := rawptr(uintptr(src_base) + uintptr(f.offset))
+				res = _slot_read_from_ptr(f_ptr, f.pin_type, false, f.size)
+			}
+		}
+
+	case .Array_Op:
+		mode := VG_Array_Op_Mode(clamp(n.sub_op, 0, int(VG_Array_Op_Mode.Swap_Remove)))
+		if mode == .Get_Copy || mode == .Get_Ref || mode == .Len {
+			v, blob, bok := _vg_get_var_blob(g, bb, n.target_var_or_type)
+			if bok && len(blob) > 0 {
+				cnt := v.array_count > 0 ? v.array_count : 8
+				cur_len := cnt
+				if v.array_is_bounded {
+					coff := vg_bounded_array_count_offset(g, v)
+					if coff + 4 <= len(blob) {
+						cur_len = clamp(int((cast(^i32)&blob[coff])^), 0, cnt)
+					}
+				}
+				if mode == .Len {
+					res = {pin_type = .Int, val_int = i32(cur_len)}
+				} else {
+					idx_s := _eval_node_input(g, bb, tH, raw_dt, n, 0, depth + 1)
+					idx := int(hot.slot_read_int(&idx_s))
+					elem_sz, _ := vg_scalar_type_size(g, v.pin_type, v.custom_type_name)
+					elem_sz = max(elem_sz, 1)
+					if cur_len > 0 {
+						idx = clamp(idx, 0, cur_len - 1)
+						eptr := rawptr(&blob[idx * elem_sz])
+						res = _slot_read_from_ptr(eptr, v.pin_type, mode == .Get_Ref, elem_sz)
+					}
+				}
+			}
+		} else {
+			handled = false
+		}
+
+	case .BitSet_Op:
+		mode := VG_BitSet_Op_Mode(clamp(n.sub_op, 0, int(VG_BitSet_Op_Mode.Is_Empty)))
+		if mode == .Has_Flag || mode == .Is_Empty {
+			s0 := _eval_node_input(g, bb, tH, raw_dt, n, 0, depth + 1)
+			mask := hot.slot_read_u8(&s0)
+			if mode == .Is_Empty {
+				res = {pin_type = .Bool, val_bool = (mask == 0)}
+			} else {
+				s1 := _eval_node_input(g, bb, tH, raw_dt, n, 1, depth + 1)
+				bit := clamp(hot.slot_read_u8(&s1), 0, 7)
+				res = {pin_type = .Bool, val_bool = (mask & (u8(1) << bit)) != 0}
+			}
+		} else {
+			handled = false
+		}
 
 	case .Anim_Clip_Eval:
 		spd_s  := _eval_node_input(g, bb, tH, raw_dt, n, 0, depth + 1)
 		norm_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, depth + 1)
 		ph := math.mod(hot.slot_read_f32(&norm_s) + obj_dt * hot.slot_read_f32(&spd_s), 1.0)
-		if out_pin_idx == 1 do return {pin_type = .Float, val_f32 = ph}
-		return {pin_type = .Float, val_f32 = 1.0}
+		res = {pin_type = .Float, val_f32 = out_pin_idx == 1 ? ph : 1.0}
 
 	case .Anim_Blend_Layered:
 		s0 := _eval_node_input(g, bb, tH, raw_dt, n, 0, depth + 1)
 		s1 := _eval_node_input(g, bb, tH, raw_dt, n, 1, depth + 1)
 		s2 := _eval_node_input(g, bb, tH, raw_dt, n, 2, depth + 1)
-		b0 := hot.slot_read_f32(&s0)
-		b1 := hot.slot_read_f32(&s1)
-		al := clamp(hot.slot_read_f32(&s2), 0.0, 1.0)
-		return {pin_type = .Float, val_f32 = math.lerp(b0, b1, al)}
+		res = {pin_type = .Float, val_f32 = math.lerp(hot.slot_read_f32(&s0), hot.slot_read_f32(&s1), clamp(hot.slot_read_f32(&s2), 0.0, 1.0))}
 
 	case .Anim_Spring_Damper:
-		s0  := _eval_node_input(g, bb, tH, raw_dt, n, 0, depth + 1)
-		s1  := _eval_node_input(g, bb, tH, raw_dt, n, 1, depth + 1)
-		s2  := _eval_node_input(g, bb, tH, raw_dt, n, 2, depth + 1)
-		cur := hot.slot_read_f32(&s0)
-		tgt := hot.slot_read_f32(&s1)
-		spd := max(hot.slot_read_f32(&s2), 0.01)
-		return {pin_type = .Float, val_f32 = hot.damp_f32(cur, tgt, spd, obj_dt)}
+		s0 := _eval_node_input(g, bb, tH, raw_dt, n, 0, depth + 1)
+		s1 := _eval_node_input(g, bb, tH, raw_dt, n, 1, depth + 1)
+		s2 := _eval_node_input(g, bb, tH, raw_dt, n, 2, depth + 1)
+		res = {pin_type = .Float, val_f32 = hot.damp_f32(hot.slot_read_f32(&s0), hot.slot_read_f32(&s1), max(hot.slot_read_f32(&s2), 0.01), obj_dt)}
 
 	case .VFX_GPU_Curl_Force:
-		s0   := _eval_node_input(g, bb, tH, raw_dt, n, 0, depth + 1)
-		s1   := _eval_node_input(g, bb, tH, raw_dt, n, 1, depth + 1)
-		s2   := _eval_node_input(g, bb, tH, raw_dt, n, 2, depth + 1)
-		vel  := hot.slot_read_vec3(&s0)
-		curl := hot.slot_read_f32(&s1)
-		drag := clamp(hot.slot_read_f32(&s2), 0.0, 20.0)
-		swirl := [3]f32{math.sin(vel.y * 1.7), math.cos(vel.x * 1.3), math.sin(vel.z * 1.5)} * (curl * obj_dt)
-		next_v := (vel + swirl) * max(1.0 - drag * obj_dt, 0.0)
-		return {pin_type = .Vec3, val_vec3 = next_v}
+		s0 := _eval_node_input(g, bb, tH, raw_dt, n, 0, depth + 1)
+		s1 := _eval_node_input(g, bb, tH, raw_dt, n, 1, depth + 1)
+		s2 := _eval_node_input(g, bb, tH, raw_dt, n, 2, depth + 1)
+		vel := hot.slot_read_vec3(&s0)
+		swirl := [3]f32{math.sin(vel.y * 1.7), math.cos(vel.x * 1.3), math.sin(vel.z * 1.5)} * (hot.slot_read_f32(&s1) * obj_dt)
+		res = {pin_type = .Vec3, val_vec3 = (vel + swirl) * math.exp(-max(hot.slot_read_f32(&s2), f32(0.0)) * max(obj_dt, f32(0.0)))}
 
 	case .VFX_Color_Size_Life:
 		s_age := _eval_node_input(g, bb, tH, raw_dt, n, 0, depth + 1)
 		s_min := _eval_node_input(g, bb, tH, raw_dt, n, 1, depth + 1)
 		s_max := _eval_node_input(g, bb, tH, raw_dt, n, 2, depth + 1)
-		age   := clamp(hot.slot_read_f32(&s_age), 0.0, 1.0)
-		s0    := hot.slot_read_f32(&s_min)
-		s1    := hot.slot_read_f32(&s_max)
-		return {pin_type = .Float, val_f32 = math.lerp(s0, s1, age)}
+		res = {pin_type = .Float, val_f32 = math.lerp(hot.slot_read_f32(&s_min), hot.slot_read_f32(&s_max), clamp(hot.slot_read_f32(&s_age), 0.0, 1.0))}
 
 	case .Audio_Random_Container:
 		s_seed  := _eval_node_input(g, bb, tH, raw_dt, n, 0, depth + 1)
 		s_count := _eval_node_input(g, bb, tH, raw_dt, n, 1, depth + 1)
 		cnt     := max(int(hot.slot_read_int(&s_count)), 1)
 		frac    := math.mod(abs(hot.slot_read_f32(&s_seed)), f32(1.0))
-		idx     := clamp(int(frac * f32(cnt)), 0, cnt - 1)
-		return {pin_type = .Int, val_int = i32(idx)}
+		res = {pin_type = .Int, val_int = i32(clamp(int(frac * f32(cnt)), 0, cnt - 1))}
 
 	case .Audio_Modulate_Pitch_Vol:
 		s_base := _eval_node_input(g, bb, tH, raw_dt, n, 0, depth + 1)
 		s_rng  := _eval_node_input(g, bb, tH, raw_dt, n, 1, depth + 1)
 		s_seed := _eval_node_input(g, bb, tH, raw_dt, n, 2, depth + 1)
-		base   := hot.slot_read_f32(&s_base)
-		rng    := hot.slot_read_f32(&s_rng)
 		frac   := math.mod(abs(hot.slot_read_f32(&s_seed)), f32(1.0))
-		return {pin_type = .Float, val_f32 = base + (frac * 2.0 - 1.0) * rng}
+		res = {pin_type = .Float, val_f32 = hot.slot_read_f32(&s_base) + (frac * 2.0 - 1.0) * hot.slot_read_f32(&s_rng)}
 
 	case .AI_Check_Arrival:
 		s_tol := _eval_node_input(g, bb, tH, raw_dt, n, 0, depth + 1)
-		tol   := hot.slot_read_f32(&s_tol)
-		arrived := false
-		if w := ctx_world(); w != nil && pool_valid(&w.transforms, Handle(tH)) {
-			if nav_agent_has_arrived(w, tH) {
-				arrived = true
-			} else if _, ag := transform_get_comp(tH, NavMeshAgent); ag != nil && ag.has_destination {
-				tw := transform_world(tH)
-				if linalg.distance(tw.position, ag.target_position) <= max(tol, ag.stopping_distance) {
-					arrived = true
+		res = {pin_type = .Bool, val_bool = visual_script_ai_arrived_runtime(tH, hot.slot_read_f32(&s_tol))}
+
+	case .Call_Hot_Proc:
+		if len(n.inputs) == 0 || n.inputs[0].pin_type != .Exec {
+			if n.hot_proc_target != "" && hot_proc_exists(n.hot_proc_target) {
+				frame: hot.Hot_Call_Frame
+				for pin_i in 0 ..< min(len(n.inputs), hot.HOT_MAX_ARGS) {
+					frame.inputs[pin_i] = _eval_node_input(g, bb, tH, raw_dt, n, pin_i, depth + 1)
+				}
+				frame.input_count = i32(min(len(n.inputs), hot.HOT_MAX_ARGS))
+				hot_proc_invoke(n.hot_proc_target, tH, obj_dt, &frame)
+				for oi in 0 ..< min(len(n.outputs), int(frame.output_count)) {
+					_bb_set_live_pin(bb, n.uid, oi, frame.outputs[oi])
+				}
+				if out_pin_idx < int(frame.output_count) {
+					res = frame.outputs[out_pin_idx]
 				}
 			}
+		} else {
+			handled = false
 		}
-		return {pin_type = .Bool, val_bool = arrived}
+
+	case:
+		handled = false
 	}
-	return {}
+
+	if !handled {
+		if cached, ok := _bb_get_live_pin(bb, n.uid, out_pin_idx); ok {
+			return cached
+		}
+		return {pin_type = op_def.pin_type}
+	}
+
+	_bb_set_live_pin(bb, n.uid, out_pin_idx, res)
+	return res
 }
 
 @(private = "file")
@@ -2371,24 +4240,53 @@ _eval_node_input :: proc(
 	if in_pin_idx < 0 || in_pin_idx >= len(dst_node.inputs) do return {}
 	pdef := dst_node.inputs[in_pin_idx]
 
+	// Assemble split parent input value dynamically from its expanded child pins
+	if pdef.split_expanded {
+		assembled := hot.Hot_Slot{pin_type = pdef.pin_type, pass_mode = .Copy_Value}
+		if pdef.pin_type == .Vec2 do assembled.val_vec2 = pdef.default_vec2
+		else if pdef.pin_type == .Vec3 do assembled.val_vec3 = pdef.default_vec3
+		else if pdef.pin_type == .Vec4 do assembled.val_vec4 = pdef.default_vec4
+		else if pdef.pin_type == .Quat do assembled.val_quat = {0, 0, 0, 1}
+		fl: []VG_Struct_Field_Layout
+		if pdef.pin_type == .Struct_Val {
+			tot: int
+			fl, tot, _ = vg_struct_layout(g, pdef.custom_type_name, context.temp_allocator)
+			assembled.val_byte_len = u8(clamp(tot, 0, hot.HOT_MAX_STRUCT_BYTES))
+		}
+		for ci in 0 ..< len(dst_node.inputs) {
+			cp := dst_node.inputs[ci]
+			if cp.split_parent_name != pdef.name do continue
+			cs := _eval_node_input(g, bb, tH, raw_dt, dst_node, ci, depth + 1)
+			if pdef.pin_type in (bit_set[hot.Hot_Pin_Type]{.Vec2, .Vec3, .Vec4, .Quat}) {
+				fv := hot.slot_read_f32(&cs)
+				cidx := -1
+				if cp.split_field_name == "x" do cidx = 0
+				else if cp.split_field_name == "y" do cidx = 1
+				else if cp.split_field_name == "z" do cidx = 2
+				else if cp.split_field_name == "w" do cidx = 3
+				if cidx >= 0 {
+					if pdef.pin_type == .Vec2 && cidx < 2      do assembled.val_vec2[cidx] = fv
+					else if pdef.pin_type == .Vec3 && cidx < 3 do assembled.val_vec3[cidx] = fv
+					else if pdef.pin_type == .Vec4 && cidx < 4 do assembled.val_vec4[cidx] = fv
+					else if pdef.pin_type == .Quat && cidx < 4 do assembled.val_quat[cidx] = fv
+				}
+			} else if pdef.pin_type == .Struct_Val {
+				for f in fl {
+					if f.name == cp.split_field_name && f.offset + f.size <= hot.HOT_MAX_STRUCT_BYTES {
+						_slot_write_to_ptr(&assembled.val_bytes[f.offset], f.pin_type, &cs, f.size)
+						break
+					}
+				}
+			}
+		}
+		return assembled
+	}
+
 	for wire in g.wires {
 		if wire.to_uid == dst_node.uid && wire.to_pin == in_pin_idx {
 			val := _eval_pure_pin(g, bb, tH, raw_dt, wire.from_uid, wire.from_pin, depth)
 			if pdef.pass_mode == .Copy_Value && val.pass_mode == .By_Reference && val.ref_ptr != nil {
-				#partial switch val.pin_type {
-				case .Float:  val.val_f32  = (cast(^f32)val.ref_ptr)^
-				case .Int:    val.val_int  = (cast(^i32)val.ref_ptr)^
-				case .Int64:  val.val_i64  = (cast(^i64)val.ref_ptr)^
-				case .Bool:   val.val_bool = (cast(^bool)val.ref_ptr)^
-				case .Vec2:   val.val_vec2 = (cast(^[2]f32)val.ref_ptr)^
-				case .Vec3:   val.val_vec3 = (cast(^[3]f32)val.ref_ptr)^
-				case .Vec4:   val.val_vec4 = (cast(^[4]f32)val.ref_ptr)^
-				case .Quat:   val.val_quat = (cast(^[4]f32)val.ref_ptr)^
-				case .Entity: val.val_ent  = (cast(^hot.Hot_Entity)val.ref_ptr)^
-				case .String, .Asset: val.val_cstr = (cast(^cstring)val.ref_ptr)^
-				}
-				val.pass_mode = .Copy_Value
-				val.ref_ptr   = nil
+				val = _slot_read_from_ptr(val.ref_ptr, val.pin_type, false, int(val.val_byte_len))
 			}
 			return val
 		}
@@ -2398,13 +4296,20 @@ _eval_node_input :: proc(
 		pin_type  = pdef.pin_type,
 		pass_mode = .Copy_Value,
 		val_f32   = pdef.default_f32,
+		val_f64   = pdef.default_f64 != 0 ? pdef.default_f64 : f64(pdef.default_f32),
 		val_int   = pdef.default_int,
-		val_i64   = pdef.default_i64,
+		val_i64   = pdef.default_i64 != 0 ? pdef.default_i64 : i64(pdef.default_int),
+		val_u8    = u8(clamp(pdef.default_u64, 0, 255)),
+		val_i8    = i8(clamp(pdef.default_int, -128, 127)),
+		val_u16   = u16(clamp(pdef.default_u64, 0, 65535)),
+		val_i16   = i16(clamp(pdef.default_int, -32768, 32767)),
+		val_u32   = u32(pdef.default_u64),
+		val_u64   = pdef.default_u64,
 		val_bool  = pdef.default_bool,
 		val_vec2  = pdef.default_vec2,
 		val_vec3  = pdef.default_vec3,
 		val_vec4  = pdef.default_vec4,
-		val_quat  = pdef.pin_type == .Quat ? {0, 0, 0, 1} : pdef.default_vec4,
+		val_quat  = pdef.pin_type == .Quat && pdef.default_vec4 == ({0, 0, 0, 0}) ? {0, 0, 0, 1} : pdef.default_vec4,
 		val_cstr  = pdef.default_str != "" ? strings.clone_to_cstring(pdef.default_str, context.temp_allocator) : cstring(""),
 	}
 }
@@ -2446,6 +4351,8 @@ vg_eval_from_entry_uid :: proc(g: ^Visual_Graph, bb: ^VG_Runtime_Blackboard, tH:
 	vg_sync_blackboard(g, bb)
 	if call_depth == 0 {
 		clear(&bb.last_exec_path)
+		bb.loop_break_requested    = false
+		bb.loop_continue_requested = false
 	}
 
 	entry_node := vg_find_node(g, entry_node_uid)
@@ -2466,8 +4373,22 @@ _eval_exec_chain_from_uid :: proc(g: ^Visual_Graph, bb: ^VG_Runtime_Blackboard, 
 	w := ctx_world()
 	obj_dt := w != nil && pool_valid(&w.transforms, Handle(tH)) ? transform_dt(tH, raw_dt) : raw_dt
 
+	deferred_uids := make([dynamic]int, 0, 4, context.temp_allocator)
+	defer {
+		for di := len(deferred_uids) - 1; di >= 0; di -= 1 {
+			saved_brk := bb.loop_break_requested
+			saved_cnt := bb.loop_continue_requested
+			bb.loop_break_requested    = false
+			bb.loop_continue_requested = false
+			_eval_exec_chain_from_uid(g, bb, tH, raw_dt, deferred_uids[di], call_depth + 1)
+			bb.loop_break_requested    = saved_brk
+			bb.loop_continue_requested = saved_cnt
+		}
+	}
+
 	hops := 0
-	for cur_uid != 0 && hops < 64 {
+	for cur_uid != 0 && hops < 128 {
+		if bb.loop_break_requested || bb.loop_continue_requested do break
 		hops += 1
 		n := vg_find_node(g, cur_uid)
 		if n == nil do break
@@ -2480,22 +4401,34 @@ _eval_exec_chain_from_uid :: proc(g: ^Visual_Graph, bb: ^VG_Runtime_Blackboard, 
 				vi := vg_find_var_index(g, n.var_name)
 				if vi >= 0 && vi < VG_MAX_VARS {
 					in_val := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
-					bb.slots[vi].val_f32  = hot.slot_read_f32(&in_val)
-					bb.slots[vi].val_int  = hot.slot_read_int(&in_val)
-					bb.slots[vi].val_i64  = hot.slot_read_i64(&in_val)
-					bb.slots[vi].val_bool = hot.slot_read_bool(&in_val)
-					bb.slots[vi].val_vec2 = hot.slot_read_vec2(&in_val)
-					bb.slots[vi].val_vec3 = hot.slot_read_vec3(&in_val)
-					bb.slots[vi].val_vec4 = hot.slot_read_vec4(&in_val)
-					bb.slots[vi].val_quat = hot.slot_read_quat(&in_val)
-					bb.slots[vi].val_ent  = hot.slot_read_entity(&in_val)
-					if cs_in := hot.slot_read_cstr(&in_val); cs_in != "" {
-						s_in := string(cs_in)
-						for k in 0 ..< len(bb.str_bufs[vi]) do bb.str_bufs[vi][k] = 0
-						ncopy := min(len(s_in), len(bb.str_bufs[vi]) - 1)
-						if ncopy > 0 do copy(bb.str_bufs[vi][:ncopy], s_in[:ncopy])
-						bb.slots[vi].val_cstr = cstring(&bb.str_bufs[vi][0])
+					vdecl := g.variables[vi]
+					if vdecl.is_array || vdecl.pin_type == .Struct_Val {
+						_, blob, bok := _vg_get_var_blob(g, bb, vdecl.name)
+						if bok && len(blob) > 0 {
+							if vdecl.pin_type == .Struct_Val {
+								nc := min(len(blob), hot.HOT_MAX_STRUCT_BYTES)
+								src := hot.slot_ref_struct_bytes(&in_val)
+								runtime.mem_copy(&blob[0], src, nc)
+								runtime.mem_copy(&bb.slots[vi].val_bytes[0], src, nc)
+								bb.slots[vi].val_byte_len = u8(nc)
+							}
+						}
+					} else {
+						bb.slots[vi].pin_type = vdecl.pin_type
+						_slot_write_to_ptr(_bb_slot_value_ptr(bb, vi, vdecl.pin_type), vdecl.pin_type, &in_val)
+						if ent_bb := visual_script_get_entity_bb(tH); ent_bb != nil && ent_bb != bb {
+							ent_bb.slots[vi].pin_type = vdecl.pin_type
+							_slot_write_to_ptr(_bb_slot_value_ptr(ent_bb, vi, vdecl.pin_type), vdecl.pin_type, &in_val)
+						}
+						if cs_in := hot.slot_read_cstr(&in_val); cs_in != "" {
+							s_in := string(cs_in)
+							for k in 0 ..< len(bb.str_bufs[vi]) do bb.str_bufs[vi][k] = 0
+							ncopy := min(len(s_in), len(bb.str_bufs[vi]) - 1)
+							if ncopy > 0 do copy(bb.str_bufs[vi][:ncopy], s_in[:ncopy])
+							bb.slots[vi].val_cstr = cstring(&bb.str_bufs[vi][0])
+						}
 					}
+					_bb_set_live_pin(bb, cur_uid, 1, in_val)
 				}
 
 			case .Set_Transform_Pos:
@@ -2514,35 +4447,295 @@ _eval_exec_chain_from_uid :: proc(g: ^Visual_Graph, bb: ^VG_Runtime_Blackboard, 
 				for out_pi in 0 ..< len(n.outputs) {
 					if branch_uid := _find_exec_target(g, cur_uid, out_pi); branch_uid != 0 {
 						_eval_exec_chain_from_uid(g, bb, tH, raw_dt, branch_uid, call_depth + 1)
+						if bb.loop_break_requested || bb.loop_continue_requested do break
 					}
 				}
 				cur_uid = 0
 				continue
 
-			case .For_Loop:
-				first_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
-				last_s  := _eval_node_input(g, bb, tH, raw_dt, n, 2, 0)
-				first_i := hot.slot_read_int(&first_s)
-				last_i  := min(hot.slot_read_int(&last_s), first_i + 10_000)
-				body_uid := _find_exec_target(g, cur_uid, 0)
+			case .Break_Loop:
+				bb.loop_break_requested = true
+				cur_uid = 0
+				continue
 
+			case .Continue_Loop:
+				bb.loop_continue_requested = true
+				cur_uid = 0
+				continue
+
+			case .Defer_Exec:
+				if du := _find_exec_target(g, cur_uid, 1); du != 0 {
+					append(&deferred_uids, du)
+				}
+				next_exec_pin = 0
+
+			case .Switch_Value:
+				sel_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
+				def_pin := max(len(n.outputs) - 1, 0)
+				if ed := vg_find_enum_decl(g, n.target_var_or_type); ed != nil {
+					ev := int(hot.slot_read_u8(&sel_s))
+					next_exec_pin = (ev >= 0 && ev < len(ed.variants)) ? ev : def_pin
+				} else {
+					iv := int(hot.slot_read_int(&sel_s))
+					next_exec_pin = (iv >= 0 && iv < def_pin) ? iv : def_pin
+				}
+
+			case .BitSet_Op:
+				mode := VG_BitSet_Op_Mode(clamp(n.sub_op, 0, int(VG_BitSet_Op_Mode.Is_Empty)))
+				if mode != .Has_Flag && mode != .Is_Empty {
+					s_in := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
+					s_fl := _eval_node_input(g, bb, tH, raw_dt, n, 2, 0)
+					mask := hot.slot_read_u8(&s_in)
+					bit  := u8(1) << clamp(hot.slot_read_u8(&s_fl), 0, 7)
+					switch mode {
+					case .Set_Flag:    mask |= bit
+					case .Clear_Flag:  mask &~= bit
+					case .Toggle_Flag: mask ~= bit
+					case .Has_Flag, .Is_Empty:
+					}
+					_bb_set_live_pin(bb, cur_uid, 1, {pin_type = .BitSet_U8, val_u8 = mask})
+				}
+
+			case .Array_Op:
+				mode := VG_Array_Op_Mode(clamp(n.sub_op, 0, int(VG_Array_Op_Mode.Swap_Remove)))
+				v, blob, bok := _vg_get_var_blob(g, bb, n.target_var_or_type)
+				if bok && len(blob) > 0 {
+					cap_len := v.array_count > 0 ? v.array_count : 8
+					elem_sz, _ := vg_scalar_type_size(g, v.pin_type, v.custom_type_name)
+					elem_sz = max(elem_sz, 1)
+					coff := v.array_is_bounded ? vg_bounded_array_count_offset(g, v) : 0
+					cur_len := cap_len
+					if v.array_is_bounded && coff + 4 <= len(blob) {
+						cur_len = clamp(int((cast(^i32)&blob[coff])^), 0, cap_len)
+					}
+					switch mode {
+					case .Set_Elem:
+						idx_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
+						val_s := _eval_node_input(g, bb, tH, raw_dt, n, 2, 0)
+						idx   := int(hot.slot_read_int(&idx_s))
+						if idx >= 0 && idx < cur_len {
+							_slot_write_to_ptr(&blob[idx * elem_sz], v.pin_type, &val_s, elem_sz)
+						}
+					case .Append:
+						val_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
+						ok := false
+						if v.array_is_bounded && coff + 4 <= len(blob) && cur_len < cap_len {
+							_slot_write_to_ptr(&blob[cur_len * elem_sz], v.pin_type, &val_s, elem_sz)
+							(cast(^i32)&blob[coff])^ = i32(cur_len + 1)
+							ok = true
+						}
+						_bb_set_live_pin(bb, cur_uid, 1, {pin_type = .Bool, val_bool = ok})
+					case .Pop:
+						out_v := hot.Hot_Slot{pin_type = v.pin_type}
+						ok := false
+						if v.array_is_bounded && coff + 4 <= len(blob) && cur_len > 0 {
+							new_len := cur_len - 1
+							out_v = _slot_read_from_ptr(&blob[new_len * elem_sz], v.pin_type, false, elem_sz)
+							(cast(^i32)&blob[coff])^ = i32(new_len)
+							ok = true
+						}
+						_bb_set_live_pin(bb, cur_uid, 1, out_v)
+						_bb_set_live_pin(bb, cur_uid, 2, {pin_type = .Bool, val_bool = ok})
+					case .Clear:
+						if v.array_is_bounded && coff + 4 <= len(blob) {
+							(cast(^i32)&blob[coff])^ = 0
+						} else {
+							runtime.mem_zero(&blob[0], len(blob))
+						}
+					case .Swap_Remove:
+						idx_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
+						idx   := int(hot.slot_read_int(&idx_s))
+						if v.array_is_bounded && coff + 4 <= len(blob) && idx >= 0 && idx < cur_len {
+							last := cur_len - 1
+							if idx != last {
+								runtime.mem_copy(&blob[idx * elem_sz], &blob[last * elem_sz], elem_sz)
+							}
+							(cast(^i32)&blob[coff])^ = i32(last)
+						}
+					case .Get_Copy, .Get_Ref, .Len:
+					}
+				}
+
+			case .Or_Branch:
+				val_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
+				ok_s  := _eval_node_input(g, bb, tH, raw_dt, n, 2, 0)
+				_bb_set_live_pin(bb, cur_uid, 2, val_s)
+				next_exec_pin = hot.slot_read_bool(&ok_s) ? 0 : 1
+
+			case .Reroute_Knot:
+				next_exec_pin = 0
+
+			case .For_Loop:
+				body_uid := _find_exec_target(g, cur_uid, 0)
 				loop_slot := -1
 				for &li, idx in bb.loop_indices {
 					if !li.active || li.node_uid == cur_uid {
 						li.node_uid = cur_uid
 						li.active   = true
+						li.elem_ptr = nil
 						loop_slot   = idx
 						break
 					}
 				}
-				for idx := first_i; idx <= last_i; idx += 1 {
-					if loop_slot >= 0 do bb.loop_indices[loop_slot].cur_idx = idx
-					if body_uid != 0 {
-						_eval_exec_chain_from_uid(g, bb, tH, raw_dt, body_uid, call_depth + 1)
+				iters := 0
+				switch n.for_mode {
+				case .Range_Inclusive, .Range_Half_Open:
+					first_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
+					last_s  := _eval_node_input(g, bb, tH, raw_dt, n, 2, 0)
+					first_i := hot.slot_read_int(&first_s)
+					raw_end := hot.slot_read_int(&last_s)
+					last_inc := n.for_mode == .Range_Half_Open ? (raw_end - 1) : raw_end
+					if last_inc >= first_i {
+						idx := n.loop_reverse ? last_inc : first_i
+						step: i32 = n.loop_reverse ? -1 : 1
+						for (n.loop_reverse ? (idx >= first_i) : (idx <= last_inc)) {
+							iters += 1
+							if iters > VG_MAX_LOOP_ITERATIONS {
+								visual_script_report_loop_fuse(tH, u32(cur_uid))
+								break
+							}
+							if loop_slot >= 0 do bb.loop_indices[loop_slot].cur_idx = idx
+							if body_uid != 0 {
+								bb.loop_continue_requested = false
+								_eval_exec_chain_from_uid(g, bb, tH, raw_dt, body_uid, call_depth + 1)
+								if bb.loop_break_requested {
+									bb.loop_break_requested = false
+									break
+								}
+								bb.loop_continue_requested = false
+							}
+							idx += step
+						}
+					}
+				case .For_In_Value, .For_In_Ref:
+					v, blob, bok := _vg_get_var_blob(g, bb, n.target_var_or_type)
+					if bok && len(blob) > 0 {
+						cap_len := v.array_count > 0 ? v.array_count : 8
+						cnt := cap_len
+						if v.array_is_bounded {
+							coff := vg_bounded_array_count_offset(g, v)
+							if coff + 4 <= len(blob) do cnt = clamp(int((cast(^i32)&blob[coff])^), 0, cap_len)
+						}
+						elem_sz, _ := vg_scalar_type_size(g, v.pin_type, v.custom_type_name)
+						elem_sz = max(elem_sz, 1)
+						if loop_slot >= 0 do bb.loop_indices[loop_slot].elem_pin_type = v.pin_type
+						if cnt > 0 {
+							idx := n.loop_reverse ? (cnt - 1) : 0
+							step := n.loop_reverse ? -1 : 1
+							for (n.loop_reverse ? (idx >= 0) : (idx < cnt)) {
+								iters += 1
+								if iters > VG_MAX_LOOP_ITERATIONS {
+									visual_script_report_loop_fuse(tH, u32(cur_uid))
+									break
+								}
+								if loop_slot >= 0 {
+									bb.loop_indices[loop_slot].cur_idx  = i32(idx)
+									bb.loop_indices[loop_slot].elem_ptr = rawptr(&blob[idx * elem_sz])
+								}
+								if body_uid != 0 {
+									bb.loop_continue_requested = false
+									_eval_exec_chain_from_uid(g, bb, tH, raw_dt, body_uid, call_depth + 1)
+									if bb.loop_break_requested {
+										bb.loop_break_requested = false
+										break
+									}
+									bb.loop_continue_requested = false
+								}
+								idx += step
+							}
+						}
+					}
+				case .Condition:
+					for {
+						cond_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
+						if !hot.slot_read_bool(&cond_s) do break
+						iters += 1
+						if iters > VG_MAX_LOOP_ITERATIONS {
+							visual_script_report_loop_fuse(tH, u32(cur_uid))
+							break
+						}
+						if loop_slot >= 0 do bb.loop_indices[loop_slot].cur_idx = i32(iters - 1)
+						if body_uid != 0 {
+							bb.loop_continue_requested = false
+							_eval_exec_chain_from_uid(g, bb, tH, raw_dt, body_uid, call_depth + 1)
+							if bb.loop_break_requested {
+								bb.loop_break_requested = false
+								break
+							}
+							bb.loop_continue_requested = false
+						}
 					}
 				}
-				if loop_slot >= 0 do bb.loop_indices[loop_slot].active = false
+				if loop_slot >= 0 {
+					bb.loop_indices[loop_slot].active   = false
+					bb.loop_indices[loop_slot].elem_ptr = nil
+				}
 				next_exec_pin = 2
+
+			case .Delay_Timer:
+				dur_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
+				rst_s := _eval_node_input(g, bb, tH, raw_dt, n, 2, 0)
+				dur   := hot.slot_read_f32(&dur_s)
+				ready, rem := visual_script_timer_step_runtime(tH, u32(cur_uid), dur, obj_dt, hot.slot_read_bool(&rst_s), false)
+				_bb_set_live_pin(bb, cur_uid, 2, {pin_type = .Float, val_f32 = max(dur - rem, f32(0.0))})
+				next_exec_pin = ready ? 1 : 0
+
+			case .Cooldown_Gate:
+				dur_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
+				rst_s := _eval_node_input(g, bb, tH, raw_dt, n, 2, 0)
+				dur   := hot.slot_read_f32(&dur_s)
+				ready, rem := visual_script_timer_step_runtime(tH, u32(cur_uid), dur, obj_dt, hot.slot_read_bool(&rst_s), true)
+				_bb_set_live_pin(bb, cur_uid, 2, {pin_type = .Float, val_f32 = rem})
+				next_exec_pin = ready ? 0 : 1
+
+			case .Spawn_Prefab:
+				pf_s  := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
+				pos_s := _eval_node_input(g, bb, tH, raw_dt, n, 2, 0)
+				rot_s := _eval_node_input(g, bb, tH, raw_dt, n, 3, 0)
+				sp_h := visual_script_spawn_prefab_runtime(string(hot.slot_read_cstr(&pf_s)), hot.slot_read_vec3(&pos_s), hot.slot_read_quat(&rot_s))
+				_bb_set_live_pin(bb, cur_uid, 1, {pin_type = .Entity, val_ent = transform_to_hot_entity(sp_h)})
+				_bb_set_live_pin(bb, cur_uid, 2, {pin_type = .Bool, val_bool = (sp_h != {})})
+
+			case .Destroy_Entity:
+				tgt_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
+				te    := hot.slot_read_entity(&tgt_s)
+				tgt_h := te.index != 0 ? hot_entity_to_transform(te) : tH
+				visual_script_destroy_entity_runtime(tgt_h)
+
+			case .Physics_Raycast:
+				org_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
+				dir_s := _eval_node_input(g, bb, tH, raw_dt, n, 2, 0)
+				dst_s := _eval_node_input(g, bb, tH, raw_dt, n, 3, 0)
+				msk_s := _eval_node_input(g, bb, tH, raw_dt, n, 4, 0)
+				rh := visual_script_physics_raycast_runtime(tH, hot.slot_read_vec3(&org_s), hot.slot_read_vec3(&dir_s), hot.slot_read_f32(&dst_s), hot.slot_read_u32(&msk_s))
+				_bb_set_live_pin(bb, cur_uid, 1, {pin_type = .Bool,   val_bool = rh.hit})
+				_bb_set_live_pin(bb, cur_uid, 2, {pin_type = .Vec3,   val_vec3 = rh.position})
+				_bb_set_live_pin(bb, cur_uid, 3, {pin_type = .Vec3,   val_vec3 = rh.normal})
+				_bb_set_live_pin(bb, cur_uid, 4, {pin_type = .Float,  val_f32  = rh.distance})
+				_bb_set_live_pin(bb, cur_uid, 5, {pin_type = .Entity, val_ent  = rh.entity})
+
+			case .Physics_Overlap_Sphere:
+				ctr_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
+				rad_s := _eval_node_input(g, bb, tH, raw_dt, n, 2, 0)
+				msk_s := _eval_node_input(g, bb, tH, raw_dt, n, 3, 0)
+				cnt, closest := visual_script_physics_overlap_sphere_runtime(tH, hot.slot_read_vec3(&ctr_s), hot.slot_read_f32(&rad_s), hot.slot_read_u32(&msk_s))
+				_bb_set_live_pin(bb, cur_uid, 1, {pin_type = .Int,    val_int = cnt})
+				_bb_set_live_pin(bb, cur_uid, 2, {pin_type = .Entity, val_ent = transform_to_hot_entity(closest)})
+
+			case .Physics_Add_Impulse:
+				tgt_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
+				imp_s := _eval_node_input(g, bb, tH, raw_dt, n, 2, 0)
+				vc_s  := _eval_node_input(g, bb, tH, raw_dt, n, 3, 0)
+				te    := hot.slot_read_entity(&tgt_s)
+				tgt_h := te.index != 0 ? hot_entity_to_transform(te) : tH
+				visual_script_physics_add_impulse_runtime(tgt_h, hot.slot_read_vec3(&imp_s), hot.slot_read_bool(&vc_s))
+
+			case .CSG_Brush_Stamp:
+				pos_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
+				rad_s := _eval_node_input(g, bb, tH, raw_dt, n, 2, 0)
+				imp_s := _eval_node_input(g, bb, tH, raw_dt, n, 3, 0)
+				aff   := visual_script_csg_stamp_runtime(hot.slot_read_vec3(&pos_s), hot.slot_read_f32(&rad_s), hot.slot_read_f32(&imp_s), "")
+				_bb_set_live_pin(bb, cur_uid, 1, {pin_type = .Int, val_int = aff})
 
 			case .Set_Time_Scale:
 				sc_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
@@ -2598,35 +4791,28 @@ _eval_exec_chain_from_uid :: proc(g: ^Visual_Graph, bb: ^VG_Runtime_Blackboard, 
 			case .Anim_IK_Target:
 				eff_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
 				wt_s  := _eval_node_input(g, bb, tH, raw_dt, n, 2, 0)
-				_ = eff_s; _ = wt_s
+				visual_script_anim_ik_target_runtime(tH, n.action_name != "" ? n.action_name : "Right_Hand", hot.slot_read_vec3(&eff_s), hot.slot_read_f32(&wt_s))
 
 			case .VFX_Emitter_Spawn:
 				rate_s  := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
 				burst_s := _eval_node_input(g, bb, tH, raw_dt, n, 2, 0)
-				_ = rate_s; _ = burst_s
+				visual_script_vfx_spawn_runtime(tH, n.action_name, hot.slot_read_f32(&rate_s), hot.slot_read_int(&burst_s))
 
 			case .Audio_Bus_Send:
 				vol_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
 				cut_s := _eval_node_input(g, bb, tH, raw_dt, n, 2, 0)
-				_ = vol_s; _ = cut_s
+				visual_script_audio_bus_send_runtime(n.action_name != "" ? n.action_name : "Music", hot.slot_read_f32(&vol_s), hot.slot_read_f32(&cut_s))
 
 			case .Audio_Play_Spatial_3D:
 				pos_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
 				vol_s := _eval_node_input(g, bb, tH, raw_dt, n, 2, 0)
 				pit_s := _eval_node_input(g, bb, tH, raw_dt, n, 3, 0)
-				_ = pos_s; _ = vol_s; _ = pit_s
+				visual_script_audio_play_3d_runtime(tH, n.action_name, hot.slot_read_vec3(&pos_s), hot.slot_read_f32(&vol_s), hot.slot_read_f32(&pit_s))
 
 			case .AI_Find_Path_Move:
 				pos_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
 				spd_s := _eval_node_input(g, bb, tH, raw_dt, n, 2, 0)
-				tgt   := hot.slot_read_vec3(&pos_s)
-				spd   := hot.slot_read_f32(&spd_s)
-				if w != nil && pool_valid(&w.transforms, Handle(tH)) {
-					if _, ag := transform_get_comp(tH, NavMeshAgent); ag != nil {
-						if spd > 0 do ag.speed = spd
-						_ = nav_agent_set_destination(w, tH, tgt)
-					}
-				}
+				_ = visual_script_ai_move_runtime(tH, hot.slot_read_vec3(&pos_s), hot.slot_read_f32(&spd_s))
 
 			case .Call_Hot_Proc, .Odin_Function_Node:
 				frame: hot.Hot_Call_Frame
@@ -2640,6 +4826,11 @@ _eval_exec_chain_from_uid :: proc(g: ^Visual_Graph, bb: ^VG_Runtime_Blackboard, 
 
 				if n.hot_proc_target != "" && hot_proc_exists(n.hot_proc_target) {
 					hot_proc_invoke(n.hot_proc_target, tH, obj_dt, &frame)
+					for oi in 0 ..< int(frame.output_count) {
+						if 1 + oi < len(n.outputs) {
+							_bb_set_live_pin(bb, cur_uid, 1 + oi, frame.outputs[oi])
+						}
+					}
 				} else if n.kind == .Odin_Function_Node && frame.input_count >= 4 {
 					// Instant zero-compile fallback for the default Harmonic Buoyancy formula before first F7 bake!
 					amp   := hot.slot_read_f32(&frame.inputs[0])

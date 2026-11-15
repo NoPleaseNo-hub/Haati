@@ -22,6 +22,7 @@ import "core:strings"
 import "menu"
 import "../engine"
 import "../engine/log"
+import "../engine/registration"
 
 RELAUNCH_MARKER :: "builds/relaunch_ready" // relative to the repository root
 
@@ -43,6 +44,11 @@ _relaunch_shm_out_handle: engine.Relaunch_SHM_Handle
 
 @(private = "file")
 _relaunch_shm_restore_checked: bool
+
+@(private = "file")
+_pending_direct_switch_buf: [1024]u8
+@(private = "file")
+_pending_direct_switch_len: int
 
 // The mh mode that rebuilds and runs the editor the way it is running now:
 // the one that started it, or, for a bare binary, the one matching its build.
@@ -66,28 +72,13 @@ relaunch_pending :: proc() -> bool {
 // startup, so the root is one level up.
 @(private = "file")
 _repo_root :: proc() -> string {
-	cwd, err := os.get_working_directory(context.temp_allocator)
-	if err != nil do return ".."
-	return filepath.dir(cwd)
+	return engine.resolve_repo_root(context.temp_allocator)
 }
 
-// Resolves the Odin compiler binary: checks PATH first, falling back to the
-// compile-time ODIN_ROOT installation directory (e.g. D:/Odin/odin.exe on Windows).
+// Resolves the Odin compiler binary via bundled `<repo>/tools/odin/` first.
 @(private = "file")
 _odin_bin :: proc() -> string {
-	exe_ext :: ".exe" when ODIN_OS == .Windows else ""
-	if path_env, found := os.lookup_env("PATH", context.temp_allocator); found {
-		sep := ";" when ODIN_OS == .Windows else ":"
-		name := strings.concatenate({"odin", exe_ext}, context.temp_allocator)
-		for dir in strings.split(path_env, sep, context.temp_allocator) {
-			if dir == "" do continue
-			p, err := filepath.join({dir, name}, context.temp_allocator)
-			if err == nil && os.exists(p) do return p
-		}
-	}
-	root_odin, _ := filepath.join({ODIN_ROOT, "odin" + exe_ext}, context.temp_allocator)
-	if os.exists(root_odin) do return root_odin
-	return "odin"
+	return engine.resolve_odin_binary(context.temp_allocator)
 }
 
 // Opportunistically removes any stale unlocked `builds/mh_relaunch*` or `builds/MoonHug_relaunch*`
@@ -105,7 +96,41 @@ _sweep_stale_relaunch_bins :: proc(root: string) {
 	}
 }
 
-relaunch_request :: proc() {
+relaunch_has_explicit_project_arg :: proc(args: []string) -> bool {
+	for a in args {
+		if a == "--project-hub" || strings.has_prefix(a, "--project=") do return true
+	}
+	if env_p, ok := os.lookup_env("HAATI_PROJECT", context.temp_allocator); ok && strings.trim_space(env_p) != "" {
+		return true
+	}
+	return false
+}
+
+relaunch_is_project_rebuilt_env :: proc() -> bool {
+	if v, ok := os.lookup_env("MH_PROJECT_REBUILT", context.temp_allocator); ok {
+		return v == "1"
+	}
+	return false
+}
+
+relaunch_needs_project_rebuild :: proc(proj_dir: string) -> bool {
+	if proj_dir == "" do return false
+	if !engine.project_dir_has_odin_code(proj_dir) do return false
+	if registration.COMPILED_PROJECT_DIR == "" {
+		// Pre-split transitional case: `plugins/void_odin` is already compiled
+		// when permanently linked in `haati/packages/`.
+		eng_plugins := engine.engine_plugins_dir(context.temp_allocator)
+		void_legacy, _ := filepath.join({eng_plugins, "void_odin"}, context.temp_allocator)
+		if eng_plugins != "" && os.is_dir(void_legacy) && engine.paths_equal(proj_dir, void_legacy) {
+			return false
+		}
+		return true
+	}
+	return !engine.paths_equal(registration.COMPILED_PROJECT_DIR, proj_dir)
+}
+
+@(private = "file")
+_relaunch_spawn :: proc(extra_mh_args: []string, mark_project_rebuilt: bool) {
 	if _relaunch.pending do return
 	root := _repo_root()
 	mode := relaunch_mode()
@@ -122,13 +147,22 @@ relaunch_request :: proc() {
 	env := make([dynamic]string, context.temp_allocator)
 	if cur, err := os.environ(context.temp_allocator); err == nil {
 		for kv in cur {
-			if strings.has_prefix(kv, "MH_RELAUNCH_PID=") || strings.has_prefix(kv, "MH_RELAUNCH_SEQ=") || strings.has_prefix(kv, "MH_SHM_NAME=") || strings.has_prefix(kv, "MH_SHM_HANDOFF=") do continue
+			if strings.has_prefix(kv, "MH_RELAUNCH_PID=") ||
+			   strings.has_prefix(kv, "MH_RELAUNCH_SEQ=") ||
+			   strings.has_prefix(kv, "MH_SHM_NAME=") ||
+			   strings.has_prefix(kv, "MH_SHM_HANDOFF=") ||
+			   strings.has_prefix(kv, "MH_PROJECT_REBUILT=") {
+				continue
+			}
 			append(&env, kv)
 		}
 	}
 	append(&env, fmt.tprintf("MH_RELAUNCH_PID=%d", pid))
 	append(&env, fmt.tprintf("MH_RELAUNCH_SEQ=%d", _relaunch_seq))
 	append(&env, fmt.tprintf("MH_SHM_NAME=%s", shm_name))
+	if mark_project_rebuilt || relaunch_is_project_rebuilt_env() {
+		append(&env, "MH_PROJECT_REBUILT=1")
+	}
 
 	odin_exe := _odin_bin()
 	// Unique PID + sequence output path prevents MSVC `LNK1104` even if a prior relaunch
@@ -138,9 +172,15 @@ relaunch_request :: proc() {
 	_ = os.make_directory_all(builds_dir)
 	log_path, _ := filepath.join({builds_dir, fmt.tprintf("relaunch_%d_%d.log", pid, _relaunch_seq)}, context.temp_allocator)
 
+	cmd := make([dynamic]string, context.temp_allocator)
+	append(&cmd, odin_exe, "run", "tools/mh", mh_out, "--", mode)
+	for a in extra_mh_args {
+		if a != "" do append(&cmd, a)
+	}
+
 	process, started := engine.bg_process_start_to_file(
 		root,
-		{odin_exe, "run", "tools/mh", mh_out, "--", mode},
+		cmd[:],
 		env[:],
 		log_path,
 	)
@@ -157,6 +197,93 @@ relaunch_request :: proc() {
 		shm_name  = strings.clone(shm_name),
 	}
 	log.infof("[relaunch] building silently with `%s`, the editor restarts with zero-disk RAM handoff when it succeeds", relaunch_command())
+}
+
+relaunch_request :: proc() {
+	if engine.is_project_hub_startup() {
+		_relaunch_spawn({"--project-hub"}, false)
+	} else if proj := engine.active_project_root(); proj != "" {
+		_relaunch_spawn({fmt.tprintf("--project=%s", proj)}, false)
+	} else {
+		_relaunch_spawn(nil, false)
+	}
+}
+
+relaunch_request_project :: proc(project_dir: string) {
+	if project_dir == "" do return
+	_relaunch_spawn({fmt.tprintf("--project=%s", project_dir)}, true)
+}
+
+open_or_switch_project :: proc(project_dir: string) -> (ok: bool, err_msg: string) {
+	if project_dir == "" {
+		return false, "Select or enter a project folder path first."
+	}
+	abs_dir, aerr := filepath.abs(project_dir, context.temp_allocator)
+	if aerr != nil || abs_dir == "" {
+		abs_dir = project_dir
+	}
+	norm, _ := strings.replace_all(abs_dir, "\\", "/", context.temp_allocator)
+	norm = strings.trim_right(norm, "/")
+	if !os.exists(norm) || !os.is_dir(norm) {
+		return false, fmt.tprintf("Folder does not exist: %s", norm)
+	}
+
+	disp := engine.project_read_display_name(norm, context.temp_allocator)
+	_ = engine.launcher_record_open_project(norm, disp)
+
+	if relaunch_needs_project_rebuild(norm) {
+		log.infof("[project] '%s' contains Odin scripts — compiling project package before switching...", norm)
+		relaunch_request_project(norm)
+		return true, ""
+	}
+
+	if len(norm) >= len(_pending_direct_switch_buf) {
+		return false, "Project path is too long."
+	}
+	_pending_direct_switch_len = copy(_pending_direct_switch_buf[:], norm)
+	menu.quit_requested = true
+	return true, ""
+}
+
+relaunch_execute_pending_direct_switch :: proc() {
+	if _pending_direct_switch_len <= 0 do return
+	target_dir := string(_pending_direct_switch_buf[:_pending_direct_switch_len])
+	exe_path, eerr := os.get_executable_path(context.temp_allocator)
+	if eerr != nil || exe_path == "" {
+		_pending_direct_switch_len = 0
+		return
+	}
+	env := make([dynamic]string, context.temp_allocator)
+	if cur, err := os.environ(context.temp_allocator); err == nil {
+		for kv in cur {
+			if strings.has_prefix(kv, "MH_RELAUNCH_PID=") ||
+			   strings.has_prefix(kv, "MH_RELAUNCH_SEQ=") ||
+			   strings.has_prefix(kv, "MH_SHM_NAME=") ||
+			   strings.has_prefix(kv, "MH_SHM_HANDOFF=") ||
+			   strings.has_prefix(kv, "HAATI_PROJECT=") {
+				continue
+			}
+			append(&env, kv)
+		}
+	}
+	proj_flag := fmt.tprintf("--project=%s", target_dir)
+	p, perr := os.process_start({
+		command     = {exe_path, proj_flag},
+		env         = env[:],
+		working_dir = filepath.dir(exe_path),
+	})
+	_pending_direct_switch_len = 0
+	if perr != nil {
+		fmt.eprintfln("[project] failed to launch replacement editor for %q: %v", target_dir, perr)
+		return
+	}
+	_, _ = os.process_wait(p, 0)
+}
+
+relaunch_shutdown :: proc() {
+	if _relaunch.pending {
+		_relaunch_clear()
+	}
 }
 
 // Once per frame. Quits when the replacement is built, or drops the request
@@ -266,7 +393,7 @@ _relaunch_capture_to_shm :: proc(shm_name: string) {
 
 	if h, ok := engine.relaunch_shm_create(shm_name, snap); ok {
 		_relaunch_shm_out_handle = h
-		_ = engine.relaunch_shm_wait_bridged(h, 300)
+		_ = engine.relaunch_shm_wait_bridged(h, 3000)
 	}
 }
 

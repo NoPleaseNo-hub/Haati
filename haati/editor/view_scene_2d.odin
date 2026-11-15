@@ -846,6 +846,22 @@ _s2d_parent_rect :: proc(tH: engine.Transform_Handle) -> (parent_rect: engine.Re
 	return root_rect, true
 }
 
+@(private = "file")
+_s2d_on_pick_preset :: proc(
+	user_data: rawptr,
+	_: int,
+	_: int,
+	preset: engine.UI_Anchor_Preset,
+	_: [2]f32,
+	_: [2]f32,
+	_: bool,
+	set_position: bool,
+) {
+	if user_data == nil do return
+	th := (^engine.Transform_Handle)(user_data)^
+	_s2d_apply_preset(th, preset, set_position)
+}
+
 // Apply a `UI_Anchor_Preset` to `tH` with undo recording.
 @(private = "file")
 _s2d_apply_preset :: proc(tH: engine.Transform_Handle, preset: engine.UI_Anchor_Preset, snap_to_anchors: bool) {
@@ -903,6 +919,7 @@ _s2d_render_offscreen :: proc(ref_w, ref_h: i32) {
 	rv_ui := engine.render_view_make(view_mat_ui, proj_mat_ui, rw, rh, ~u32(0), .SceneView)
 
 	gfx.pass_begin_target(scene_2d_rt, clear_col)
+	gfx.set_post_fx(gfx.POST_FX_2D_DEFAULT)
 
 	// Execute Pass 1 (2D World Sprites / Scene Capture Camera; skipped in UI_Canvas_Only mode)
 	if _s2d_render_mode != .UI_Canvas_Only {
@@ -1317,27 +1334,14 @@ _draw_scene_2d_toolbar :: proc(view_size: im.Vec2) {
 
 			im.SetNextWindowPos(anchor_popup_pos, .Appearing)
 			if im.BeginPopup("##s2d_anchor_presets_popup") {
-				snap := im.GetIO().KeyAlt
-				im.SeparatorText("UI Anchor Presets (Keep Position & Size; Alt = Snap)")
-				if im.MenuItem("Top-Left")            do _s2d_apply_preset(active_h, .Top_Left, snap)
-				if im.MenuItem("Top-Center")          do _s2d_apply_preset(active_h, .Top_Center, snap)
-				if im.MenuItem("Top-Right")           do _s2d_apply_preset(active_h, .Top_Right, snap)
-				im.Separator()
-				if im.MenuItem("Middle-Left")         do _s2d_apply_preset(active_h, .Middle_Left, snap)
-				if im.MenuItem("Center")              do _s2d_apply_preset(active_h, .Center, snap)
-				if im.MenuItem("Middle-Right")        do _s2d_apply_preset(active_h, .Middle_Right, snap)
-				im.Separator()
-				if im.MenuItem("Bottom-Left")         do _s2d_apply_preset(active_h, .Bottom_Left, snap)
-				if im.MenuItem("Bottom-Center")       do _s2d_apply_preset(active_h, .Bottom_Center, snap)
-				if im.MenuItem("Bottom-Right")        do _s2d_apply_preset(active_h, .Bottom_Right, snap)
-				im.Separator()
-				if im.MenuItem("Stretch Top Bar")     do _s2d_apply_preset(active_h, .Top_Stretch, snap)
-				if im.MenuItem("Stretch Middle H")    do _s2d_apply_preset(active_h, .Middle_Stretch, snap)
-				if im.MenuItem("Stretch Bottom Bar")  do _s2d_apply_preset(active_h, .Bottom_Stretch, snap)
-				if im.MenuItem("Stretch Left Bar")    do _s2d_apply_preset(active_h, .Left_Stretch, snap)
-				if im.MenuItem("Stretch Center V")    do _s2d_apply_preset(active_h, .Center_Stretch, snap)
-				if im.MenuItem("Stretch Right Bar")   do _s2d_apply_preset(active_h, .Right_Stretch, snap)
-				if im.MenuItem("Full Stretch (All)")  do _s2d_apply_preset(active_h, .Full_Stretch, snap)
+				im.SeparatorText("UI Anchor Presets")
+				pick_th := active_h
+				draw_anchor_presets_grid(
+					rt,
+					"Default keeps position & size   Alt: snap onto anchors",
+					_s2d_on_pick_preset,
+					&pick_th,
+				)
 				im.EndPopup()
 			}
 
@@ -1540,8 +1544,9 @@ _draw_scene_2d_backdrop_and_rulers :: proc(dl: ^im.DrawList, view_min, view_max:
 
 	// Draw live rendered 2D offscreen texture inside the reference frame
 	if scene_2d_rt != nil {
-		tex_id := im.TextureID(uintptr(gfx.rt_imgui_id(scene_2d_rt)))
-		im.DrawList_AddImage(dl, im.TextureRef{_TexID = tex_id}, f_tl, f_br)
+		if tex_id := im.TextureID(uintptr(gfx.rt_imgui_id(scene_2d_rt))); tex_id != 0 {
+			im.DrawList_AddImage(dl, im.TextureRef{_TexID = tex_id}, f_tl, f_br)
+		}
 	}
 
 	// Rule-of-thirds and center guides inside the reference canvas

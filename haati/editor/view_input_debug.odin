@@ -20,7 +20,7 @@ import "haati:editor/icons"
 
 @(private="file")
 _dbg_text :: proc(format: string, args: ..any) {
-	im.Text(strings.clone_to_cstring(fmt.tprintf(format, ..args), context.temp_allocator))
+	im.TextUnformatted(strings.clone_to_cstring(fmt.tprintf(format, ..args), context.temp_allocator))
 }
 
 draw_input_debug :: proc() {

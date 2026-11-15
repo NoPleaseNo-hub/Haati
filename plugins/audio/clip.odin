@@ -22,6 +22,7 @@ Audio_Clip :: struct {
 	frames:      i64,
 	channels:    i32,
 	sample_rate: i32,
+	backing:     []u8,
 }
 
 clip_cache: map[engine.Asset_GUID]Audio_Clip
@@ -43,9 +44,12 @@ clip_load :: proc(guid: engine.Asset_GUID) -> (^Audio_Clip, bool) {
 	}
 
 	predecode := true
-	if fi, serr := os.stat(path, context.temp_allocator); serr == nil {
-		if fi.size >= STREAM_THRESHOLD_BYTES {
-			predecode = false
+	in_vfs := engine.vfs_has_file(path)
+	if !in_vfs {
+		if fi, serr := os.stat(path, context.temp_allocator); serr == nil {
+			if fi.size >= STREAM_THRESHOLD_BYTES {
+				predecode = false
+			}
 		}
 	}
 	if src_path, sok := engine.asset_db_get_path(uuid.Identifier(guid)); sok {
@@ -56,8 +60,36 @@ clip_load :: proc(guid: engine.Asset_GUID) -> (^Audio_Clip, bool) {
 		}
 	}
 
-	cpath := strings.clone_to_cstring(path, context.temp_allocator)
-	audio := mix.LoadAudio(_audio_state.mixer, cpath, predecode = predecode)
+	audio: ^mix.Audio
+	backing: []u8
+	if in_vfs {
+		data, rerr := engine.vfs_read_entire_file(path, runtime.default_allocator())
+		if rerr != nil || len(data) == 0 {
+			if data != nil do delete(data, runtime.default_allocator())
+			return nil, false
+		}
+		if len(data) >= STREAM_THRESHOLD_BYTES {
+			predecode = false
+		}
+		io := sdl.IOFromConstMem(raw_data(data), uint(len(data)))
+		if io == nil {
+			delete(data, runtime.default_allocator())
+			return nil, false
+		}
+		audio = mix.LoadAudio_IO(_audio_state.mixer, io, predecode = predecode, closeio = true)
+		if audio == nil {
+			delete(data, runtime.default_allocator())
+			return nil, false
+		}
+		if predecode {
+			delete(data, runtime.default_allocator())
+		} else {
+			backing = data
+		}
+	} else {
+		cpath := strings.clone_to_cstring(path, context.temp_allocator)
+		audio = mix.LoadAudio(_audio_state.mixer, cpath, predecode = predecode)
+	}
 	if audio == nil do return nil, false
 
 	spec: sdl.AudioSpec
@@ -72,6 +104,7 @@ clip_load :: proc(guid: engine.Asset_GUID) -> (^Audio_Clip, bool) {
 		frames      = i64(mix.GetAudioDuration(audio)),
 		channels    = i32(spec.channels),
 		sample_rate = i32(spec.freq),
+		backing     = backing,
 	}
 	return &clip_cache[guid], true
 }
@@ -102,13 +135,20 @@ _clip_reimported :: proc(guid: engine.Asset_GUID) {
 clip_unload :: proc(guid: engine.Asset_GUID) {
 	if clip, ok := &clip_cache[guid]; ok {
 		mix.DestroyAudio(clip.audio)
+		if clip.backing != nil {
+			delete(clip.backing, runtime.default_allocator())
+		}
 		delete_key(&clip_cache, guid)
 	}
 }
 
 clip_cache_shutdown :: proc() {
+	_one_shots_clear(free_arrays = true)
 	for _, &clip in clip_cache {
 		mix.DestroyAudio(clip.audio)
+		if clip.backing != nil {
+			delete(clip.backing, runtime.default_allocator())
+		}
 	}
 	delete(clip_cache)
 	clip_cache = nil

@@ -124,7 +124,7 @@ _override_object_label :: proc(s: ^Scene, ns: ^NestedScene, target: PPtr) -> (st
     // label names the same object the revert will touch.
     leaf_ns := ns
     leaf_lid := target.local_id
-    if !pptr_guid_is_empty(target.guid) && target.guid != ns.source_prefab {
+    if !asset_guid_is_empty(target.guid) && target.guid != ns.source_prefab {
         host := nested_scene_resolve_host_handle(s, ns)
         if _, lns, lid := nested_scene_walk_override_target(s, host, target); lns != nil {
             leaf_ns = lns
@@ -265,7 +265,7 @@ nested_override_restore_field :: proc(
     // which object a deep target names.
     leaf_ns := ns
     leaf_lid := target.local_id
-    if !pptr_guid_is_empty(target.guid) && target.guid != ns.source_prefab {
+    if !asset_guid_is_empty(target.guid) && target.guid != ns.source_prefab {
         host := nested_scene_resolve_host_handle(s, ns)
         if _, lns, lid := nested_scene_walk_override_target(s, host, target); lns != nil {
             leaf_ns = lns
@@ -538,7 +538,7 @@ nested_override_baseline :: proc(
     // Resolve deep targets to the NS that owns the row, as revert does.
     leaf_ns := ns
     leaf_lid := target.local_id
-    if !pptr_guid_is_empty(target.guid) && target.guid != ns.source_prefab {
+    if !asset_guid_is_empty(target.guid) && target.guid != ns.source_prefab {
         host := nested_scene_resolve_host_handle(s, ns)
         if _, lns, lid := nested_scene_walk_override_target(s, host, target); lns != nil {
             leaf_ns = lns
@@ -608,7 +608,7 @@ nested_override_live_handle :: proc(s: ^Scene, ns: ^NestedScene, target: PPtr) -
     if s == nil || ns == nil do return {}
     leaf_ns := ns
     leaf_lid := target.local_id
-    if !pptr_guid_is_empty(target.guid) && target.guid != ns.source_prefab {
+    if !asset_guid_is_empty(target.guid) && target.guid != ns.source_prefab {
         host := nested_scene_resolve_host_handle(s, ns)
         if _, lns, lid := nested_scene_walk_override_target(s, host, target); lns != nil {
             leaf_ns = lns

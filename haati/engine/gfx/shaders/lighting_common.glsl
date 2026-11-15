@@ -82,13 +82,28 @@ float sample_shadow_tile(int tile, vec3 world_pos, vec3 n, vec3 L, float base_bi
     vec2 uv_max = offset + vec2(0.25 - 0.5 * texel);
     vec2 center_uv = offset + tile_uv * 0.25;
 
+    const vec2 POISSON_DISK_9[9] = vec2[9](
+        vec2(-0.94201624, -0.39906216),
+        vec2( 0.94558609, -0.76890725),
+        vec2(-0.09418410, -0.92938870),
+        vec2( 0.34495938,  0.29387760),
+        vec2(-0.91588581,  0.45771432),
+        vec2(-0.81544232, -0.87912464),
+        vec2(-0.38277543,  0.27676845),
+        vec2( 0.97484398,  0.75648379),
+        vec2( 0.44323325, -0.97511554)
+    );
+    float angle = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+    float sa = sin(angle);
+    float ca = cos(angle);
+    float spread = texel * 1.75;
     float lit_sum = 0.0;
-    for (int y = -1; y <= 1; ++y) {
-        for (int x = -1; x <= 1; ++x) {
-            vec2 sample_uv = clamp(center_uv + vec2(float(x), float(y)) * texel, uv_min, uv_max);
-            float stored_depth = texture(u_shadow_map, sample_uv).r;
-            lit_sum += (proj.z - bias <= stored_depth) ? 1.0 : 0.0;
-        }
+    for (int i = 0; i < 9; ++i) {
+        vec2 d = POISSON_DISK_9[i];
+        vec2 rot_d = vec2(d.x * ca - d.y * sa, d.x * sa + d.y * ca);
+        vec2 sample_uv = clamp(center_uv + rot_d * spread, uv_min, uv_max);
+        float stored_depth = texture(u_shadow_map, sample_uv).r;
+        lit_sum += (proj.z - bias <= stored_depth) ? 1.0 : 0.0;
     }
     return mix(1.0, lit_sum / 9.0, clamp(strength, 0.0, 1.0));
 }
@@ -135,4 +150,35 @@ float eval_light_shadow(int light_idx, GpuLight l, vec3 world_pos, vec3 n, vec3 
         return sample_shadow_tile(10 + face, world_pos, n, L, bias, l.params.z, 1.0);
     }
     return 1.0;
+}
+
+// Per-pixel tangent frame from screen-space derivatives (no mesh tangents required).
+mat3 cotangent_frame(vec3 N, vec3 p, vec2 uv) {
+    vec3 dp1 = dFdx(p);
+    vec3 dp2 = dFdy(p);
+    vec2 duv1 = dFdx(uv);
+    vec2 duv2 = dFdy(uv);
+    vec3 dp2perp = cross(dp2, N);
+    vec3 dp1perp = cross(N, dp1);
+    vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
+    vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
+    float invmax = inversesqrt(max(max(dot(T, T), dot(B, B)), 1e-12));
+    return mat3(T * invmax, B * invmax, N);
+}
+
+vec3 srgb_to_linear(vec3 c) {
+    return pow(max(c, vec3(0.0)), vec3(2.2));
+}
+
+vec3 linear_to_srgb(vec3 c) {
+    return pow(max(c, vec3(0.0)), vec3(1.0 / 2.2));
+}
+
+vec3 aces_tonemap(vec3 x) {
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }

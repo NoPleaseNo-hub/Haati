@@ -149,10 +149,73 @@ play_clip_at_point :: proc(guid: engine.Asset_GUID, position: [3]f32, volume: f3
 	return _one_shot_start(guid, position, volume, spatial = true)
 }
 
+MAX_ONE_SHOT_VOICES :: 64
+
+_free_one_shot_tracks: [dynamic]^mix.Track
+
+_one_shot_spatial :: proc(shot: ^_One_Shot) -> Spatial_Gains {
+	if shot.spatial && _listener.ok {
+		return spatial_gains(_listener.pos, _listener.rot, shot.position, 1, 500, 1)
+	}
+	return Spatial_Gains{1, 1, 1}
+}
+
+_one_shot_apply :: proc(shot: ^_One_Shot) {
+	sp := _one_shot_spatial(shot)
+	_ = mix.SetTrackGain(shot.track, shot.volume * sp.gain)
+	stereo := mix.StereoGains{sp.left, sp.right}
+	_ = mix.SetTrackStereo(shot.track, &stereo)
+}
+
+_one_shot_release_track :: proc(track: ^mix.Track) {
+	if track == nil do return
+	_ = mix.StopTrack(track, 0)
+	_ = mix.SetTrackAudio(track, nil)
+	if len(_free_one_shot_tracks) < MAX_ONE_SHOT_VOICES {
+		context.allocator = runtime.default_allocator()
+		append(&_free_one_shot_tracks, track)
+	} else {
+		mix.DestroyTrack(track)
+	}
+}
+
+_one_shot_reap_finished :: proc(apply_active := false) {
+	for i := 0; i < len(_one_shots); {
+		shot := &_one_shots[i]
+		if !mix.TrackPlaying(shot.track) {
+			_one_shot_release_track(shot.track)
+			ordered_remove(&_one_shots, i)
+			continue
+		}
+		if apply_active do _one_shot_apply(shot)
+		i += 1
+	}
+}
+
 _one_shot_start :: proc(guid: engine.Asset_GUID, position: [3]f32, volume: f32, spatial: bool) -> bool {
 	clip, ok := clip_load(guid)
 	if !ok do return false
-	track := mix.CreateTrack(_audio_state.mixer)
+	_one_shot_reap_finished()
+	if len(_one_shots) >= MAX_ONE_SHOT_VOICES {
+		victim_idx := 0
+		best_gain := max(f32)
+		for &s, idx in _one_shots {
+			eff := s.volume * _one_shot_spatial(&s).gain
+			if eff < best_gain {
+				best_gain = eff
+				victim_idx = idx
+			}
+		}
+		victim := _one_shots[victim_idx]
+		ordered_remove(&_one_shots, victim_idx)
+		_one_shot_release_track(victim.track)
+	}
+	track: ^mix.Track
+	if len(_free_one_shot_tracks) > 0 {
+		track = pop(&_free_one_shot_tracks)
+	} else {
+		track = mix.CreateTrack(_audio_state.mixer)
+	}
 	if track == nil do return false
 	if !mix.SetTrackAudio(track, clip.audio) || !mix.PlayTrack(track, 0) {
 		mix.DestroyTrack(track)
@@ -165,21 +228,22 @@ _one_shot_start :: proc(guid: engine.Asset_GUID, position: [3]f32, volume: f32, 
 	return true
 }
 
-_one_shot_apply :: proc(shot: ^_One_Shot) {
-	sp := Spatial_Gains{1, 1, 1}
-	if shot.spatial && _listener.ok {
-		sp = spatial_gains(_listener.pos, _listener.rot, shot.position, 1, 500, 1)
-	}
-	_ = mix.SetTrackGain(shot.track, shot.volume * sp.gain)
-	stereo := mix.StereoGains{sp.left, sp.right}
-	_ = mix.SetTrackStereo(shot.track, &stereo)
-}
-
-_one_shots_clear :: proc() {
+_one_shots_clear :: proc(free_arrays: bool = false) {
+	context.allocator = runtime.default_allocator()
 	for shot in _one_shots {
 		mix.DestroyTrack(shot.track)
 	}
 	clear(&_one_shots)
+	for track in _free_one_shot_tracks {
+		mix.DestroyTrack(track)
+	}
+	clear(&_free_one_shot_tracks)
+	if free_arrays {
+		delete(_one_shots)
+		_one_shots = {}
+		delete(_free_one_shot_tracks)
+		_free_one_shot_tracks = {}
+	}
 }
 
 // Inspector action buttons — auditioning a source without entering play
@@ -258,15 +322,7 @@ audio_update :: proc(dt: f32) {
 
 	// One-shots: reap the finished, respatialize the rest. Before the
 	// sources loop — a world with no AudioSource still owns one-shots.
-	for i := len(_one_shots) - 1; i >= 0; i -= 1 {
-		shot := &_one_shots[i]
-		if !mix.TrackPlaying(shot.track) {
-			mix.DestroyTrack(shot.track)
-			unordered_remove(&_one_shots, i)
-			continue
-		}
-		_one_shot_apply(shot)
-	}
+	_one_shot_reap_finished(apply_active = true)
 
 	audio_buses_step(dt)
 	audio_step_multicore_occlusion(w, _listener.pos, dt)
@@ -350,7 +406,7 @@ voice_position :: proc(track: ^mix.Track) -> f32 {
 
 @(phase={key=ExitingPlayMode})
 audio_exiting_play_mode :: proc() {
-	_one_shots_clear()
+	_one_shots_clear(free_arrays = true)
 	audio_buses_reset_runtime()
 	if _audio_state.mixer != nil do _ = mix.StopAllTracks(_audio_state.mixer, 0)
 }

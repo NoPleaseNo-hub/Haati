@@ -15,7 +15,6 @@ package engine
 
 import "core:encoding/json"
 import "core:encoding/uuid"
-import "core:os"
 import "core:path/filepath"
 import "core:strings"
 import "catalog"
@@ -26,10 +25,26 @@ ASSET_CATALOG_PATH :: "library/catalog.json"
 // Set by the editor: import passes and refreshes rewrite the in-place
 // catalog so it is always current. The app never sets it (a lazily-imported
 // dev run would overwrite the editor's complete catalog with a partial one).
-asset_catalog_auto: bool
+asset_catalog_auto:         bool
+asset_catalog_defer_writes: bool
+
+@(private = "file")
+_asset_catalog_dirty: bool
 
 _asset_catalog_auto_write :: proc() {
 	if asset_catalog_auto && asset_db.pipeline == .Import {
+		if asset_catalog_defer_writes {
+			_asset_catalog_dirty = true
+			return
+		}
+		asset_catalog_write()
+	}
+}
+
+asset_catalog_flush_deferred :: proc() {
+	asset_catalog_defer_writes = false
+	if _asset_catalog_dirty && asset_catalog_auto && asset_db.pipeline == .Import {
+		_asset_catalog_dirty = false
 		asset_catalog_write()
 	}
 }
@@ -52,19 +67,27 @@ asset_catalog_write :: proc(path: string = ASSET_CATALOG_PATH) -> bool {
 		if key, has := asset_pipeline_artifact_key(Asset_GUID(guid)); has {
 			entry.artifact = key
 		}
-		if settings, sok := asset_pipeline_get_settings(asset_path, context.temp_allocator); sok {
-			// Tagged with the type guid — that is how the reader materializes
-			// the typed instance (_settings_from_value), registry-free.
-			if blob, merr := json.marshal(settings, {spec = .JSON}, context.temp_allocator); merr == nil {
-				prev := context.allocator
-				context.allocator = context.temp_allocator
-				v, perr := json.parse(blob, .JSON, true)
-				context.allocator = prev
-				if perr == nil {
-					if obj, is_obj := v.(json.Object); is_obj {
-						obj["__type_guid"] = json.String(uuid.to_string(get_guid_by_typeid(settings.id), context.temp_allocator))
-						if tagged, terr := json.marshal(json.Value(obj), {spec = .JSON}, context.temp_allocator); terr == nil {
-							entry.settings = string(tagged)
+		is_dir_entry := false
+		if st, has_st := asset_db.file_state[asset_path]; has_st && st == {} {
+			is_dir_entry = true
+		}
+		ext := strings.to_lower(filepath.ext(asset_path), context.temp_allocator)
+		may_have_import_settings := !is_dir_entry && (entry.artifact != "" || ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".dds" || ext == ".glb" || ext == ".gltf" || ext == ".glsl")
+		if may_have_import_settings {
+			if settings, sok := asset_pipeline_get_settings(asset_path, context.temp_allocator); sok {
+				// Tagged with the type guid — that is how the reader materializes
+				// the typed instance (_settings_from_value), registry-free.
+				if blob, merr := json.marshal(settings, {spec = .JSON}, context.temp_allocator); merr == nil {
+					prev := context.allocator
+					context.allocator = context.temp_allocator
+					v, perr := json.parse(blob, .JSON, true)
+					context.allocator = prev
+					if perr == nil {
+						if obj, is_obj := v.(json.Object); is_obj {
+							obj["__type_guid"] = json.String(uuid.to_string(get_guid_by_typeid(settings.id), context.temp_allocator))
+							if tagged, terr := json.marshal(json.Value(obj), {spec = .JSON}, context.temp_allocator); terr == nil {
+								entry.settings = string(tagged)
+							}
 						}
 					}
 				}
@@ -81,7 +104,7 @@ asset_catalog_write :: proc(path: string = ASSET_CATALOG_PATH) -> bool {
 // from the catalog — no scan, no meta reads. The picker indexes (root_info,
 // assets_by_type) stay empty, they serve editor UI only.
 asset_db_init_from_catalog :: proc(catalog_path: string = ASSET_CATALOG_PATH) -> bool {
-	data, read_err := os.read_entire_file(catalog_path, context.temp_allocator)
+	data, read_err := vfs_read_entire_file(catalog_path, context.temp_allocator)
 	if read_err != nil {
 		log.errorf("[Catalog] cannot read %s", catalog_path)
 		return false
@@ -114,7 +137,8 @@ asset_db_init_from_catalog :: proc(catalog_path: string = ASSET_CATALOG_PATH) ->
 			context.allocator = context.temp_allocator
 			base = filepath.dir(catalog_path)
 		}
-		_artifact_dir_set(strings.concatenate({base, "/artifacts"}, context.temp_allocator))
+		if base == "." do base = ""
+		_artifact_dir_set(base == "" ? "artifacts" : strings.concatenate({base, "/artifacts"}, context.temp_allocator))
 	}
 
 	if cf.boot_scene != "" {
@@ -133,8 +157,10 @@ asset_db_init_from_catalog :: proc(catalog_path: string = ASSET_CATALOG_PATH) ->
 		p := base == "" ? strings.clone(entry.path) : strings.concatenate({base, "/", entry.path})
 		asset_db.guid_to_path[guid] = p
 		asset_db.path_to_guid[p] = guid
-		if entry.artifact != "" {
+		if len(entry.artifact) >= 2 {
 			_artifact_index_seed(guid, entry.artifact)
+		} else if entry.artifact != "" {
+			log.errorf("[Catalog] bad artifact key %q for %s — ignored", entry.artifact, guid_str)
 		}
 		if entry.settings != "" {
 			_catalog_settings_set(guid, entry.settings)

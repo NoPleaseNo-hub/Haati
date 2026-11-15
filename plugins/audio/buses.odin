@@ -3,6 +3,7 @@ package audio
 import "base:intrinsics"
 import "core:c"
 import "core:math"
+import "core:sync"
 import sdl "vendor:sdl3"
 import mix "vendor:sdl3/mixer"
 
@@ -27,14 +28,51 @@ Audio_Biquad_Coeffs :: struct {
 	a1, a2:     f32,
 }
 
+// Lock-free double-buffered biquad filter state shared between main thread and SDL3_mixer audio thread.
+// state bits: bit 0 = active slot (0 or 1), bit 1 (0x2) = enabled.
+Audio_Atomic_Biquad :: struct {
+	slots: [2]Audio_Biquad_Coeffs,
+	state: u32,
+	z1:    [2]f32,
+	z2:    [2]f32,
+}
+
+audio_biquad_publish :: proc(bq: ^Audio_Atomic_Biquad, enabled: bool, coeffs: Audio_Biquad_Coeffs) {
+	if bq == nil do return
+	cur := sync.atomic_load_explicit(&bq.state, .Relaxed)
+	if !enabled {
+		sync.atomic_store_explicit(&bq.state, cur & ~u32(2), .Release)
+		return
+	}
+	inactive := (cur & 1) ~ 1
+	bq.slots[inactive] = coeffs
+	sync.atomic_store_explicit(&bq.state, inactive | 2, .Release)
+}
+
+audio_biquad_process :: proc "contextless" (bq: ^Audio_Atomic_Biquad, pcm: []f32, channels: int) {
+	if bq == nil || len(pcm) == 0 do return
+	st := sync.atomic_load_explicit(&bq.state, .Acquire)
+	if (st & 2) == 0 {
+		bq.z1 = {}
+		bq.z2 = {}
+		return
+	}
+	coeffs := bq.slots[st & 1]
+	audio_biquad_process_interleaved(pcm, channels, coeffs, &bq.z1, &bq.z2)
+}
+
+audio_biquad_reset :: proc(bq: ^Audio_Atomic_Biquad) {
+	if bq == nil do return
+	sync.atomic_store_explicit(&bq.state, 0, .Release)
+	bq.z1 = {}
+	bq.z2 = {}
+}
+
 _Audio_Bus_Runtime :: struct {
-	group:       ^mix.Group,
-	volume:      f32,
-	lowpass_hz:  f32,
-	lpf_active:  bool,
-	lpf_coeffs:  Audio_Biquad_Coeffs,
-	lpf_z1:      [2]f32,
-	lpf_z2:      [2]f32,
+	group:      ^mix.Group,
+	volume:     f32,
+	lowpass_hz: f32,
+	lpf:        Audio_Atomic_Biquad,
 }
 
 @(private = "file")
@@ -52,8 +90,7 @@ _ensure_bus_defaults :: proc() {
 	for i in 0 ..< AUDIO_BUS_COUNT {
 		_bus_mgr.buses[i].volume     = 1.0
 		_bus_mgr.buses[i].lowpass_hz = 22000.0
-		_bus_mgr.buses[i].lpf_active = false
-		_bus_mgr.buses[i].lpf_coeffs = audio_biquad_lowpass_coeffs(22000.0)
+		audio_biquad_reset(&_bus_mgr.buses[i].lpf)
 	}
 }
 
@@ -154,10 +191,8 @@ _group_post_mix_cb :: proc "c" (userdata: rawptr, group: ^mix.Group, spec: ^sdl.
 		}
 	}
 
-	if bus.lpf_active {
-		ch := spec != nil ? int(spec.channels) : 2
-		audio_biquad_process_interleaved(buf, ch, bus.lpf_coeffs, &bus.lpf_z1, &bus.lpf_z2)
-	}
+	ch := spec != nil ? int(spec.channels) : 2
+	audio_biquad_process(&bus.lpf, buf, ch)
 }
 
 audio_bus_set_volume :: proc(bus: Audio_Bus_Kind, vol: f32) {
@@ -174,8 +209,7 @@ audio_bus_set_lowpass :: proc(bus: Audio_Bus_Kind, cutoff_hz: f32, sample_rate: 
 	_ensure_bus_defaults()
 	b := &_bus_mgr.buses[int(bus)]
 	b.lowpass_hz = clamp(cutoff_hz, 80.0, 22000.0)
-	b.lpf_active = b.lowpass_hz < 19500.0
-	b.lpf_coeffs = audio_biquad_lowpass_coeffs(b.lowpass_hz, sample_rate)
+	audio_biquad_publish(&b.lpf, b.lowpass_hz < 19500.0, audio_biquad_lowpass_coeffs(b.lowpass_hz, sample_rate))
 }
 
 audio_bus_effective_gain :: proc(bus: Audio_Bus_Kind) -> f32 {
@@ -224,8 +258,7 @@ audio_buses_reset_runtime :: proc() {
 	intrinsics.atomic_store(&_bus_mgr.dialogue_peak_bits, u32(0))
 	_bus_mgr.duck_env = 0.0
 	for i in 0 ..< AUDIO_BUS_COUNT {
-		_bus_mgr.buses[i].lpf_z1 = {}
-		_bus_mgr.buses[i].lpf_z2 = {}
+		audio_biquad_reset(&_bus_mgr.buses[i].lpf)
 	}
 }
 

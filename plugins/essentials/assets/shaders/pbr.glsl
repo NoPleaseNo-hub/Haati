@@ -65,23 +65,9 @@ layout(location = 0) out vec4 out_color;
 
 const float PI = 3.14159265359;
 
-// Per-pixel tangent frame from screen-space derivatives (no mesh tangents).
-mat3 cotangent_frame(vec3 N, vec3 p, vec2 uv) {
-    vec3 dp1 = dFdx(p);
-    vec3 dp2 = dFdy(p);
-    vec2 duv1 = dFdx(uv);
-    vec2 duv2 = dFdy(uv);
-    vec3 dp2perp = cross(dp2, N);
-    vec3 dp1perp = cross(N, dp1);
-    vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
-    vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
-    float invmax = inversesqrt(max(max(dot(T, T), dot(B, B)), 1e-12));
-    return mat3(T * invmax, B * invmax, N);
-}
-
 void main() {
     vec4 base_px = texture(tex, frag_uv) * frag_color;
-    vec3 albedo = pow(base_px.rgb, vec3(2.2)); // sRGB -> linear
+    vec3 albedo = srgb_to_linear(base_px.rgb);
 
     float metal_f = metallic  <= 0.0 ? 1.0 : metallic;
     float rough_f = roughness <= 0.0 ? 1.0 : roughness;
@@ -120,8 +106,10 @@ void main() {
             L_to_frag = -l;
         }
         float atten = light_attenuation(gl, L_to_frag, dist);
-        vec3 h = normalize(v + l);
         float nol = max(dot(n, l), 0.0);
+        if (atten <= 1e-4 || nol <= 0.0) continue;
+
+        vec3 h = normalize(v + l);
         float noh = max(dot(n, h), 0.0);
 
         float a = rough * rough;
@@ -159,7 +147,7 @@ void main() {
     if (tex_amt > 0.0) {
         vec2 euv = vec2(atan(r.z, r.x) / (2.0 * PI) + 0.5,
                         acos(clamp(r.y, -1.0, 1.0)) / PI);
-        vec3 env_px = pow(texture(env_tex, euv).rgb, vec3(2.2));
+        vec3 env_px = srgb_to_linear(texture(env_tex, euv).rgb);
         env = mix(env, env_px, tex_amt * (1.0 - rough * 0.85));
     }
     vec3 f_amb = f0 + (max(vec3(1.0 - rough), f0) - f0) * pow(1.0 - nov, 5.0);
@@ -172,9 +160,10 @@ void main() {
     // glass at glancing angles is mirror, not milk.
     vec3 ambient = albedo * (1.0 - metal) * (1.0 - f_amb) * ambient_count.x * ao;
 
-    vec3 emissive = pow(texture(emissive_tex, frag_uv).rgb, vec3(2.2))
+    vec3 emissive = srgb_to_linear(texture(emissive_tex, frag_uv).rgb)
                   * emissive_color.rgb * emissive_color.w;
 
-    vec3 rgb = pow(lo + ambient + env_spec + emissive, vec3(1.0 / 2.2)); // linear -> sRGB
+    // Emit linear HDR radiance directly; post-FX composite runs single-pass ACES + linear_to_srgb.
+    vec3 rgb = max(lo + ambient + env_spec + emissive, vec3(0.0));
     out_color = vec4(rgb, base_px.a);
 }

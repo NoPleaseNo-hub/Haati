@@ -359,12 +359,6 @@ _generate_type_registration :: proc(entries: []_TypeGuidRow, w: ^db.World) -> bo
 
 // host_name == "" writes the shared all-types package.
 _write_registration :: proc(entries: []_TypeGuidRow, w: ^db.World, pkg_name, out_dir, engine_rel, host_name: string, runnables: []gen_facts.Runnable_Pkg) {
-	included :: proc(e: _TypeGuidRow, host_name: string, runnables: []gen_facts.Runnable_Pkg) -> bool {
-		if host_name == "" do return true
-		if e.pkg_name == host_name do return true
-		return !gen_facts.is_runnable(runnables, e.pkg_name)
-	}
-
 	b := strings.builder_make()
 	defer strings.builder_destroy(&b)
 
@@ -387,7 +381,7 @@ _write_registration :: proc(entries: []_TypeGuidRow, w: ^db.World, pkg_name, out
 	pkg_imports: [dynamic]_Pkg_Import
 	defer delete(pkg_imports)
 	for e in entries {
-		if !included(e, host_name, runnables) do continue
+		if !gen_facts.is_included_for_host(runnables, host_name, e.pkg_name) do continue
 		if !strings.has_prefix(e.pkg_path, _PACKAGES_PREFIX) do continue
 		if e.pkg_name == host_name do continue
 		found := false
@@ -407,7 +401,7 @@ _write_registration :: proc(entries: []_TypeGuidRow, w: ^db.World, pkg_name, out
 	strings.write_string(&b, "register_type_guids :: proc() {\n")
 	strings.write_string(&b, "\tsync.once_do(&_register_type_guids_once, proc() {\n")
 	for e in entries {
-		if !included(e, host_name, runnables) do continue
+		if !gen_facts.is_included_for_host(runnables, host_name, e.pkg_name) do continue
 		type_arg := fmt.tprintf("%s.%s", e.pkg_name, e.type_name)
 		if e.tid_expr != "" {
 			type_arg = e.tid_expr
@@ -415,7 +409,7 @@ _write_registration :: proc(entries: []_TypeGuidRow, w: ^db.World, pkg_name, out
 		fmt.sbprintf(&b, "\t\tengine.register_type(%s, engine.%s__Guid)\n", type_arg, e.type_name)
 	}
 	for e in entries {
-		if !included(e, host_name, runnables) do continue
+		if !gen_facts.is_included_for_host(runnables, host_name, e.pkg_name) do continue
 		type_arg := fmt.tprintf("%s.%s", e.pkg_name, e.type_name)
 		if e.tid_expr != "" {
 			type_arg = e.tid_expr
@@ -429,7 +423,7 @@ _write_registration :: proc(entries: []_TypeGuidRow, w: ^db.World, pkg_name, out
 	strings.write_string(&b, "\t\tengine.__type_cleanups_init()\n")
 	strings.write_string(&b, "\t\tengine.__type_on_validates_init()\n")
 	for e in entries {
-		if !included(e, host_name, runnables) || e.pkg_name == "engine" do continue
+		if !gen_facts.is_included_for_host(runnables, host_name, e.pkg_name) || e.pkg_name == "engine" do continue
 		t := fmt.tprintf("%s.%s", e.pkg_name, e.type_name)
 		if e.has_reset {
 			fmt.sbprintf(&b, "\t\tengine.type_register_reset(engine.TypeKey.%s, proc(ptr: rawptr) {{ %s.reset_%s(cast(^%s)ptr) }})\n", e.type_name, e.pkg_name, e.type_name, t)

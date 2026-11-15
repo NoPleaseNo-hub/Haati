@@ -6,6 +6,7 @@ package asset_pipeline
 // Storage and lookups (guid<->path maps, root-info index, meta primitives)
 // stay in the engine; this file is the driver that fills them from the tree.
 
+import "base:runtime"
 import "core:encoding/uuid"
 import "core:os"
 import "core:path/filepath"
@@ -34,6 +35,9 @@ _Async_Walk :: struct {
 @(private = "file")
 _free_async_walk :: proc(w: ^_Async_Walk) {
 	if w == nil do return
+	prev_alloc := context.allocator
+	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev_alloc
 	for k, _ in w.files {
 		delete(k)
 	}
@@ -51,7 +55,16 @@ _free_async_walk :: proc(w: ^_Async_Walk) {
 
 @(private = "file")
 _is_scene_or_level_tree :: proc(dir_path: string) -> bool {
-	return strings.contains(dir_path, "/Scenes") || strings.contains(dir_path, "/Levels")
+	return dir_path == "Scenes" ||
+		dir_path == "Levels" ||
+		strings.has_prefix(dir_path, "Scenes/") ||
+		strings.has_prefix(dir_path, "Scenes\\") ||
+		strings.has_prefix(dir_path, "Levels/") ||
+		strings.has_prefix(dir_path, "Levels\\") ||
+		strings.contains(dir_path, "/Scenes") ||
+		strings.contains(dir_path, "\\Scenes") ||
+		strings.contains(dir_path, "/Levels") ||
+		strings.contains(dir_path, "\\Levels")
 }
 
 @(private = "file")
@@ -112,6 +125,8 @@ _async_db_walk :: proc(dir_path: string, walk: ^_Async_Walk) {
 
 @(private = "file")
 _async_refresh_worker_proc :: proc(data: rawptr) {
+	context.allocator = runtime.default_allocator()
+	defer free_all(context.temp_allocator)
 	w := cast(^_Async_Walk)data
 	if w == nil do return
 
@@ -129,19 +144,28 @@ asset_db_refresh_async :: proc() {
 	if engine.asset_db.pipeline == .Catalog do return
 	if _refresh_thread != nil do return // already running
 
-	w := new(_Async_Walk)
-	w.files = make(map[string]engine.Asset_File_Stamp)
-	w.metas = make([dynamic]string)
-	w.package_roots = make([dynamic]string)
-	w.root_path = strings.clone(engine.asset_db.root_path)
+	prev_alloc := context.allocator
+	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev_alloc
+
+	w := new(_Async_Walk, runtime.default_allocator())
+	w.files = make(map[string]engine.Asset_File_Stamp, runtime.default_allocator())
+	w.metas = make([dynamic]string, runtime.default_allocator())
+	w.package_roots = make([dynamic]string, runtime.default_allocator())
+	w.root_path = strings.clone(engine.asset_db.root_path, runtime.default_allocator())
 
 	for root in engine.asset_db_package_roots() {
-		append(&w.package_roots, strings.clone(root.assets_path))
+		append(&w.package_roots, strings.clone(root.assets_path, runtime.default_allocator()))
 	}
 
 	_async_walk = w
 	sync.atomic_store(&_async_done, false)
 	_refresh_thread = thread.create_and_start_with_data(w, _async_refresh_worker_proc)
+	if _refresh_thread == nil {
+		_free_async_walk(w)
+		free(w, runtime.default_allocator())
+		_async_walk = nil
+	}
 }
 
 // Polled once per frame on the main thread. When the async worker finishes,
@@ -159,7 +183,7 @@ asset_db_refresh_tick :: proc() -> bool {
 	if _async_walk != nil {
 		any_changes = _apply_walk_diff(_async_walk.files, _async_walk.metas[:])
 		_free_async_walk(_async_walk)
-		free(_async_walk)
+		free(_async_walk, runtime.default_allocator())
 		_async_walk = nil
 	}
 	sync.atomic_store(&_async_done, false)
@@ -174,7 +198,7 @@ asset_db_refresh_shutdown :: proc() {
 	}
 	if _async_walk != nil {
 		_free_async_walk(_async_walk)
-		free(_async_walk)
+		free(_async_walk, runtime.default_allocator())
 		_async_walk = nil
 	}
 	sync.atomic_store(&_async_done, false)
@@ -193,7 +217,6 @@ asset_db_refresh :: proc() {
 			thread.join(_refresh_thread)
 			asset_db_refresh_tick()
 		}
-		return
 	}
 
 	walk: _Db_Walk
@@ -247,13 +270,15 @@ _apply_walk_diff :: proc(files: map[string]engine.Asset_File_Stamp, metas: []str
 	for path, stamp in files {
 		old, existed := engine.asset_db.file_state[path]
 		if !existed {
-			_ensure_meta(path)
-			engine.asset_db.file_state[strings.clone(path)] = _with_meta_stamp(path, stamp)
+			wrote_meta := _ensure_meta(path)
+			final_stamp := (wrote_meta || (stamp.meta_mtime == {} && stamp.meta_size == 0)) ? _with_meta_stamp(path, stamp) : stamp
+			engine.asset_db.file_state[strings.clone(path)] = final_stamp
 			append(&changed, path)
 			created += 1
 		} else if old != stamp {
-			_ensure_meta(path) // re-reads the meta; guid stays stable
-			engine.asset_db.file_state[path] = _with_meta_stamp(path, stamp) // key exists; stored key is reused
+			wrote_meta := _ensure_meta(path) // re-reads the meta; guid stays stable
+			final_stamp := (wrote_meta || (stamp.meta_mtime == {} && stamp.meta_size == 0)) ? _with_meta_stamp(path, stamp) : stamp
+			engine.asset_db.file_state[path] = final_stamp // key exists; stored key is reused
 			append(&changed, path)
 			modified += 1
 		}
@@ -354,9 +379,36 @@ _with_meta_stamp :: proc(path: string, stamp: engine.Asset_File_Stamp) -> engine
 }
 
 @(private = "file")
-_ensure_meta :: proc(asset_path: string) {
-	meta_path := strings.concatenate({asset_path, ".meta"})
-	defer delete(meta_path)
+_ensure_meta :: proc(asset_path: string) -> (wrote_meta: bool) {
+	ext := strings.to_lower(filepath.ext(asset_path), context.temp_allocator)
+	meta_path := strings.concatenate({asset_path, ".meta"}, context.temp_allocator)
+	is_mesh_ext := (ext == ".glb" || ext == ".gltf")
+
+	if is_importable_extension(ext) || is_mesh_ext {
+		existing := engine._read_import_meta(meta_path, context.temp_allocator)
+		if existing.guid != "" {
+			guid, perr := uuid.read(existing.guid)
+			delete(existing.guid)
+			if perr == nil {
+				engine._register_asset(asset_path, guid)
+				if existing.importer == "" && is_importable_extension(ext) {
+					asset_pipeline_ensure_import_meta(asset_path)
+					wrote_meta = true
+				} else if ms, is_mesh := existing.settings.(engine.MeshSettings); is_mesh {
+					// Register model clip guids straight from the already-parsed meta
+					// without opening/parsing the .meta file a second time.
+					engine._register_model_subs_from_mesh_settings(asset_path, engine.Asset_GUID(guid), ms)
+				}
+				return wrote_meta
+			}
+		}
+
+		guid := engine._generate_guid()
+		engine._write_meta(meta_path, guid)
+		engine._register_asset(asset_path, guid)
+		asset_pipeline_ensure_import_meta(asset_path)
+		return true
+	}
 
 	if guid, ok := engine._read_meta(meta_path); ok {
 		engine._register_asset(asset_path, guid)
@@ -364,12 +416,7 @@ _ensure_meta :: proc(asset_path: string) {
 		guid := engine._generate_guid()
 		engine._write_meta(meta_path, guid)
 		engine._register_asset(asset_path, guid)
+		wrote_meta = true
 	}
-
-	// Upgrade to an importer meta (guid + importer + settings) — the import
-	// driver is this same package now.
-	asset_pipeline_ensure_import_meta(asset_path)
-	// A model's clip guids come from its meta, so a fresh clone resolves clip
-	// references from the scan alone, before any import runs.
-	engine.asset_db_register_model_subs(asset_path)
+	return wrote_meta
 }

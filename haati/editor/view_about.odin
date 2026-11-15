@@ -3,6 +3,7 @@ package editor
 import "core:fmt"
 import im "haati:external/odin-imgui"
 import "menu"
+import "widgets"
 
 ABOUT_POPUP_ID :: "About"
 
@@ -12,9 +13,7 @@ draw_about_popup :: proc() {
         im.OpenPopup(ABOUT_POPUP_ID, {})
     }
 
-    vp := im.GetMainViewport()
-    center := im.Vec2{vp.Pos.x + vp.Size.x * 0.5, vp.Pos.y + vp.Size.y * 0.5}
-    im.SetNextWindowPos(center, .Appearing, im.Vec2{0.5, 0.5})
+    widgets.center_next_window_on_active_monitor(.Appearing)
 
     if im.BeginPopupModal(ABOUT_POPUP_ID, nil, {.AlwaysAutoResize}) {
         im.Text("%s", fmt.ctprintf("Haati Engine v%s", VERSION))

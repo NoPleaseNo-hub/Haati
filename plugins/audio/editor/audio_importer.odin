@@ -21,9 +21,6 @@ _AUDIO_EXTS := []string{".mp3", ".wav", ".ogg", ".flac"}
 
 @(phase={key=ImportersInit, order=1, mode=Editor})
 audio_importers_init :: proc() {
-	@(static) done := false
-	if done do return
-	done = true
 	asset_pipeline.importer_register({
 		name         = "audio",
 		version      = 2,

@@ -1,0 +1,38 @@
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+struct BloomUpUBO
+{
+    float4 params;
+};
+
+struct main0_out
+{
+    float4 out_color [[color(0)]];
+};
+
+struct main0_in
+{
+    float2 frag_uv [[user(locn0)]];
+};
+
+fragment main0_out main0(main0_in in [[stage_in]], constant BloomUpUBO& _13 [[buffer(0)]], texture2d<float> u_src [[texture(0)]], sampler u_srcSmplr [[sampler(0)]])
+{
+    main0_out out = {};
+    float2 ts = _13.params.xy;
+    float3 a = u_src.sample(u_srcSmplr, (in.frag_uv + float2(-ts.x, -ts.y))).xyz;
+    float3 b = u_src.sample(u_srcSmplr, (in.frag_uv + float2(0.0, -ts.y))).xyz;
+    float3 c = u_src.sample(u_srcSmplr, (in.frag_uv + float2(ts.x, -ts.y))).xyz;
+    float3 d = u_src.sample(u_srcSmplr, (in.frag_uv + float2(-ts.x, 0.0))).xyz;
+    float3 e = u_src.sample(u_srcSmplr, in.frag_uv).xyz;
+    float3 f = u_src.sample(u_srcSmplr, (in.frag_uv + float2(ts.x, 0.0))).xyz;
+    float3 g = u_src.sample(u_srcSmplr, (in.frag_uv + float2(-ts.x, ts.y))).xyz;
+    float3 h = u_src.sample(u_srcSmplr, (in.frag_uv + float2(0.0, ts.y))).xyz;
+    float3 i = u_src.sample(u_srcSmplr, (in.frag_uv + float2(ts.x, ts.y))).xyz;
+    float3 tent = (((e * 4.0) + ((((b + d) + f) + h) * 2.0)) + (((a + c) + g) + i)) * 0.0625;
+    out.out_color = float4(fast::max(tent, float3(0.0)) * _13.params.z, 1.0);
+    return out;
+}
+

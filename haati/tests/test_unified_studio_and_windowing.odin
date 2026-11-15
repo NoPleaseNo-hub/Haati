@@ -198,10 +198,13 @@ test_no_unbaked_unicode_glyphs_in_studio_and_cad_ui_code :: proc(t: ^testing.T) 
 	repo_root := engine.resolve_repo_root(context.temp_allocator)
 	checked_files := [?]string{
 		"haati/editor/visual_script/visual_script_editor.odin",
+		"haati/editor/visual_script/vs_canvas.odin",
+		"haati/editor/visual_script/vs_docks.odin",
 		"haati/editor/code_studio/code_studio.odin",
 		"haati/editor/code_studio/code_autocomplete.odin",
 		"haati/editor/view_visual_script_inspector.odin",
 		"plugins/cad_csg/editor/cad_csg_editor.odin",
+		"haati/editor/file_explorer/editor/material_graph_editor.odin",
 	}
 	forbidden := [?]string{
 		"\u25c7", // ◇

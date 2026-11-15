@@ -245,6 +245,7 @@ font_parse :: proc(data: []u8, allocator := context.allocator) -> (f: Font, ok: 
 }
 
 font_destroy :: proc(f: ^Font) {
+	data_alloc := f.glyphs.allocator if f.glyphs.allocator.procedure != nil else context.allocator
 	delete(f.glyphs)
 	delete(f.kerns)
 	delete(f.dyn_glyphs)
@@ -256,7 +257,7 @@ font_destroy :: proc(f: ^Font) {
 			delete_key(&engine.texture_cache, f.dyn_texture)
 		}
 	}
-	delete(f.data)
+	delete(f.data, data_alloc)
 	f^ = {}
 }
 
@@ -318,7 +319,11 @@ _font_add_glyph :: proc(guid: engine.Asset_GUID, f: ^Font, r: rune) -> (Font_Gly
 				rgba[i * 4 + 1] = 255
 				rgba[i * 4 + 2] = 255
 			}
+			tex_alloc := engine.texture_cache.allocator if engine.texture_cache.allocator.procedure != nil else runtime.default_allocator()
+			prev_alloc := context.allocator
+			context.allocator = tex_alloc
 			engine.texture_cache[f.dyn_texture] = engine.Texture2D{guid = f.dyn_texture, width = DYN_PAGE_DIM, height = DYN_PAGE_DIM, pixels_per_unit = engine.PIXELS_PER_UNIT, gfx = gfx.texture_create(rgba, DYN_PAGE_DIM, DYN_PAGE_DIM, mipmaps = false)}
+			context.allocator = prev_alloc
 		}
 	}
 
@@ -375,6 +380,10 @@ _font_upload :: proc(guid: engine.Asset_GUID, f: ^Font) {
 		rgba[i * 4 + 2] = 255
 		rgba[i * 4 + 3] = a
 	}
+	tex_alloc := engine.texture_cache.allocator if engine.texture_cache.allocator.procedure != nil else runtime.default_allocator()
+	prev_alloc := context.allocator
+	context.allocator = tex_alloc
+	defer context.allocator = prev_alloc
 	tex_guid := _atlas_guid(guid)
 	if old, had := engine.texture_cache[tex_guid]; had {
 		gfx.texture_destroy(old.gfx)
@@ -387,7 +396,9 @@ _font_upload :: proc(guid: engine.Asset_GUID, f: ^Font) {
 // Puts a parsed font in the cache under `guid` (tests, tooling). Takes
 // ownership of the font.
 font_cache_insert :: proc(guid: engine.Asset_GUID, f: Font) {
+	prev_alloc := context.allocator
 	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev_alloc
 	if _fonts == nil do _fonts = make(map[engine.Asset_GUID]Font)
 	if old, had := &_fonts[guid]; had do font_destroy(old)
 	_fonts[guid] = f
@@ -406,7 +417,7 @@ font_load :: proc(guid: engine.Asset_GUID) -> (^Font, bool) {
 		path, path_ok = engine.asset_pipeline_artifact_path(guid)
 		if !path_ok do return nil, false
 	}
-	data, rerr := os.read_entire_file(path, runtime.default_allocator())
+	data, rerr := engine.vfs_read_entire_file(path, runtime.default_allocator())
 	if rerr != nil do return nil, false
 	f, ok := font_parse(data, runtime.default_allocator())
 	if !ok {
@@ -417,7 +428,7 @@ font_load :: proc(guid: engine.Asset_GUID) -> (^Font, bool) {
 		// evicts it through the hook.
 		if src, src_ok := engine.asset_db_get_path(uuid.Identifier(guid)); src_ok && engine.asset_pipeline_request_import(src, force = true) {
 			if path, path_ok = engine.asset_pipeline_artifact_path(guid); path_ok {
-				if data, rerr = os.read_entire_file(path, runtime.default_allocator()); rerr == nil {
+				if data, rerr = engine.vfs_read_entire_file(path, runtime.default_allocator()); rerr == nil {
 					f, ok = font_parse(data, runtime.default_allocator())
 					if !ok do delete(data, runtime.default_allocator())
 				}
@@ -434,6 +445,9 @@ font_load :: proc(guid: engine.Asset_GUID) -> (^Font, bool) {
 
 // Reimport hook: a rebaked artifact evicts its font so the next draw reloads.
 font_reimported :: proc(guid: engine.Asset_GUID) {
+	prev_alloc := context.allocator
+	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev_alloc
 	if f, ok := &_fonts[guid]; ok {
 		font_destroy(f)
 		delete_key(&_fonts, guid)

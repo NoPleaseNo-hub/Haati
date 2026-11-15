@@ -305,7 +305,5 @@ shutdown_hierarchy_views :: proc() {
 	hierarchy_edit_stack_clear()
 	delete(_edit_stack)
 	_edit_stack = nil
-	delete(_inspector_comp_open)
-	_inspector_comp_open = nil
 	selection_shutdown()
 }

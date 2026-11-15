@@ -178,15 +178,13 @@ engine_manual_window_draw :: proc() {
 		widgets.tooltip("Open the full Markdown MANUAL.md inside Odin Micro-Studio")
 	}
 
-	im.SetNextItemWidth(-1)
-	im.InputTextWithHint(
-		"##manual_search",
-		"Filter manual topics (e.g. boolean, .bodin, delegate, using, overwatch, pivot)...",
-		cstring(raw_data(_manual_state.search_buf[:])),
-		len(_manual_state.search_buf),
-	)
-	raw_q := strings.trim_space(string(cstring(raw_data(_manual_state.search_buf[:]))))
-	q_low := strings.to_lower(raw_q, context.temp_allocator)
+	sr := widgets.search_bar(_manual_state.search_buf[:], widgets.Search_Bar_Opts{
+		id    = "##manual_search",
+		hint  = "Filter manual topics (e.g. boolean, .bodin, delegate, using, overwatch, pivot)...",
+		mode  = .Toolbar,
+		width = max(120.0, im.GetContentRegionAvail().x),
+	})
+	q_low := strings.to_lower(sr.query, context.temp_allocator)
 
 	im.Separator()
 

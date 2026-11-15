@@ -14,18 +14,21 @@ import "../../engine/log"
 // files. Each copy clears the rest, so a paste never brings back something
 // copied before the last copy.
 Clipboard :: struct {
-	json_data:      [dynamic]byte,
-	json_tid:       typeid,
-	hierarchy_data: []byte,
-	files:          [dynamic]string, // owned clones
-	files_cut:      bool,            // the files move on paste instead of copying
+	json_data:       [dynamic]byte,
+	json_tid:        typeid,
+	hierarchy_data:  []byte,
+	hierarchy_alloc: runtime.Allocator,
+	files:           [dynamic]string, // owned clones
+	files_cut:       bool,            // the files move on paste instead of copying
 }
 
 @(private)
 _clipboard: Clipboard
 
 init :: proc() {
+	prev := context.allocator
 	context.allocator = runtime.default_allocator() // lives across frames
+	defer context.allocator = prev
 	_clipboard.json_data = make([dynamic]byte)
 	_clipboard.files = make([dynamic]string)
 }
@@ -41,8 +44,12 @@ shutdown :: proc() {
 clear_all :: proc() {
 	clear(&_clipboard.json_data)
 	_clipboard.json_tid = nil
-	delete(_clipboard.hierarchy_data)
+	if _clipboard.hierarchy_data != nil {
+		alloc := _clipboard.hierarchy_alloc.procedure != nil ? _clipboard.hierarchy_alloc : context.allocator
+		delete(_clipboard.hierarchy_data, alloc)
+	}
 	_clipboard.hierarchy_data = nil
+	_clipboard.hierarchy_alloc = {}
 	clear_files()
 }
 
@@ -119,10 +126,22 @@ paste :: proc(dst: any) -> bool {
 	return true
 }
 
+// Pastes component JSON values onto `comp_ptr` while preserving instance identity
+// (`CompData`: `owner`, `local_id`, `enabled`), then runs `engine.type_on_validate`.
+paste_component_values :: proc(comp_ptr: rawptr, comp_tid: typeid, type_key: engine.TypeKey) -> bool {
+	if comp_ptr == nil || comp_tid == nil || !can_paste(comp_tid) do return false
+	base := (cast(^engine.CompData)comp_ptr)^
+	if !paste(any{data = comp_ptr, id = comp_tid}) do return false
+	(cast(^engine.CompData)comp_ptr)^ = base
+	engine.type_on_validate(type_key, comp_ptr)
+	return true
+}
+
 // Takes ownership of `data`.
 copy_hierarchy :: proc(data: []byte) {
 	clear_all()
 	_clipboard.hierarchy_data = data
+	_clipboard.hierarchy_alloc = context.allocator
 }
 
 paste_hierarchy :: proc() -> []byte {

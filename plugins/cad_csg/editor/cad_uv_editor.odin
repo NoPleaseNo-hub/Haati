@@ -1261,7 +1261,7 @@ _draw_uv_inspector :: proc(width: f32) {
 	if im.Button("Mark / Clear Seam (Edge Mode)", {-1, 22}) do mesh_uv_toggle_selected_edge_seam()
 	widgets.tooltip("Marks or unmarks the selected edge as a UV Seam (displayed in bright neon orange in 3D Scene view)")
 	if len(_mesh_ed.uv_seams) > 0 {
-		im.TextColored({1.0, 0.60, 0.15, 1.0}, fmt.ctprintf("Marked Seams: %d edges", len(_mesh_ed.uv_seams)))
+		im.TextColoredUnformatted({1.0, 0.60, 0.15, 1.0}, fmt.ctprintf("Marked Seams: %d edges", len(_mesh_ed.uv_seams)))
 		if im.SmallButton("Clear All Seams") do mesh_uv_clear_all_seams()
 	}
 
@@ -1271,7 +1271,7 @@ _draw_uv_inspector :: proc(width: f32) {
 	widgets.tooltip("When checked and a face is selected, Rotate / Mirror / Scale / Offset pivot around THAT face's UV center!")
 
 	if _uv_has_face_selection() && _uv_ed.transform_selected_only {
-		im.TextColored({0.25, 1.0, 0.55, 1.0}, fmt.ctprintf("Target: Selected Face #%d (Pivot = Face Center)", _mesh_ed.selected_face))
+		im.TextColoredUnformatted({0.25, 1.0, 0.55, 1.0}, fmt.ctprintf("Target: Selected Face #%d (Pivot = Face Center)", _mesh_ed.selected_face))
 	} else {
 		im.TextColored({0.75, 0.82, 0.92, 1.0}, "Target: All Mesh Faces (Pivot = 0.5, 0.5)")
 	}
@@ -1313,7 +1313,7 @@ _draw_uv_inspector :: proc(width: f32) {
 	im.SeparatorText("4. Selected Face UV Controls")
 	if _mesh_ed.selected_face >= 0 && _mesh_ed.selected_face < len(_mesh_ed.faces) {
 		f := &_mesh_ed.faces[_mesh_ed.selected_face]
-		im.TextColored({0.2, 0.9, 0.4, 1.0}, fmt.ctprintf("Selected Face #%d (%d verts):", _mesh_ed.selected_face, len(f.verts)))
+		im.TextColoredUnformatted({0.2, 0.9, 0.4, 1.0}, fmt.ctprintf("Selected Face #%d (%d verts):", _mesh_ed.selected_face, len(f.verts)))
 		if im.Button("Rot Face +90°##sf", {half_w, 22}) do mesh_uv_rotate_90(true, selected_only_override = true)
 		im.SameLine(0, 4)
 		if im.Button("Rot Face -90°##sf", {half_w, 22}) do mesh_uv_rotate_90(false, selected_only_override = true)
@@ -1331,7 +1331,7 @@ _draw_uv_inspector :: proc(width: f32) {
 		}
 		for uv, i in f.uvs {
 			vi := f.verts[i] if i < len(f.verts) else 0
-			im.TextDisabled(fmt.ctprintf("  v%d: (U: %.3f, V: %.3f)", vi, uv.x, uv.y))
+			im.TextDisabledUnformatted(fmt.ctprintf("  v%d: (U: %.3f, V: %.3f)", vi, uv.x, uv.y))
 		}
 	} else {
 		im.TextDisabled("Click any face in the UV canvas (Shift+Click for multiple) to rotate, mirror, or drag just that face!")

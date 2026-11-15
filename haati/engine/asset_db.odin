@@ -103,31 +103,45 @@ Asset_Package_Root :: struct {
 // Temp-allocated, sorted by name. Empty when packages/ doesn't exist (tests,
 // bare projects).
 asset_db_package_roots :: proc() -> []Asset_Package_Root {
-    handle, err := os.open(ASSET_DB_PACKAGES_DIR)
-    if err != nil do return nil
-    defer os.close(handle)
-    entries, rerr := os.read_dir(handle, -1, context.temp_allocator)
-    if rerr != nil do return nil
-    defer os.file_info_slice_delete(entries, context.temp_allocator)
-
     roots := make([dynamic]Asset_Package_Root, context.temp_allocator)
-    for entry in entries {
-        if strings.has_prefix(entry.name, ".") do continue
-        // A symlinked package (samples installed via symlink) reads as
-        // .Symlink here — follow it, everything below resolves normally.
-        if entry.type != .Directory {
-            full, _ := filepath.join({ASSET_DB_PACKAGES_DIR, entry.name}, context.temp_allocator)
-            if entry.type != .Symlink || !os.is_dir(full) do continue
+    pkgs_dir := ASSET_DB_PACKAGES_DIR
+    use_active := has_active_project() && (asset_db.root_path == "" || asset_db.root_path == "assets")
+    if use_active {
+        if ep := engine_packages_dir(context.temp_allocator); ep != "" {
+            pkgs_dir = ep
         }
-        raw_assets_path, _ := filepath.join({ASSET_DB_PACKAGES_DIR, entry.name, "assets"}, context.temp_allocator)
-        os.make_directory(raw_assets_path) // ensure — no-op when it exists
-        assets_path, _ := strings.replace_all(raw_assets_path, "\\", "/", context.temp_allocator)
-        append(&roots, Asset_Package_Root{name = strings.clone(entry.name, context.temp_allocator), assets_path = assets_path})
+    }
+    if handle, err := os.open(pkgs_dir); err == nil {
+        defer os.close(handle)
+        if entries, rerr := os.read_dir(handle, -1, context.temp_allocator); rerr == nil {
+            defer os.file_info_slice_delete(entries, context.temp_allocator)
+            for entry in entries {
+                if strings.has_prefix(entry.name, ".") do continue
+                // A symlinked package (samples installed via symlink) reads as
+                // .Symlink here — follow it, everything below resolves normally.
+                if entry.type != .Directory {
+                    full, _ := filepath.join({pkgs_dir, entry.name}, context.temp_allocator)
+                    if entry.type != .Symlink || !os.is_dir(full) do continue
+                }
+                raw_assets_path, _ := filepath.join({pkgs_dir, entry.name, "assets"}, context.temp_allocator)
+                os.make_directory(raw_assets_path) // ensure — no-op when it exists
+                assets_path, _ := strings.replace_all(raw_assets_path, "\\", "/", context.temp_allocator)
+                append(&roots, Asset_Package_Root{name = strings.clone(entry.name, context.temp_allocator), assets_path = assets_path})
+                for extra_sub in ([?]string{"Scenes", "Levels"}) {
+                    raw_extra_path, _ := filepath.join({pkgs_dir, entry.name, extra_sub}, context.temp_allocator)
+                    if os.is_dir(raw_extra_path) {
+                        extra_path, _ := strings.replace_all(raw_extra_path, "\\", "/", context.temp_allocator)
+                        append(&roots, Asset_Package_Root{name = strings.clone(entry.name, context.temp_allocator), assets_path = extra_path})
+                    }
+                }
+            }
+        }
+    }
+    if use_active {
+        slug := active_project_slug(context.temp_allocator)
         for extra_sub in ([?]string{"Scenes", "Levels"}) {
-            raw_extra_path, _ := filepath.join({ASSET_DB_PACKAGES_DIR, entry.name, extra_sub}, context.temp_allocator)
-            if os.is_dir(raw_extra_path) {
-                extra_path, _ := strings.replace_all(raw_extra_path, "\\", "/", context.temp_allocator)
-                append(&roots, Asset_Package_Root{name = strings.clone(entry.name, context.temp_allocator), assets_path = extra_path})
+            if os.is_dir(extra_sub) {
+                append(&roots, Asset_Package_Root{name = strings.clone(slug, context.temp_allocator), assets_path = extra_sub})
             }
         }
     }
@@ -314,6 +328,15 @@ _unregister_subs_of :: proc(owner: Asset_GUID) {
     }
 }
 
+_register_model_subs_from_mesh_settings :: proc(path: string, owner: Asset_GUID, ms: MeshSettings) {
+    // Drop first, so a clip removed from the model stops resolving.
+    _unregister_subs_of(owner)
+    for c in ms.clips {
+        if c.guid == {} || c.id == 0 do continue
+        _register_sub(path, owner, c.guid, c.id, "anim")
+    }
+}
+
 // Registers every clip guid a model's settings list, and drops the ones no
 // longer there. Called after the model imports (the importer refines the
 // list) and when the scan first sees the model, so a fresh clone resolves
@@ -326,12 +349,7 @@ asset_db_register_model_subs :: proc(path: string) {
     if !sok do return
     ms, is_mesh := settings.(MeshSettings)
     if !is_mesh do return
-    // Drop first, so a clip removed from the model stops resolving.
-    _unregister_subs_of(owner)
-    for c in ms.clips {
-        if c.guid == {} || c.id == 0 do continue
-        _register_sub(path, owner, c.guid, c.id, "anim")
-    }
+    _register_model_subs_from_mesh_settings(path, owner, ms)
 }
 
 _reindex_if_scene :: proc(path: string) {
@@ -392,7 +410,7 @@ _index_remove :: proc(guid: Asset_GUID) {
 }
 
 _index_scene_asset :: proc(guid: Asset_GUID, path: string) {
-    data, read_err := os.read_entire_file(path, context.temp_allocator)
+    data, read_err := vfs_read_entire_file(path, context.temp_allocator)
     if read_err != nil do return
 
     // Externally changed bytes (git checkout, other tools): refresh the
@@ -579,11 +597,24 @@ asset_db_get_path :: proc(guid: uuid.Identifier) -> (string, bool) {
             }
         }
         for root in asset_db_package_roots() {
-            if !strings.has_suffix(root.assets_path, "/assets") {
+            if !strings.has_suffix(root.assets_path, "/assets") && root.assets_path != "assets" {
                 _lazy_scan_scene_dirs(root.assets_path, db_active)
             }
         }
-        for parent_root in ([?]string{"plugins", "packages", "haati/packages"}) {
+        if has_active_project() {
+            for sub in ([?]string{"Scenes", "Levels"}) {
+                if os.is_dir(sub) {
+                    _lazy_scan_scene_dirs(sub, db_active)
+                }
+            }
+        }
+        for parent_root in ([?]string{
+            engine_plugins_dir(context.temp_allocator),
+            engine_packages_dir(context.temp_allocator),
+            "plugins",
+            "packages",
+            "haati/packages",
+        }) {
             if h, oerr := os.open(parent_root); oerr == nil {
                 entries, _ := os.read_dir(h, -1, context.temp_allocator)
                 os.close(h)
@@ -614,16 +645,65 @@ asset_db_get_path :: proc(guid: uuid.Identifier) -> (string, bool) {
     return "", false
 }
 
-asset_db_get_guid :: proc(path: string) -> (uuid.Identifier, bool) {
-    if guid, ok := asset_db.path_to_guid[path]; ok {
-        return guid, true
+// Normalizes an asset path into AssetDB's canonical relative key (`assets/...` or `packages/...`,
+// or `<engine_packages_dir>/...` when running against an external active project).
+asset_db_normalize_key :: proc(disk_or_rel_path: string, allocator := context.temp_allocator) -> string {
+    if len(disk_or_rel_path) == 0 do return ""
+    norm, _ := strings.replace_all(disk_or_rel_path, "\\", "/", context.temp_allocator)
+    for strings.has_prefix(norm, "../") || strings.has_prefix(norm, "./") {
+        if strings.has_prefix(norm, "../") do norm = norm[3:]
+        else if strings.has_prefix(norm, "./") do norm = norm[2:]
     }
-    if len(path) == 0 || asset_db.path_to_guid == nil {
-        return {}, false
+    if has_active_project() {
+        proj_root := active_project_root()
+        if proj_root != "" {
+            pr_slash, _ := strings.replace_all(proj_root, "\\", "/", context.temp_allocator)
+            pr_prefix := strings.concatenate({strings.trim_right(pr_slash, "/"), "/"}, context.temp_allocator)
+            if len(norm) >= len(pr_prefix) && strings.equal_fold(norm[:len(pr_prefix)], pr_prefix) {
+                norm = norm[len(pr_prefix):]
+            }
+        }
     }
-    norm, _ := strings.replace_all(path, "\\", "/", context.temp_allocator)
-    norm = strings.trim_prefix(norm, "../")
-    norm = strings.trim_prefix(norm, "./")
+    eng_pkgs := engine_packages_dir(context.temp_allocator)
+    eng_pkgs_slash := ""
+    if eng_pkgs != "" {
+        eng_pkgs_slash, _ = strings.replace_all(eng_pkgs, "\\", "/", context.temp_allocator)
+        eng_pkgs_slash = strings.trim_right(eng_pkgs_slash, "/")
+    }
+    if eng_plugs := engine_plugins_dir(context.temp_allocator); eng_plugs != "" {
+        ep_slash, _ := strings.replace_all(eng_plugs, "\\", "/", context.temp_allocator)
+        ep_prefix := strings.concatenate({strings.trim_right(ep_slash, "/"), "/"}, context.temp_allocator)
+        if len(norm) >= len(ep_prefix) && strings.equal_fold(norm[:len(ep_prefix)], ep_prefix) {
+            rest := norm[len(ep_prefix):]
+            if eng_pkgs_slash != "" {
+                cand := strings.concatenate({eng_pkgs_slash, "/", rest}, context.temp_allocator)
+                if (asset_db.path_to_guid != nil && cand in asset_db.path_to_guid) || os.exists(cand) {
+                    norm = cand
+                } else {
+                    norm = strings.concatenate({"packages/", rest}, context.temp_allocator)
+                }
+            } else {
+                norm = strings.concatenate({"packages/", rest}, context.temp_allocator)
+            }
+        }
+    }
+    if eng_pkgs_slash != "" {
+        ep_prefix := strings.concatenate({eng_pkgs_slash, "/"}, context.temp_allocator)
+        if len(norm) >= len(ep_prefix) && strings.equal_fold(norm[:len(ep_prefix)], ep_prefix) {
+            if !has_active_project() {
+                norm = strings.concatenate({"packages/", norm[len(ep_prefix):]}, context.temp_allocator)
+            } else {
+                norm = strings.concatenate({eng_pkgs_slash, "/", norm[len(ep_prefix):]}, context.temp_allocator)
+            }
+        }
+    }
+    if eng_haati := engine_haati_dir(context.temp_allocator); eng_haati != "" {
+        eh_slash, _ := strings.replace_all(eng_haati, "\\", "/", context.temp_allocator)
+        eh_prefix := strings.concatenate({strings.trim_right(eh_slash, "/"), "/"}, context.temp_allocator)
+        if len(norm) >= len(eh_prefix) && strings.equal_fold(norm[:len(eh_prefix)], eh_prefix) {
+            norm = norm[len(eh_prefix):]
+        }
+    }
     if strings.has_prefix(norm, "plugins/") {
         norm = strings.concatenate({"packages/", strings.trim_prefix(norm, "plugins/")}, context.temp_allocator)
     } else if strings.has_prefix(norm, "haati/") {
@@ -634,14 +714,70 @@ asset_db_get_guid :: proc(path: string) -> (uuid.Identifier, bool) {
         if samples_idx := strings.index(norm, "/samples/"); samples_idx > 0 {
             after_samples := norm[samples_idx + len("/samples/"):]
             sample_norm := strings.concatenate({"packages/", after_samples}, context.temp_allocator)
-            if guid, ok := asset_db.path_to_guid[sample_norm]; ok {
-                return guid, true
+            eng_sample_disk := ""
+            if eng_pkgs_slash != "" {
+                eng_sample_disk = strings.concatenate({eng_pkgs_slash, "/", after_samples}, context.temp_allocator)
             }
-            if os.exists(sample_norm) {
+            if (asset_db.path_to_guid != nil && sample_norm in asset_db.path_to_guid) ||
+               os.exists(sample_norm) ||
+               (eng_sample_disk != "" && ((asset_db.path_to_guid != nil && eng_sample_disk in asset_db.path_to_guid) || os.exists(eng_sample_disk))) {
                 norm = sample_norm
             }
         }
+        if has_active_project() {
+            slug := active_project_slug(context.temp_allocator)
+            if slug != "" {
+                active_prefix := strings.concatenate({"packages/", slug, "/"}, context.temp_allocator)
+                if len(norm) >= len(active_prefix) && strings.equal_fold(norm[:len(active_prefix)], active_prefix) {
+                    stripped := norm[len(active_prefix):]
+                    if (asset_db.path_to_guid != nil && stripped in asset_db.path_to_guid) || os.exists(stripped) {
+                        norm = stripped
+                    }
+                }
+            }
+            if strings.has_prefix(norm, "packages/") && eng_pkgs_slash != "" {
+                rest := strings.trim_prefix(norm, "packages/")
+                cand := strings.concatenate({eng_pkgs_slash, "/", rest}, context.temp_allocator)
+                if (asset_db.path_to_guid != nil && cand in asset_db.path_to_guid) || os.exists(cand) {
+                    norm = cand
+                }
+            }
+        }
     }
+    out, _ := strings.clone(norm, allocator)
+    return out
+}
+
+// Resolves a 36-char GUID string OR any raw/normalized asset path into an Asset_GUID.
+asset_db_lookup_guid_any :: proc(guid_or_any_path: string) -> (Asset_GUID, bool) {
+    s := strings.trim_space(guid_or_any_path)
+    if len(s) >= 2 && ((s[0] == '"' && s[len(s) - 1] == '"') || (s[0] == '\'' && s[len(s) - 1] == '\'')) {
+        s = s[1:len(s) - 1]
+    }
+    if len(s) == 0 do return {}, false
+    if parsed, err := uuid.read(s); err == nil {
+        return Asset_GUID(parsed), true
+    }
+    if found, ok := asset_db_get_guid(s); ok {
+        return Asset_GUID(found), true
+    }
+    norm := asset_db_normalize_key(s, context.temp_allocator)
+    if norm != "" && norm != s {
+        if found, ok := asset_db_get_guid(norm); ok {
+            return Asset_GUID(found), true
+        }
+    }
+    return {}, false
+}
+
+asset_db_get_guid :: proc(path: string) -> (uuid.Identifier, bool) {
+    if guid, ok := asset_db.path_to_guid[path]; ok {
+        return guid, true
+    }
+    if len(path) == 0 || asset_db.path_to_guid == nil {
+        return {}, false
+    }
+    norm := asset_db_normalize_key(path, context.temp_allocator)
     if guid, ok := asset_db.path_to_guid[norm]; ok {
         return guid, true
     }

@@ -1178,6 +1178,9 @@ mcp_tool_screenshot :: proc(id: i64, params: json.Object) -> (string, Mcp_Error)
 	// end of this frame (mcp_bridge_capture_frame). Nothing outside the editor's
 	// own window exists in a swapchain image, so there is nothing else to leak.
 	if view == "editor" {
+		if _mcp.pending_window_shot.wanted {
+			return _mcp_fail("busy", "an editor screenshot capture is already pending")
+		}
 		_mcp.pending_window_shot = _Mcp_Window_Shot{
 			id = id, max_size = max(max_size, 16), wanted = true,
 		}

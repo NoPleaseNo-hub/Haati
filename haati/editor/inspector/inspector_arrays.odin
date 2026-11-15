@@ -7,6 +7,7 @@ import "core:reflect"
 import "base:runtime"
 import strings "core:strings"
 import im "haati:external/odin-imgui"
+import "haati:editor/widgets"
 import engine "../../engine"
 
 ICON_MD_DRAG_INDICATOR :: "\ue945" // drag_indicator (array row reorder grip)
@@ -128,7 +129,7 @@ draw_fixed_array :: proc(ptr: rawptr, count: int, elem_ti: ^runtime.Type_Info, f
 	draw_field_context_menu(ptr, field_tid)
 	if !tree_open do return
 	defer im.TreePop()
-	im.TextDisabled("Fixed size: %d", count)
+	widgets.text_disabledf("Fixed size: %d", count)
 
 	readonly := engine.inspector_is_readonly()
 	_reorder_apply_if_released(ptr, ptr, elem_ti.size, count)
@@ -192,10 +193,10 @@ draw_dynamic_array :: proc(da: ^runtime.Raw_Dynamic_Array, elem_ti: ^runtime.Typ
 		// The dash is the mixed marker every other field uses. The counts spell
 		// out what it means for a list, since "mixed length" alone does not say
 		// why some rows are missing.
-		im.TextDisabled("Size: %s - this object %d, showing %d common",
+		widgets.text_disabledf("Size: %s - this object %d, showing %d common",
 			MIXED_VALUE_TEXT, da.len, common_len)
 	} else {
-		im.TextDisabled("Size: %d", da.len)
+		widgets.text_disabledf("Size: %d", da.len)
 	}
 
 	readonly := engine.inspector_is_readonly()
@@ -214,7 +215,7 @@ draw_dynamic_array :: proc(da: ^runtime.Raw_Dynamic_Array, elem_ti: ^runtime.Typ
 		im.PushIDInt(c.int(i))
 		if !reorder_readonly do _draw_reorder_grip(field_ptr, i, da.len)
 		im.AlignTextToFramePadding()
-		im.Text("%d:", i)
+		widgets.textf("%d:", i)
 		im.SameLine()
 		elem_ptr := rawptr(uintptr(da.data) + uintptr(i * elem_ti.size))
 		// The remove button and, with `expand` on the array field, the arrow
@@ -306,7 +307,7 @@ draw_array_element :: proc(ptr: rawptr, elem_tid: typeid, label: cstring, elem_o
 	}
 	elem_any := any{ptr, elem_tid}
 	c_str := strings.clone_to_cstring(fmt.tprintf("%s: %v", label, elem_any), context.temp_allocator)
-	im.Text(c_str)
+	im.TextUnformatted(c_str)
 	draw_field_context_menu(ptr, elem_tid)
 }
 

@@ -10,8 +10,8 @@ package engine
 // so the next draw re-registers from the fresh artifact.
 
 import gfx "gfx"
+import "base:runtime"
 import "core:encoding/uuid"
-import "core:os"
 import "core:strings"
 
 Shader_Runtime :: struct {
@@ -33,8 +33,9 @@ _shader_cache_ready: bool
 @(private = "file") _shader_failed: map[Asset_GUID]bool
 
 shader_cache_init :: proc() {
-	shader_cache = make(map[Asset_GUID]Shader_Runtime)
-	_shader_failed = make(map[Asset_GUID]bool)
+	alloc := runtime.default_allocator()
+	shader_cache = make(map[Asset_GUID]Shader_Runtime, alloc)
+	_shader_failed = make(map[Asset_GUID]bool, alloc)
 	_shader_cache_ready = true
 }
 
@@ -50,15 +51,16 @@ shader_cache_shutdown :: proc() {
 }
 
 _shader_runtime_destroy :: proc(sr: ^Shader_Runtime) {
-	delete(sr.name)
+	alloc := runtime.default_allocator()
+	delete(sr.name, alloc)
 	for prop in sr.properties {
-		delete(prop.name)
+		delete(prop.name, alloc)
 	}
-	delete(sr.properties)
+	delete(sr.properties, alloc)
 	for tex in sr.textures {
-		delete(tex.name)
+		delete(tex.name, alloc)
 	}
-	delete(sr.textures)
+	delete(sr.textures, alloc)
 	sr^ = {}
 }
 
@@ -74,14 +76,15 @@ shader_load :: proc(guid: Asset_GUID) -> (^Shader_Runtime, bool) {
 	artifact := _artifact_path(uuid.Identifier(guid))
 	defer delete(artifact)
 
+	alloc := runtime.default_allocator()
 	header: Shader_Artifact_Header
 	spv, msl: []u8
 	properties: []Shader_Property
 	textures: []Shader_Texture
 	parse_ok := false
-	blob, read_err := os.read_entire_file(artifact, context.temp_allocator)
+	blob, read_err := vfs_read_entire_file(artifact, context.temp_allocator)
 	if read_err == nil {
-		header, spv, msl, properties, textures, parse_ok = _shader_artifact_parse(blob)
+		header, spv, msl, properties, textures, parse_ok = _shader_artifact_parse(blob, alloc)
 	}
 	if !parse_ok {
 		// Artifact missing (fresh clone, cleaned library/) or stale (format
@@ -92,12 +95,12 @@ shader_load :: proc(guid: Asset_GUID) -> (^Shader_Runtime, bool) {
 			_shader_failed[guid] = true
 			return nil, false
 		}
-		blob, read_err = os.read_entire_file(artifact, context.temp_allocator)
+		blob, read_err = vfs_read_entire_file(artifact, context.temp_allocator)
 		if read_err != nil {
 			_shader_failed[guid] = true
 			return nil, false
 		}
-		header, spv, msl, properties, textures, parse_ok = _shader_artifact_parse(blob)
+		header, spv, msl, properties, textures, parse_ok = _shader_artifact_parse(blob, alloc)
 		if !parse_ok {
 			_shader_failed[guid] = true
 			return nil, false
@@ -108,16 +111,16 @@ shader_load :: proc(guid: Asset_GUID) -> (^Shader_Runtime, bool) {
 	// A leftover registration (cache cleared without unregister) is reused.
 	if !gfx.shader_exists(guid_str) {
 		if !gfx.shader_register_fragment(guid_str, spv, msl, header.num_samplers, header.num_uniform_buffers) {
-			for prop in properties do delete(prop.name)
-			delete(properties)
-			for tex in textures do delete(tex.name)
-			delete(textures)
+			for prop in properties do delete(prop.name, alloc)
+			delete(properties, alloc)
+			for tex in textures do delete(tex.name, alloc)
+			delete(textures, alloc)
 			_shader_failed[guid] = true
 			return nil, false
 		}
 	}
 	shader_cache[guid] = Shader_Runtime{
-		name         = strings.clone(guid_str),
+		name         = strings.clone(guid_str, alloc),
 		block_size   = header.block_size,
 		num_samplers = header.num_samplers,
 		properties   = properties,

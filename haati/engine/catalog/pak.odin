@@ -1,7 +1,10 @@
 package catalog
 
 import "base:runtime"
+import "core:encoding/endian"
 import "core:fmt"
+import "core:hash"
+import "core:io"
 import "core:os"
 import "core:path/filepath"
 import "core:slice"
@@ -10,6 +13,7 @@ import "core:strings"
 PAK_MAGIC   :: "MHPAK001"
 PAK_VERSION :: u32(1)
 _PAK_HEADER_SIZE :: 24
+PAK_STREAM_CHUNK_BYTES :: 256 * 1024
 
 Pak_Entry :: struct {
 	path:    string,
@@ -19,66 +23,55 @@ Pak_Entry :: struct {
 }
 
 Pak_Archive :: struct {
-	data:    []u8,
-	entries: map[string]Pak_Entry,
-	alloc:   runtime.Allocator,
+	file:      ^os.File,
+	file_size: u64,
+	entries:   map[string]Pak_Entry,
+	alloc:     runtime.Allocator,
 }
 
 pak_fnv1a64 :: proc(bytes: []u8) -> u64 {
-	h := u64(0xcbf29ce484222325)
-	for b in bytes {
-		h ~= u64(b)
-		h *= u64(0x100000001b3)
+	return hash.fnv64a(bytes)
+}
+
+@(private = "file")
+_pak_write_all :: proc(f: ^os.File, data: []u8) -> bool {
+	written := 0
+	for written < len(data) {
+		n, err := os.write(f, data[written:])
+		if err != nil || n <= 0 do return false
+		written += n
 	}
-	return h
+	return true
 }
 
 @(private = "file")
-_put_u16le :: #force_inline proc(dst: []u8, v: u16) {
-	dst[0] = u8(v)
-	dst[1] = u8(v >> 8)
+_pak_write_at_all :: proc(f: ^os.File, data: []u8, offset: i64) -> bool {
+	written := 0
+	for written < len(data) {
+		n, err := os.write_at(f, data[written:], offset + i64(written))
+		if err != nil || n <= 0 do return false
+		written += n
+	}
+	return true
 }
 
 @(private = "file")
-_put_u32le :: #force_inline proc(dst: []u8, v: u32) {
-	dst[0] = u8(v)
-	dst[1] = u8(v >> 8)
-	dst[2] = u8(v >> 16)
-	dst[3] = u8(v >> 24)
-}
-
-@(private = "file")
-_put_u64le :: #force_inline proc(dst: []u8, v: u64) {
-	dst[0] = u8(v)
-	dst[1] = u8(v >> 8)
-	dst[2] = u8(v >> 16)
-	dst[3] = u8(v >> 24)
-	dst[4] = u8(v >> 32)
-	dst[5] = u8(v >> 40)
-	dst[6] = u8(v >> 48)
-	dst[7] = u8(v >> 56)
-}
-
-@(private = "file")
-_get_u16le :: #force_inline proc(src: []u8) -> u16 {
-	return u16(src[0]) | (u16(src[1]) << 8)
-}
-
-@(private = "file")
-_get_u32le :: #force_inline proc(src: []u8) -> u32 {
-	return u32(src[0]) | (u32(src[1]) << 8) | (u32(src[2]) << 16) | (u32(src[3]) << 24)
-}
-
-@(private = "file")
-_get_u64le :: #force_inline proc(src: []u8) -> u64 {
-	return u64(src[0]) |
-		(u64(src[1]) << 8) |
-		(u64(src[2]) << 16) |
-		(u64(src[3]) << 24) |
-		(u64(src[4]) << 32) |
-		(u64(src[5]) << 40) |
-		(u64(src[6]) << 48) |
-		(u64(src[7]) << 56)
+_pak_read_at_all :: proc(f: ^os.File, dst: []u8, offset: i64) -> bool {
+	got := 0
+	for got < len(dst) {
+		n, err := os.read_at(f, dst[got:], offset + i64(got))
+		if n > 0 {
+			got += n
+		}
+		if err != nil {
+			if got == len(dst) && err == io.Error.EOF {
+				return true
+			}
+			return false
+		}
+		if n <= 0 do return false
+	}
+	return true
 }
 
 @(private = "file")
@@ -125,7 +118,7 @@ _collect_files :: proc(root_dir: string, rel_prefix: string, out: ^[dynamic]stri
 	return true
 }
 
-// Packs all regular files under `src_dir` into a deterministic `MHPAK001` archive at `out_pak_path`.
+// Packs all regular files under `src_dir` into a deterministic `MHPAK001` archive via fixed-buffer streaming.
 pak_pack_directory :: proc(src_dir: string, out_pak_path: string) -> (count: int, ok: bool) {
 	if src_dir == "" || out_pak_path == "" || !os.is_dir(src_dir) {
 		return 0, false
@@ -152,111 +145,199 @@ pak_pack_directory :: proc(src_dir: string, out_pak_path: string) -> (count: int
 	metas := make([dynamic]_Packed_Meta, 0, len(paths), alloc)
 	defer delete(metas)
 
-	buf := make([dynamic]u8, _PAK_HEADER_SIZE, 4096, alloc)
-	defer delete(buf)
+	norm_out, _ := strings.replace_all(out_pak_path, "\\", "/", context.temp_allocator)
+	ensure_parent_dirs(norm_out)
 
-	for p in paths {
-		if len(p) > int(max(u16)) do return 0, false
-		full := strings.concatenate({src_dir, "/", p}, context.temp_allocator)
-		fbytes, ferr := os.read_entire_file(full, alloc)
-		if ferr != nil do return 0, false
-		defer delete(fbytes, alloc)
-
-		off := u64(len(buf))
-		sz := u64(len(fbytes))
-		hash := pak_fnv1a64(fbytes)
-		append(&metas, _Packed_Meta{
-			path    = p,
-			offset  = off,
-			size    = sz,
-			fnv1a64 = hash,
-		})
-		if len(fbytes) > 0 {
-			append(&buf, ..fbytes)
+	out_f, oerr := os.create(out_pak_path)
+	if oerr != nil {
+		return 0, false
+	}
+	pack_ok := false
+	defer {
+		if out_f != nil {
+			os.close(out_f)
+		}
+		if !pack_ok {
+			_ = os.remove(out_pak_path)
 		}
 	}
 
-	toc_offset := u64(len(buf))
-
-	// Write header.
-	copy(buf[0:8], PAK_MAGIC)
-	_put_u32le(buf[8:12], PAK_VERSION)
-	_put_u32le(buf[12:16], u32(len(metas)))
-	_put_u64le(buf[16:24], toc_offset)
-
-	// Append TOC entries.
-	for m in metas {
-		plen := u16(len(m.path))
-		start := len(buf)
-		resize(&buf, start + 2 + int(plen) + 24)
-		_put_u16le(buf[start : start+2], plen)
-		copy(buf[start+2 : start+2+int(plen)], m.path)
-		meta_off := start + 2 + int(plen)
-		_put_u64le(buf[meta_off : meta_off+8], m.offset)
-		_put_u64le(buf[meta_off+8 : meta_off+16], m.size)
-		_put_u64le(buf[meta_off+16 : meta_off+24], m.fnv1a64)
-	}
-
-	norm_out, _ := strings.replace_all(out_pak_path, "\\", "/", context.temp_allocator)
-	ensure_parent_dirs(norm_out)
-	if os.write_entire_file(out_pak_path, buf[:]) != nil {
+	zero_hdr: [_PAK_HEADER_SIZE]u8
+	if !_pak_write_all(out_f, zero_hdr[:]) {
 		return 0, false
 	}
+
+	chunk := make([]u8, PAK_STREAM_CHUNK_BYTES, alloc)
+	defer delete(chunk, alloc)
+
+	cursor := u64(_PAK_HEADER_SIZE)
+	for p in paths {
+		if len(p) > int(max(u16)) do return 0, false
+		full := strings.concatenate({src_dir, "/", p}, context.temp_allocator)
+		sf, serr := os.open(full)
+		if serr != nil do return 0, false
+
+		fsz_i64, sz_err := os.file_size(sf)
+		if sz_err != nil || fsz_i64 < 0 {
+			os.close(sf)
+			return 0, false
+		}
+
+		h := u64(0xcbf29ce484222325)
+		written_sz := u64(0)
+		stream_ok := true
+		for {
+			r, rerr := os.read(sf, chunk)
+			if r > 0 {
+				h = hash.fnv64a(chunk[:r], h)
+				if !_pak_write_all(out_f, chunk[:r]) {
+					stream_ok = false
+					break
+				}
+				written_sz += u64(r)
+			}
+			if rerr != nil {
+				if rerr != io.Error.EOF {
+					stream_ok = false
+				}
+				break
+			}
+			if r == 0 do break
+		}
+		os.close(sf)
+
+		if !stream_ok || written_sz != u64(fsz_i64) {
+			return 0, false
+		}
+
+		append(&metas, _Packed_Meta{
+			path    = p,
+			offset  = cursor,
+			size    = written_sz,
+			fnv1a64 = h,
+		})
+		cursor += written_sz
+	}
+
+	toc_offset := cursor
+
+	// Serialize and stream TOC entries.
+	toc_buf := make([dynamic]u8, 0, len(metas) * 64 + 64, alloc)
+	defer delete(toc_buf)
+	for m in metas {
+		plen := u16(len(m.path))
+		start := len(toc_buf)
+		resize(&toc_buf, start + 2 + int(plen) + 24)
+		endian.unchecked_put_u16le(toc_buf[start : start+2], plen)
+		copy(toc_buf[start+2 : start+2+int(plen)], m.path)
+		meta_off := start + 2 + int(plen)
+		endian.unchecked_put_u64le(toc_buf[meta_off : meta_off+8], m.offset)
+		endian.unchecked_put_u64le(toc_buf[meta_off+8 : meta_off+16], m.size)
+		endian.unchecked_put_u64le(toc_buf[meta_off+16 : meta_off+24], m.fnv1a64)
+	}
+	if len(toc_buf) > 0 && !_pak_write_all(out_f, toc_buf[:]) {
+		return 0, false
+	}
+
+	// Patch final header at offset 0.
+	hdr: [_PAK_HEADER_SIZE]u8
+	copy(hdr[0:8], PAK_MAGIC)
+	endian.unchecked_put_u32le(hdr[8:12], PAK_VERSION)
+	endian.unchecked_put_u32le(hdr[12:16], u32(len(metas)))
+	endian.unchecked_put_u64le(hdr[16:24], toc_offset)
+	if !_pak_write_at_all(out_f, hdr[:], 0) {
+		return 0, false
+	}
+
+	cerr := os.close(out_f)
+	out_f = nil
+	if cerr != nil {
+		return 0, false
+	}
+	pack_ok = true
 	return len(metas), true
 }
 
 pak_open :: proc(pak_path: string, allocator := context.allocator) -> (ar: Pak_Archive, ok: bool) {
-	data, err := os.read_entire_file(pak_path, allocator)
+	f, err := os.open(pak_path)
 	if err != nil do return {}, false
 
-	cleanup_fail := proc(data: []u8, entries: ^map[string]Pak_Entry, alloc: runtime.Allocator) {
-		for k in entries^ do delete(k, alloc)
-		delete(entries^)
-		delete(data, alloc)
+	fsz_i64, serr := os.file_size(f)
+	if serr != nil || fsz_i64 < _PAK_HEADER_SIZE {
+		os.close(f)
+		return {}, false
+	}
+	fsz := u64(fsz_i64)
+
+	hdr: [_PAK_HEADER_SIZE]u8
+	if !_pak_read_at_all(f, hdr[:], 0) {
+		os.close(f)
+		return {}, false
+	}
+	if string(hdr[0:8]) != PAK_MAGIC {
+		os.close(f)
+		return {}, false
+	}
+	ver := endian.unchecked_get_u32le(hdr[8:12])
+	if ver != PAK_VERSION {
+		os.close(f)
+		return {}, false
+	}
+	entry_count := endian.unchecked_get_u32le(hdr[12:16])
+	toc_offset := endian.unchecked_get_u64le(hdr[16:24])
+	if toc_offset < _PAK_HEADER_SIZE || toc_offset > fsz {
+		os.close(f)
+		return {}, false
+	}
+	if u64(entry_count) > (fsz - toc_offset) / 26 {
+		os.close(f)
+		return {}, false
 	}
 
-	if len(data) < _PAK_HEADER_SIZE {
-		delete(data, allocator)
+	toc_size := fsz - toc_offset
+	if toc_size > u64(max(int)) {
+		os.close(f)
 		return {}, false
 	}
-	if string(data[0:8]) != PAK_MAGIC {
-		delete(data, allocator)
+	toc_bytes := make([]u8, int(toc_size), allocator)
+	defer delete(toc_bytes, allocator)
+	if len(toc_bytes) > 0 && !_pak_read_at_all(f, toc_bytes, i64(toc_offset)) {
+		os.close(f)
 		return {}, false
 	}
-	ver := _get_u32le(data[8:12])
-	if ver != PAK_VERSION {
-		delete(data, allocator)
-		return {}, false
-	}
-	entry_count := _get_u32le(data[12:16])
-	toc_offset := _get_u64le(data[16:24])
-	if toc_offset < _PAK_HEADER_SIZE || toc_offset > u64(len(data)) {
-		delete(data, allocator)
-		return {}, false
+
+	cleanup_fail := proc(f: ^os.File, entries: ^map[string]Pak_Entry, alloc: runtime.Allocator) {
+		for k in entries^ do delete(k, alloc)
+		delete(entries^)
+		os.close(f)
 	}
 
 	entries := make(map[string]Pak_Entry, int(entry_count), allocator)
-	cursor := int(toc_offset)
+	cursor := 0
 	for _ in 0 ..< entry_count {
-		if cursor + 2 > len(data) {
-			cleanup_fail(data, &entries, allocator)
+		if len(toc_bytes) - cursor < 2 {
+			cleanup_fail(f, &entries, allocator)
 			return {}, false
 		}
-		plen := int(_get_u16le(data[cursor : cursor+2]))
+		plen := int(endian.unchecked_get_u16le(toc_bytes[cursor : cursor+2]))
 		cursor += 2
-		if cursor + plen + 24 > len(data) {
-			cleanup_fail(data, &entries, allocator)
+		if len(toc_bytes) - cursor < plen + 24 {
+			cleanup_fail(f, &entries, allocator)
 			return {}, false
 		}
-		raw_path := string(data[cursor : cursor+plen])
+		raw_path := string(toc_bytes[cursor : cursor+plen])
 		cursor += plen
-		off := _get_u64le(data[cursor : cursor+8])
-		sz  := _get_u64le(data[cursor+8 : cursor+16])
-		h   := _get_u64le(data[cursor+16 : cursor+24])
+		off := endian.unchecked_get_u64le(toc_bytes[cursor : cursor+8])
+		sz  := endian.unchecked_get_u64le(toc_bytes[cursor+8 : cursor+16])
+		h   := endian.unchecked_get_u64le(toc_bytes[cursor+16 : cursor+24])
 		cursor += 24
 
-		if off < _PAK_HEADER_SIZE || sz > toc_offset || off + sz > toc_offset {
-			cleanup_fail(data, &entries, allocator)
+		if !_is_safe_rel_path(raw_path) || raw_path in entries {
+			cleanup_fail(f, &entries, allocator)
+			return {}, false
+		}
+		if off < _PAK_HEADER_SIZE || sz > toc_offset || off > toc_offset - sz {
+			cleanup_fail(f, &entries, allocator)
 			return {}, false
 		}
 		p_clone := strings.clone(raw_path, allocator)
@@ -269,9 +350,10 @@ pak_open :: proc(pak_path: string, allocator := context.allocator) -> (ar: Pak_A
 	}
 
 	ar = Pak_Archive{
-		data    = data,
-		entries = entries,
-		alloc   = allocator,
+		file      = f,
+		file_size = fsz,
+		entries   = entries,
+		alloc     = allocator,
 	}
 	return ar, true
 }
@@ -283,30 +365,36 @@ pak_close :: proc(ar: ^Pak_Archive) {
 		delete(k, alloc)
 	}
 	delete(ar.entries)
-	if ar.data != nil {
-		delete(ar.data, alloc)
+	if ar.file != nil {
+		os.close(ar.file)
 	}
 	ar^ = {}
 }
 
 pak_read_entry :: proc(ar: ^Pak_Archive, rel_path: string, allocator := context.temp_allocator) -> (bytes: []u8, ok: bool) {
-	if ar == nil || len(ar.data) == 0 do return nil, false
+	if ar == nil || ar.file == nil do return nil, false
 	norm := _normalize_rel_path(rel_path, context.temp_allocator)
 	entry, has := ar.entries[norm]
 	if !has do return nil, false
 
-	end := entry.offset + entry.size
-	if end > u64(len(ar.data)) || entry.offset > end do return nil, false
-
-	payload := ar.data[entry.offset:end]
-	if pak_fnv1a64(payload) != entry.fnv1a64 do return nil, false
+	if entry.offset > ar.file_size || entry.size > ar.file_size - entry.offset do return nil, false
+	if entry.size > u64(max(int)) do return nil, false
 
 	if entry.size == 0 {
+		if pak_fnv1a64(nil) != entry.fnv1a64 do return nil, false
 		out := make([]u8, 0, allocator)
 		return out, true
 	}
+
 	out := make([]u8, int(entry.size), allocator)
-	copy(out, payload)
+	if !_pak_read_at_all(ar.file, out, i64(entry.offset)) {
+		delete(out, allocator)
+		return nil, false
+	}
+	if pak_fnv1a64(out) != entry.fnv1a64 {
+		delete(out, allocator)
+		return nil, false
+	}
 	return out, true
 }
 
@@ -320,18 +408,17 @@ pak_extract_directory :: proc(pak_path: string, dst_dir: string, allocator := co
 		norm := _normalize_rel_path(entry.path, context.temp_allocator)
 		if !_is_safe_rel_path(norm) do return false
 
-		end := entry.offset + entry.size
-		if end > u64(len(ar.data)) || entry.offset > end do return false
-
-		payload := ar.data[entry.offset:end]
-		if pak_fnv1a64(payload) != entry.fnv1a64 do return false
+		payload, rok := pak_read_entry(&ar, norm, allocator)
+		if !rok do return false
 
 		out_file := strings.concatenate({dst_dir, "/", norm}, context.temp_allocator)
 		parent := filepath.dir(out_file)
 		if parent != "" && parent != "." {
 			_ = os.make_directory_all(parent)
 		}
-		if os.write_entire_file(out_file, payload) != nil {
+		werr := os.write_entire_file(out_file, payload)
+		delete(payload, allocator)
+		if werr != nil {
 			return false
 		}
 	}

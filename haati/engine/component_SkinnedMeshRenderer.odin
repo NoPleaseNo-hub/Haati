@@ -114,14 +114,7 @@ skinned_mesh_rebind :: proc(smr: ^SkinnedMeshRenderer) {
 // Depth-first search for a transform by name.
 @(private = "file")
 _bone_by_name :: proc(h: Transform_Handle, name: string) -> (Transform_Handle, bool) {
-    w := ctx_world()
-    t := pool_get(&w.transforms, Handle(h))
-    if t == nil do return {}, false
-    if t.name == name do return h, true
-    for ch in t.children {
-        if got, ok := _bone_by_name(Transform_Handle(ch.handle), name); ok do return got, true
-    }
-    return {}, false
+    return transform_find_descendant_by_name(h, name)
 }
 
 // Builds a flat pre-order name->Transform_Handle table in O(N) so _skin_bind resolves

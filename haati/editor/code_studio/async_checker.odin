@@ -18,8 +18,6 @@ import "base:runtime"
 import "core:encoding/json"
 import "core:fmt"
 import "core:mem"
-import "core:odin/ast"
-import "core:odin/parser"
 import "core:odin/tokenizer"
 import "core:os"
 import "core:path/filepath"
@@ -29,8 +27,27 @@ import "core:thread"
 import "core:time"
 import "haati:engine"
 
-SYNTAX_DEBOUNCE_MS :: 180
-TYPECHECK_IDLE_MS  :: 600
+DEFAULT_PROBLEM_CHECK_DELAY_MS :: i64(900)
+
+@(private = "file")
+_problem_check_delay_ms: i64 = DEFAULT_PROBLEM_CHECK_DELAY_MS
+
+// Configures the repeatable idle delay (in seconds) waited after the last sequential
+// keypress before running syntax/typecheck diagnostics. Clamped to [0.15s, 5.00s].
+set_problem_check_delay_sec :: proc(sec: f32) {
+	ms := clamp(i64(sec * 1000.0 + 0.5), 150, 5000)
+	sync.atomic_store(&_problem_check_delay_ms, ms)
+}
+
+get_problem_check_delay_sec :: proc() -> f32 {
+	ms := clamp(sync.atomic_load(&_problem_check_delay_ms), 150, 5000)
+	return f32(ms) / 1000.0
+}
+
+@(private = "file")
+_get_problem_delay_ms :: proc() -> f64 {
+	return f64(clamp(sync.atomic_load(&_problem_check_delay_ms), 150, 5000))
+}
 
 Check_Stage :: enum u8 {
 	Idle            = 0,
@@ -120,7 +137,9 @@ _stage_a_line_offset: int
 
 @(private = "file")
 _stage_a_err_cb :: proc(pos: tokenizer.Pos, msg_fmt: string, args: ..any) {
+	prev_alloc := context.allocator
 	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev_alloc
 	if len(_stage_a_diags) >= 24 do return
 	adj_line := max(pos.line - _stage_a_line_offset, 1)
 	formatted := fmt.aprintf(msg_fmt, ..args)
@@ -143,51 +162,33 @@ check_odin_syntax_in_ram :: proc(code: string, is_scoped_body: bool, allocator :
 	mem.dynamic_arena_init(&arena)
 	defer mem.dynamic_arena_destroy(&arena)
 
-	wrapped: string
-	line_off := 0
-	if is_scoped_body {
-		// Wrap the scoped node body in a valid dummy package + proc so `core:odin/parser`
-		// validates statements, braces, expressions, and local declarations cleanly!
-		wrapped = strings.concatenate({"package _mh_scoped_check\n_mh_body :: proc() {\n", code, "\n}\n"}, mem.dynamic_arena_allocator(&arena))
-		line_off = 2
-	} else {
-		wrapped = code
-		line_off = 0
-	}
-
-	// Guard shared callback scratch under `_chk.mu` if worker is active, or run directly.
+	// Guard shared callback scratch under `_chk.mu` across worker and callers.
 	local_out := make([dynamic]Studio_Diagnostic, 0, 8, allocator)
 	{
-		context.allocator = mem.dynamic_arena_allocator(&arena)
-		_stage_a_line_offset = line_off
-		clear(&_stage_a_diags)
-
-		f := ast.File{
-			src      = wrapped,
-			fullpath = "in_ram_buffer.odin",
+		sync.mutex_lock(&_chk.mu)
+		defer sync.mutex_unlock(&_chk.mu)
+		{
+			context.allocator = mem.dynamic_arena_allocator(&arena)
+			_stage_a_line_offset = is_scoped_body ? 2 : 0
+			clear(&_stage_a_diags)
+			_, _, _ = parse_odin_in_arena(code, "in_ram_buffer.odin", is_scoped_body, &arena, _stage_a_err_cb)
 		}
-		p := parser.Parser{
-			err   = _stage_a_err_cb,
-			warn  = nil,
-			flags = {.Optional_Semicolons},
-		}
-		_ = parser.parse_file(&p, &f)
-	}
 
-	for d in _stage_a_diags {
-		append(&local_out, Studio_Diagnostic{
-			file       = strings.clone(d.file, allocator),
-			line       = d.line,
-			column     = d.column,
-			end_column = d.end_column,
-			is_warning = d.is_warning,
-			message    = strings.clone(d.message, allocator),
-		})
-		delete(d.file, runtime.default_allocator())
-		delete(d.message, runtime.default_allocator())
+		for d in _stage_a_diags {
+			append(&local_out, Studio_Diagnostic{
+				file       = strings.clone(d.file, allocator),
+				line       = d.line,
+				column     = d.column,
+				end_column = d.end_column,
+				is_warning = d.is_warning,
+				message    = strings.clone(d.message, allocator),
+			})
+			delete(d.file, runtime.default_allocator())
+			delete(d.message, runtime.default_allocator())
+		}
+		delete(_stage_a_diags)
+		_stage_a_diags = {}
 	}
-	delete(_stage_a_diags)
-	_stage_a_diags = {}
 
 	ms := f32(time.duration_milliseconds(time.tick_since(t0)))
 	return local_out[:], ms
@@ -247,6 +248,7 @@ _worker_proc :: proc(_t: ^thread.Thread) {
 	last_syntax_rev:   u64 = 0
 	last_compiler_rev: u64 = 0
 	last_syntax_ok:    bool = true
+	run_seq:           u64 = 0
 
 	for {
 		sync.mutex_lock(&_chk.mu)
@@ -267,10 +269,11 @@ _worker_proc :: proc(_t: ^thread.Thread) {
 		force_now   := _chk.req_force_stage_b
 		has_pkg     := _chk.req_pkg_dir != ""
 		elapsed_ms  := time.duration_milliseconds(time.tick_since(edit_tick))
+		delay_ms    := _get_problem_delay_ms()
 
-		// Throttle / Debounce: rest gently without spinning!
-		if cur_rev > last_syntax_rev && !force_now && elapsed_ms < SYNTAX_DEBOUNCE_MS {
-			wait_dur := time.Duration(SYNTAX_DEBOUNCE_MS - elapsed_ms + 5) * time.Millisecond
+		// Repeatable debounce: resets on every sequential keypress so red warnings never flash mid-typing.
+		if cur_rev > last_syntax_rev && !force_now && elapsed_ms < delay_ms {
+			wait_dur := time.Duration(delay_ms - elapsed_ms + 10) * time.Millisecond
 			_ = sync.cond_wait_with_timeout(&_chk.cv, &_chk.mu, wait_dur)
 			sync.mutex_unlock(&_chk.mu)
 			continue
@@ -318,31 +321,52 @@ _worker_proc :: proc(_t: ^thread.Thread) {
 
 		// --- STAGE B: Single-Flight Coalesced `odin check -json-errors` ---
 		if last_syntax_ok && has_pkg && (force_now || cur_rev > last_compiler_rev) {
-			if !force_now && elapsed_ms < TYPECHECK_IDLE_MS {
-				wait_dur := time.Duration(TYPECHECK_IDLE_MS - elapsed_ms + 10) * time.Millisecond
+			if !force_now && elapsed_ms < delay_ms {
+				wait_dur := time.Duration(delay_ms - elapsed_ms + 10) * time.Millisecond
 				_ = sync.cond_wait_with_timeout(&_chk.cv, &_chk.mu, wait_dur)
 				sync.mutex_unlock(&_chk.mu)
 				continue
 			}
 
 			pkg_dir := strings.clone(_chk.req_pkg_dir, context.temp_allocator)
+			eng_root := engine.engine_root(context.temp_allocator)
+			if eng_root == "" {
+				eng_root = engine.resolve_repo_root(context.temp_allocator)
+			}
+			abs_pkg_dir := pkg_dir
+			if !filepath.is_abs(pkg_dir) {
+				abs_pkg_dir, _ = filepath.join({eng_root, pkg_dir}, context.temp_allocator)
+			}
+			if strings.contains(pkg_dir, "assets/scripts") || strings.contains(pkg_dir, "assets\\scripts") || !os.is_dir(abs_pkg_dir) {
+				_chk.req_force_stage_b = false
+				last_compiler_rev = cur_rev
+				sync.mutex_unlock(&_chk.mu)
+				free_all(context.temp_allocator)
+				continue
+			}
+
 			_chk.req_force_stage_b = false
 			_chk.pub_stage         = .Running_Compiler
 			_set_pub_summary_locked("Typechecking (no build)...")
 			sync.mutex_unlock(&_chk.mu)
 
+			run_seq += 1
 			t_comp := time.tick_now()
-			repo_root := engine.resolve_repo_root(context.temp_allocator)
+			repo_root := eng_root
 			odin_exe  := engine.resolve_odin_binary(context.temp_allocator)
 			builds_d, _ := filepath.join({repo_root, "builds"}, context.temp_allocator)
 			_ = os.make_directory_all(builds_d)
-			json_out_path, _ := filepath.join({repo_root, "builds/_studio_check_json.tmp"}, context.temp_allocator)
+			json_out_path, _ := filepath.join({repo_root, fmt.tprintf("builds/_studio_check_%d_%d.tmp", os.get_pid(), run_seq)}, context.temp_allocator)
 
 			cmd := make([dynamic]string, context.temp_allocator)
 			if pkg_dir == "haati/editor" {
 				append(&cmd, odin_exe, "check", "haati/editor", "-collection:haati=haati", "-collection:moonhug=haati", "-ignore-unknown-attributes", "-vet-unused", "-json-errors")
 			} else {
-				append(&cmd, odin_exe, "check", pkg_dir, "-no-entry-point", "-collection:haati=haati", "-collection:moonhug=haati", "-ignore-unknown-attributes", "-json-errors")
+				append(&cmd, odin_exe, "check", pkg_dir, "-no-entry-point", "-collection:haati=haati", "-collection:moonhug=haati")
+				if proj_root := engine.active_project_root(); proj_root != "" {
+					append(&cmd, fmt.tprintf("-collection:project=%s", proj_root))
+				}
+				append(&cmd, "-ignore-unknown-attributes", "-json-errors")
 			}
 
 			comp_diags: []Studio_Diagnostic = nil
@@ -396,6 +420,20 @@ ensure_checker_started :: proc() {
 	sync.mutex_lock(&_chk.mu)
 	defer sync.mutex_unlock(&_chk.mu)
 	if _chk.started do return
+	// Sweep stale temp diagnostics from previous crashed sessions for this repo.
+	repo_root := engine.resolve_repo_root(context.temp_allocator)
+	builds_d, _ := filepath.join({repo_root, "builds"}, context.temp_allocator)
+	if dh, derr := os.open(builds_d); derr == nil {
+		if entries, rerr := os.read_dir(dh, -1, context.temp_allocator); rerr == nil {
+			for e in entries {
+				if e.type == .Regular && strings.has_prefix(e.name, "_studio_check_") && strings.has_suffix(e.name, ".tmp") {
+					full, _ := filepath.join({builds_d, e.name}, context.temp_allocator)
+					_ = os.remove(full)
+				}
+			}
+		}
+		os.close(dh)
+	}
 	context.allocator = runtime.default_allocator()
 	_chk.started        = true
 	_chk.stop_requested = false
@@ -457,6 +495,7 @@ submit_async_check :: proc(code: string, is_scoped_body: bool, pkg_dir: string =
 	_chk.req_revision     += 1
 	_chk.req_edit_tick     = time.tick_now()
 	_chk.pub_stage         = .Pending_Syntax
+	_set_pub_summary_locked("Typing... (checking after idle)")
 	sync.cond_signal(&_chk.cv)
 }
 
@@ -467,6 +506,17 @@ read_checker_snapshot :: proc(allocator := context.temp_allocator) -> Checker_Sn
 	}
 	sync.mutex_lock(&_chk.mu)
 	defer sync.mutex_unlock(&_chk.mu)
+
+	if _chk.pub_stage == .Pending_Syntax {
+		return Checker_Snapshot{
+			stage         = .Pending_Syntax,
+			revision      = _chk.pub_revision,
+			syntax_ms     = _chk.pub_syntax_ms,
+			compiler_ms   = _chk.pub_compiler_ms,
+			diagnostics   = nil,
+			summary_label = strings.clone("Typing... (waiting to check)", allocator),
+		}
+	}
 
 	diags_out := make([]Studio_Diagnostic, len(_chk.pub_diags), allocator)
 	for d, i in _chk.pub_diags {

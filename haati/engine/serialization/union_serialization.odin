@@ -1,5 +1,6 @@
 package serialization
 
+import "base:runtime"
 import "core:reflect"
 import "core:encoding/json"
 import "core:encoding/uuid"
@@ -21,10 +22,8 @@ asset_guid_marshal :: proc(w: io.Stream, v: any, opt: ^json.Marshal_Options) -> 
 	return nil
 }
 
-asset_guid_unmarshal :: proc(p: ^json.Parser, v: any) -> json.Unmarshal_Error {
-	val, parse_err := json.parse_value(p)
-	if parse_err != nil do return parse_err
-	defer json.destroy_value(val)
+asset_guid_from_value :: proc(val: json.Value, v: any, allocator: runtime.Allocator) -> json.Unmarshal_Error {
+	_ = allocator
 	#partial switch tv in val {
 	case json.Null:
 		(cast(^engine.Asset_GUID)v.data)^ = {}
@@ -91,6 +90,13 @@ asset_guid_unmarshal :: proc(p: ^json.Parser, v: any) -> json.Unmarshal_Error {
 	return json.Unmarshal_Data_Error.Invalid_Data
 }
 
+asset_guid_unmarshal :: proc(p: ^json.Parser, v: any) -> json.Unmarshal_Error {
+	val, parse_err := json.parse_value(p)
+	if parse_err != nil do return parse_err
+	defer json.destroy_value(val, p.allocator)
+	return asset_guid_from_value(val, v, p.allocator)
+}
+
 mat4_marshal :: proc(w: io.Stream, v: any, opt: ^json.Marshal_Options) -> json.Marshal_Error {
 	m := (cast(^matrix[4, 4]f32)v.data)^
 	flat := transmute([16]f32)m
@@ -98,10 +104,8 @@ mat4_marshal :: proc(w: io.Stream, v: any, opt: ^json.Marshal_Options) -> json.M
 	return nil
 }
 
-mat4_unmarshal :: proc(p: ^json.Parser, v: any) -> json.Unmarshal_Error {
-	val, parse_err := json.parse_value(p)
-	if parse_err != nil do return parse_err
-	defer json.destroy_value(val)
+mat4_from_value :: proc(val: json.Value, v: any, allocator: runtime.Allocator) -> json.Unmarshal_Error {
+	_ = allocator
 	#partial switch tv in val {
 	case json.Null:
 		(cast(^matrix[4, 4]f32)v.data)^ = {}
@@ -149,6 +153,13 @@ mat4_unmarshal :: proc(p: ^json.Parser, v: any) -> json.Unmarshal_Error {
 	return json.Unmarshal_Data_Error.Invalid_Data
 }
 
+mat4_unmarshal :: proc(p: ^json.Parser, v: any) -> json.Unmarshal_Error {
+	val, parse_err := json.parse_value(p)
+	if parse_err != nil do return parse_err
+	defer json.destroy_value(val, p.allocator)
+	return mat4_from_value(val, v, p.allocator)
+}
+
 union_marshal :: proc(w: io.Stream, v: any, opt: ^json.Marshal_Options) -> json.Marshal_Error {
     tid := reflect.union_variant_typeid(v)
     if tid == nil {
@@ -185,18 +196,11 @@ union_marshal :: proc(w: io.Stream, v: any, opt: ^json.Marshal_Options) -> json.
     return nil
 }
 
-union_unmarshal :: proc(p: ^json.Parser, v: any) -> json.Unmarshal_Error {
-    obj_val, parse_err := json.parse_value(p)
-    if parse_err != nil do return parse_err
-    defer json.destroy_value(obj_val)
-
-    // A nil union marshals to `null` (see union_marshal), so read it back as
-    // nil rather than failing. Every union serialized through here should be
-    // #no_nil — a nilable one whose value is nil would otherwise fail to
-    // parse, and the loader preserves the whole OWNING COMPONENT verbatim as
-    // an unknown component: the object reads "Missing Component" and its
-    // fields vanish, because one union had no variant set. Prefer an inert
-    // first variant (TweenNone/ScriptNone) to nil; this branch is the guard.
+union_from_value :: proc(obj_val: json.Value, v: any, allocator: runtime.Allocator) -> json.Unmarshal_Error {
+    if obj_val == nil {
+        reflect.set_union_variant_typeid(v, nil)
+        return nil
+    }
     if _, is_null := obj_val.(json.Null); is_null {
         reflect.set_union_variant_typeid(v, nil)
         return nil
@@ -219,24 +223,18 @@ union_unmarshal :: proc(p: ^json.Parser, v: any) -> json.Unmarshal_Error {
     if !known do return json.Unmarshal_Data_Error.Invalid_Data
 
     ti := type_info_of(tid)
-    // The variant's OWNED allocations (strings, arrays) go to
-    // context.allocator — the same owner every other component field gets
-    // (_ext_value_into unmarshals with it, and so does undo's apply). A
-    // forced default allocator here made union strings the one untracked
-    // kind: undo's cleanup then freed them through the debug build's
-    // tracking allocator, which panics on the unknown pointer.
-    variant_ptr, alloc_err := mem.alloc(ti.size, ti.align, context.allocator)
+    variant_ptr, alloc_err := mem.alloc(ti.size, ti.align, allocator)
     if alloc_err != nil do return json.Unmarshal_Data_Error.Invalid_Data
     mem.zero(variant_ptr, ti.size)
 
     _, ptr_tid_ok := engine.get_pointer_typeid_by_typeid(tid)
     if !ptr_tid_ok {
-        mem.free(variant_ptr, context.allocator)
+        mem.free(variant_ptr, allocator)
         return json.Unmarshal_Data_Error.Invalid_Data
     }
 
-    if uerr := engine.unmarshal_value_over_reset(root, variant_ptr, tid, allocator = context.allocator); uerr != nil {
-        mem.free(variant_ptr, context.allocator)
+    if uerr := engine.unmarshal_value_over_reset(root, variant_ptr, tid, allocator = allocator); uerr != nil {
+        mem.free(variant_ptr, allocator)
         return uerr
     }
 
@@ -244,7 +242,14 @@ union_unmarshal :: proc(p: ^json.Parser, v: any) -> json.Unmarshal_Error {
     engine.type_on_validate_by_typeid(tid, variant_ptr)
     mem.copy(v.data, variant_ptr, ti.size)
     reflect.set_union_variant_typeid(v, tid)
-    mem.free(variant_ptr, context.allocator)
+    mem.free(variant_ptr, allocator)
 
     return nil
+}
+
+union_unmarshal :: proc(p: ^json.Parser, v: any) -> json.Unmarshal_Error {
+    obj_val, parse_err := json.parse_value(p)
+    if parse_err != nil do return parse_err
+    defer json.destroy_value(obj_val, p.allocator)
+    return union_from_value(obj_val, v, p.allocator)
 }

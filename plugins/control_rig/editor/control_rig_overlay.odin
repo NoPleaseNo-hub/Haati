@@ -625,11 +625,11 @@ draw_control_rig_mode_overlay :: proc(vertical: bool) {
 
 				if sel_count == 1 {
 					for c in selected_rig_controls {
-						im.TextColored(pal.accent, fmt.ctprintf("%s", _get_control_display_name(c)))
+						im.TextColoredUnformatted(pal.accent, fmt.ctprintf("%s", _get_control_display_name(c)))
 						break
 					}
 				} else {
-					im.TextColored(pal.accent, fmt.ctprintf("%d Selected", sel_count))
+					im.TextColoredUnformatted(pal.accent, fmt.ctprintf("%d Selected", sel_count))
 				}
 
 				im.SameLine(0, 4)
@@ -675,7 +675,7 @@ draw_control_rig_mode_overlay :: proc(vertical: bool) {
 
 			im.SetNextWindowPos(vision_popup_pos, .Appearing)
 			if im.BeginPopup("##bone_vision_popup") {
-				im.TextColored({0.25, 0.85, 0.95, 1.0}, fmt.ctprintf("%s Bone Mode Vision & Display", icons.ICON_MD_VISIBILITY))
+				im.TextColoredUnformatted({0.25, 0.85, 0.95, 1.0}, fmt.ctprintf("%s Bone Mode Vision & Display", icons.ICON_MD_VISIBILITY))
 				im.Separator()
 
 				im.Checkbox("Show All Bone Names", &crig.skeleton_settings.show_bone_labels)
@@ -753,14 +753,14 @@ draw_control_rig_mode_overlay :: proc(vertical: bool) {
 						im.SameLine(0, 8)
 						im.TextColored({0.5, 0.6, 0.7, 0.6}, "|")
 						im.SameLine(0, 8)
-						im.TextColored({0.20, 0.85, 0.40, 1.00}, fmt.ctprintf("Bone: %s", bone_name))
+						im.TextColoredUnformatted({0.20, 0.85, 0.40, 1.00}, fmt.ctprintf("Bone: %s", bone_name))
 						break
 					}
 				}
 			}
 
 		case .Colliders:
-			im.TextColored({0.95, 0.60, 0.20, 1.00}, fmt.ctprintf("%s PhAT Colliders", icons.ICON_MD_CROP_FREE))
+			im.TextColoredUnformatted({0.95, 0.60, 0.20, 1.00}, fmt.ctprintf("%s PhAT Colliders", icons.ICON_MD_CROP_FREE))
 			im.SameLine(0, 8)
 			im.TextColored({0.5, 0.6, 0.7, 0.6}, "|")
 			im.SameLine(0, 8)
@@ -937,7 +937,7 @@ _draw_quick_rig_picker_popup_content :: proc(rig: ^crig.ControlRig, pal: thm.The
 	owner_h := engine.Transform_Handle(rig.owner)
 	ctrl_held := im.GetIO().KeyCtrl || im.GetIO().KeySuper
 
-	im.TextColored(pal.accent, fmt.ctprintf("%s Quick Control Picker", icons.ICON_MD_WIDGETS))
+	im.TextColoredUnformatted(pal.accent, fmt.ctprintf("%s Quick Control Picker", icons.ICON_MD_WIDGETS))
 	im.TextDisabled("Click to select (Ctrl+Click to multi-select)")
 	im.Separator()
 
@@ -1073,11 +1073,11 @@ draw_rig_control_inspector_floating :: proc(rig: ^crig.ControlRig) {
 		count := card(selected_rig_controls)
 		if count == 1 {
 			for c in selected_rig_controls {
-				im.TextColored(pal.accent, fmt.ctprintf("%s %s", icons.ICON_MD_TUNE, _get_control_display_name(c)))
+				im.TextColoredUnformatted(pal.accent, fmt.ctprintf("%s %s", icons.ICON_MD_TUNE, _get_control_display_name(c)))
 				break
 			}
 		} else {
-			im.TextColored(pal.accent, fmt.ctprintf("%s %d Controls Selected", icons.ICON_MD_TUNE, count))
+			im.TextColoredUnformatted(pal.accent, fmt.ctprintf("%s %d Controls Selected", icons.ICON_MD_TUNE, count))
 		}
 		im.Separator()
 
@@ -1619,7 +1619,7 @@ _draw_bones_left_toolbar :: proc(target_owner: engine.Transform_Handle, adm: ^cr
 			im.PushStyleVarImVec2(.ItemSpacing, {st.ItemSpacing.x * bones_toolbar_scale, st.ItemSpacing.y * bones_toolbar_scale})
 			im.PushStyleVarImVec2(.ItemInnerSpacing, {st.ItemInnerSpacing.x * bones_toolbar_scale, st.ItemInnerSpacing.y * bones_toolbar_scale})
 		}
-		im.TextColored({0.20, 0.85, 0.35, 1.0}, fmt.ctprintf("%s Skeleton & Rig Tools", icons.ICON_MD_ACCOUNT_TREE))
+		im.TextColoredUnformatted({0.20, 0.85, 0.35, 1.0}, fmt.ctprintf("%s Skeleton & Rig Tools", icons.ICON_MD_ACCOUNT_TREE))
 		im.Separator()
 
 		// 0. SKELETON MANAGEMENT
@@ -1659,7 +1659,7 @@ _draw_bones_left_toolbar :: proc(target_owner: engine.Transform_Handle, adm: ^cr
 		widgets.tooltip("Scans and cleans up any phantom/ghost bones that were left without matching transform entities.")
 
 		im.Separator()
-		im.TextColored({0.95, 0.72, 0.25, 1.0}, fmt.ctprintf("%s Smart Anatomy Auto-Tools (Ray-Traced)", icons.ICON_MD_TUNE))
+		im.TextColoredUnformatted({0.95, 0.72, 0.25, 1.0}, fmt.ctprintf("%s Smart Anatomy Auto-Tools (Ray-Traced)", icons.ICON_MD_TUNE))
 		im.Checkbox("Use Bone Heatmap Bounds##bone_hm_bounds", &crig.smart_rig_async_state.use_heatmap_bounds)
 		widgets.tooltip("Uses each bone's vertex skin weight heatmap (w >= 0.25) to determine where its collider starts, ends, and centers in volume before ray-tracing.")
 		im.Checkbox("Character Has Breasts", &crig.smart_rig_async_state.has_breasts)
@@ -1778,7 +1778,7 @@ _draw_bones_left_toolbar :: proc(target_owner: engine.Transform_Handle, adm: ^cr
 		}
 
 		if is_bone {
-			im.TextColored({0.20, 0.85, 0.40, 1.0}, fmt.ctprintf("%s %s", icons.ICON_MD_ACCOUNT_TREE, bone_name))
+			im.TextColoredUnformatted({0.20, 0.85, 0.40, 1.0}, fmt.ctprintf("%s %s", icons.ICON_MD_ACCOUNT_TREE, bone_name))
 			if is_custom {
 				im.SameLine(0, 6)
 				im.TextColored({0.25, 0.85, 0.95, 1.0}, "[Custom Bone]")
@@ -1805,8 +1805,8 @@ _draw_bones_left_toolbar :: proc(target_owner: engine.Transform_Handle, adm: ^cr
 
 			// Weight stats
 			cnt, max_w, avg_w := crig.armature_get_bone_weight_stats(adm, active_h)
-			im.TextColored({0.85, 0.85, 0.85, 1.0}, fmt.ctprintf("Influences %d vertices", cnt))
-			im.TextDisabled(fmt.ctprintf("Max Weight: %.2f | Avg: %.2f", max_w, avg_w))
+			im.TextColoredUnformatted({0.85, 0.85, 0.85, 1.0}, fmt.ctprintf("Influences %d vertices", cnt))
+			im.TextDisabledUnformatted(fmt.ctprintf("Max Weight: %.2f | Avg: %.2f", max_w, avg_w))
 
 			if im.Button(fmt.ctprintf("%s Reset Orientation", icons.ICON_MD_REFRESH)) {
 				sess := undo.edit_session_begin({undo.edit_target_whole(engine.Handle(active_h))}, "Reset Bone Orientation")
@@ -2099,7 +2099,7 @@ _draw_bones_left_toolbar :: proc(target_owner: engine.Transform_Handle, adm: ^cr
 			if p, pok := engine.asset_db_get_path(uuid.Identifier(nested_inst.source_prefab)); pok {
 				prefab_name = filepath.base(p)
 			}
-			im.TextColored({0.20, 0.85, 0.95, 1.0}, fmt.ctprintf("Prefab: %s (%d Overrides)", prefab_name, len(ov_entries)))
+			im.TextColoredUnformatted({0.20, 0.85, 0.95, 1.0}, fmt.ctprintf("Prefab: %s (%d Overrides)", prefab_name, len(ov_entries)))
 			if len(ov_entries) > 0 {
 				if im.Button(fmt.ctprintf("%s Save Overrides to Prefab", icons.ICON_MD_SAVE)) {
 					undo.apply_to_prefab(cur_scene, target_owner, nested_inst.source_prefab, ov_entries, nil)
@@ -2177,14 +2177,14 @@ _draw_skeleton_edits_file_ui :: proc(target_owner: engine.Transform_Handle, adm:
 		_refresh_skel_files_cache()
 	}
 
-	im.TextColored({0.20, 0.85, 0.95, 1.0}, fmt.ctprintf("%s Skeleton Presets (File Save / Load / Delete)", icons.ICON_MD_FOLDER_OPEN))
+	im.TextColoredUnformatted({0.20, 0.85, 0.95, 1.0}, fmt.ctprintf("%s Skeleton Presets (File Save / Load / Delete)", icons.ICON_MD_FOLDER_OPEN))
 	widgets.tooltip("Direct file-based skeleton presets saved as flat binary in assets/skeleton_edits/*.mhskel.\nStores bone positions, rotations, scales, custom bones, SpringBone physics, and vertex skin weights.")
 
 	mesh_name := "Mesh"
 	if bt := engine.pool_get(&w.transforms, engine.Handle(target_owner)); bt != nil {
 		mesh_name = bt.name
 	}
-	im.TextDisabled(fmt.ctprintf("Target Mesh: %s", mesh_name))
+	im.TextDisabledUnformatted(fmt.ctprintf("Target Mesh: %s", mesh_name))
 
 	// Pre-fill default name if empty
 	if skeleton_preset_name_buf[0] == 0 {
@@ -2283,7 +2283,7 @@ _draw_skeleton_edits_file_ui :: proc(target_owner: engine.Transform_Handle, adm:
 
 	if len(skeleton_status_msg) > 0 {
 		col := [4]f32{0.95, 0.35, 0.35, 1.0} if skeleton_status_is_err else [4]f32{0.30, 0.90, 0.40, 1.0}
-		im.TextColored(col, fmt.ctprintf("%s", skeleton_status_msg))
+		im.TextColoredUnformatted(col, fmt.ctprintf("%s", skeleton_status_msg))
 	}
 }
 
@@ -2320,7 +2320,7 @@ _draw_colliders_left_toolbar :: proc(target_owner: engine.Transform_Handle, adm:
 			im.PushStyleVarImVec2(.ItemSpacing, {st.ItemSpacing.x * colliders_toolbar_scale, st.ItemSpacing.y * colliders_toolbar_scale})
 			im.PushStyleVarImVec2(.ItemInnerSpacing, {st.ItemInnerSpacing.x * colliders_toolbar_scale, st.ItemInnerSpacing.y * colliders_toolbar_scale})
 		}
-		im.TextColored({0.95, 0.60, 0.20, 1.0}, fmt.ctprintf("%s Collider Authoring", icons.ICON_MD_CROP_FREE))
+		im.TextColoredUnformatted({0.95, 0.60, 0.20, 1.0}, fmt.ctprintf("%s Collider Authoring", icons.ICON_MD_CROP_FREE))
 		im.Separator()
 
 		// 0. VIEW DISPLAY
@@ -2424,7 +2424,7 @@ _draw_colliders_left_toolbar :: proc(target_owner: engine.Transform_Handle, adm:
 			w := engine.ctx_world()
 			bone_t := engine.pool_get(&w.transforms, engine.Handle(active_h))
 			bone_name := bone_t != nil ? bone_t.name : "Bone"
-			im.TextColored({0.20, 0.85, 1.00, 1.0}, fmt.ctprintf("%s %s", icons.ICON_MD_ACCOUNT_TREE, bone_name))
+			im.TextColoredUnformatted({0.20, 0.85, 1.00, 1.0}, fmt.ctprintf("%s %s", icons.ICON_MD_ACCOUNT_TREE, bone_name))
 
 			_, cap := engine.transform_get_comp(active_h, physics3d.CapsuleCollider)
 			_, box := engine.transform_get_comp(active_h, physics3d.BoxCollider)
@@ -2441,7 +2441,7 @@ _draw_colliders_left_toolbar :: proc(target_owner: engine.Transform_Handle, adm:
 				im.TextDisabled("No collider on this bone")
 			}
 			if g_vol != nil {
-				im.TextColored({1.0, 0.55, 0.25, 1.0}, fmt.ctprintf("Ghoul CSG Active (%d Wounds)", len(g_vol.recorded_blasts)))
+				im.TextColoredUnformatted({1.0, 0.55, 0.25, 1.0}, fmt.ctprintf("Ghoul CSG Active (%d Wounds)", len(g_vol.recorded_blasts)))
 			}
 
 			im.Spacing()
@@ -2546,7 +2546,7 @@ draw_bone_collider_inspector_floating :: proc(bone_h: engine.Transform_Handle, a
 
 	title: cstring = "Bone Collider Inspector###bone_col_insp"
 	if im.Begin(title, nil, flags) {
-		im.TextColored({1.0, 0.85, 0.20, 1.0}, fmt.ctprintf("%s Bone: %s", icons.ICON_MD_CROP_FREE, bone_t.name))
+		im.TextColoredUnformatted({1.0, 0.85, 0.20, 1.0}, fmt.ctprintf("%s Bone: %s", icons.ICON_MD_CROP_FREE, bone_t.name))
 		im.Separator()
 
 		if cap != nil {
@@ -2850,7 +2850,7 @@ draw_control_visuals_popup_content :: proc(rig: ^crig.ControlRig) {
 	if rig == nil do return
 	pal := thm.palette()
 
-	im.TextColored(pal.accent, fmt.ctprintf("%s Rig Control Shape & Visuals", icons.ICON_MD_PALETTE))
+	im.TextColoredUnformatted(pal.accent, fmt.ctprintf("%s Rig Control Shape & Visuals", icons.ICON_MD_PALETTE))
 	im.Separator()
 
 	im.Checkbox("Show All 3D Control Labels", &show_all_rig_labels)

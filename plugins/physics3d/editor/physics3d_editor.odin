@@ -157,22 +157,6 @@ time_dilation_volume_gizmos :: proc(vol: ^physics3d.TimeDilationVolume, ctx: han
 _edit: undo.Edit_Session
 
 @(private = "file")
-_edit_begin :: proc(targets: []undo.Edit_Target, label: string) {
-	_edit = undo.edit_session_begin(targets, label)
-	handles.on_drag_lost(proc(_: rawptr) { undo.edit_session_end(&_edit) })
-}
-
-@(private = "file")
-_unscale :: proc(field: ^[3]f32, now, before, s: [3]f32) {
-	for i in 0 ..< 3 do _unscale1(&field[i], now[i], before[i], s[i])
-}
-
-@(private = "file")
-_unscale1 :: proc(field: ^f32, now, before, s: f32) {
-	if now != before && s > 1e-6 do field^ = now / s
-}
-
-@(private = "file")
 _axis :: proc(d: physics3d.Capsule_Direction) -> handles.Axis {
 	switch d {
 	case .X_Axis: return .X
@@ -207,16 +191,16 @@ box_collider_handles :: proc(c: ^physics3d.BoxCollider, ctx: handles.Gizmo_Conte
 			undo.edit_target_pooled(h, &c.size, typeid_of([3]f32)),
 			undo.edit_target_pooled(h, &c.center, typeid_of([3]f32)),
 		}
-		_edit_begin(targets[:], "Edit Box Collider")
+		handles.begin_drag_edit(&_edit, targets[:], "Edit Box Collider")
 	}
 	if d.dragging || d.released {
-		_unscale(&c.size, size, size0, s)
+		handles.unscale_vec3(&c.size, size, size0, s)
 		if rot != {0, 0, 0, 1} {
 			rot_native := engine.quat_to_native(rot)
 			actual_center := center0 + linalg.quaternion128_mul_vector3(rot_native, center)
-			_unscale(&c.center, actual_center, center0, s)
+			handles.unscale_vec3(&c.center, actual_center, center0, s)
 		} else {
-			_unscale(&c.center, center, center0, s)
+			handles.unscale_vec3(&c.center, center, center0, s)
 		}
 	}
 	if d.released do undo.edit_session_end(&_edit)
@@ -237,11 +221,11 @@ sphere_collider_handles :: proc(c: ^physics3d.SphereCollider, ctx: handles.Gizmo
 			undo.edit_target_pooled(h, &c.radius, typeid_of(f32)),
 			undo.edit_target_pooled(h, &c.center, typeid_of([3]f32)),
 		}
-		_edit_begin(targets[:], "Edit Sphere Collider")
+		handles.begin_drag_edit(&_edit, targets[:], "Edit Sphere Collider")
 	}
 	if d.dragging || d.released {
-		_unscale1(&c.radius, radius, radius0, max(s.x, s.y, s.z))
-		_unscale(&c.center, center, center0, s)
+		handles.unscale_scalar(&c.radius, radius, radius0, max(s.x, s.y, s.z))
+		handles.unscale_vec3(&c.center, center, center0, s)
 	}
 	if d.released do undo.edit_session_end(&_edit)
 }
@@ -273,20 +257,20 @@ capsule_collider_handles :: proc(c: ^physics3d.CapsuleCollider, ctx: handles.Giz
 			undo.edit_target_pooled(h, &c.height, typeid_of(f32)),
 			undo.edit_target_pooled(h, &c.center, typeid_of([3]f32)),
 		}
-		_edit_begin(targets[:], "Edit Capsule Collider")
+		handles.begin_drag_edit(&_edit, targets[:], "Edit Capsule Collider")
 	}
 	if d.dragging || d.released {
 		// The scale capsule_scaled applies: the long axis for the height,
 		// the larger of the other two for the radius.
 		i := int(axis)
-		_unscale1(&c.radius, radius, radius0, max(s[(i + 1) % 3], s[(i + 2) % 3]))
-		_unscale1(&c.height, height, height0, s[i])
+		handles.unscale_scalar(&c.radius, radius, radius0, max(s[(i + 1) % 3], s[(i + 2) % 3]))
+		handles.unscale_scalar(&c.height, height, height0, s[i])
 		if rot != {0, 0, 0, 1} {
 			rot_native := engine.quat_to_native(rot)
 			actual_center := center0 + linalg.quaternion128_mul_vector3(rot_native, center)
-			_unscale(&c.center, actual_center, center0, s)
+			handles.unscale_vec3(&c.center, actual_center, center0, s)
 		} else {
-			_unscale(&c.center, center, center0, s)
+			handles.unscale_vec3(&c.center, center, center0, s)
 		}
 	}
 	if d.released do undo.edit_session_end(&_edit)

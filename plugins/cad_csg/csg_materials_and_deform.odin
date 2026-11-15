@@ -382,7 +382,7 @@ csg_save_material_datatable_json :: proc(rel_path: string = "assets/materials/ph
 // Loads the Material Properties DataTable from JSON on disk if present.
 csg_load_material_datatable_json :: proc(rel_path: string = "assets/materials/physical_materials_datatable.json") -> bool {
 	csg_init_material_datatable()
-	data, err := os.read_entire_file(rel_path, context.temp_allocator)
+	data, err := engine.vfs_read_entire_file(rel_path, context.temp_allocator)
 	if err != nil || len(data) == 0 do return false
 
 	prev_alloc := context.allocator

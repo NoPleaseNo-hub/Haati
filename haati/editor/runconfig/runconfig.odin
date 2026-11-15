@@ -60,7 +60,7 @@ find_repo_root :: proc() -> (root: string, ok: bool) {
 chdir_repo_root :: proc() -> bool {
 	root, ok := find_repo_root()
 	if !ok {
-		fmt.eprintf("run config: cannot find the repo root (no moonhug/ folder at or above the working directory)\n")
+		fmt.eprintf("run config: cannot find the repo root (no haati/ folder at or above the working directory)\n")
 		return false
 	}
 	if err := os.set_working_directory(root); err != nil {
@@ -224,8 +224,9 @@ build :: proc(cfg: Config) -> (exe: string, ok: bool) {
 		os.make_directory_all(dir)
 	}
 
+	odin_exe := _resolve_odin_exe()
 	cmd := make([dynamic]string, context.temp_allocator)
-	append(&cmd, "odin", "build", cfg.package_path)
+	append(&cmd, odin_exe, "build", cfg.package_path)
 	// Every package in this repo needs these flags (dual collection keeps void_odin working).
 	append(&cmd, "-ignore-unknown-attributes", "-collection:haati=haati", "-collection:moonhug=haati")
 	append(&cmd, ..cfg.flags)
@@ -236,6 +237,26 @@ build :: proc(cfg: Config) -> (exe: string, ok: bool) {
 	cwd, _ := os.get_working_directory(context.temp_allocator)
 	abs, _ := filepath.join({cwd, rel}, context.temp_allocator)
 	return abs, true
+}
+
+@(private = "file")
+_resolve_odin_exe :: proc() -> string {
+	exe_name := strings.concatenate({"odin", EXE_SUFFIX}, context.temp_allocator)
+	cwd, err := os.get_working_directory(context.temp_allocator)
+	if err == nil {
+		cur := cwd
+		for _ in 0 ..< 6 {
+			bundled, berr := filepath.join({cur, "tools", "odin", exe_name}, context.temp_allocator)
+			if berr == nil && os.exists(bundled) do return bundled
+			parent := filepath.dir(cur)
+			if parent == cur || parent == "" do break
+			cur = parent
+		}
+	}
+	if root_odin, rerr := filepath.join({ODIN_ROOT, exe_name}, context.temp_allocator); rerr == nil && os.exists(root_odin) {
+		return root_odin
+	}
+	return "odin"
 }
 
 // Runs a built binary with THIS process's arguments appended after `extra` —

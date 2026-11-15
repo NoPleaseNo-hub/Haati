@@ -12,7 +12,8 @@ package core
 
 import "base:runtime"
 
-MAX :: 1024
+MAX            :: 1024
+POOL_PAGE_SIZE :: 1024
 
 Handle :: struct {
     index:      u32,
@@ -34,7 +35,8 @@ Pool :: struct($T: typeid, $N: int = MAX) {
     _slots:         [N]_Pool_Slot(T),
     _freelist:      [N]u32,
     _free_head:     int,
-    _overflow:      [dynamic]^_Pool_Slot(T),
+    _pages:         [dynamic]^[POOL_PAGE_SIZE]_Pool_Slot(T),
+    _overflow_used: u32,
     _overflow_free: [dynamic]u32,
     count:          int,
 }
@@ -45,18 +47,21 @@ pool_init :: proc(p: ^Pool($T, $N)) {
         p._slots[i].generation = 1
     }
     p._free_head = N - 1
-    p._overflow = nil
+    p._pages = nil
+    p._overflow_used = 0
     p._overflow_free = nil
+    p.count = 0
 }
 
 pool_free :: proc(p: ^Pool($T, $N)) {
     if p == nil do return
-    for entry in p._overflow {
-        if entry != nil do free(entry, runtime.default_allocator())
+    for page in p._pages {
+        if page != nil do free(page, runtime.default_allocator())
     }
-    delete(p._overflow)
+    delete(p._pages)
     delete(p._overflow_free)
-    p._overflow = nil
+    p._pages = nil
+    p._overflow_used = 0
     p._overflow_free = nil
     p.count = 0
 }
@@ -66,9 +71,11 @@ _slot_ptr :: #force_inline proc(p: ^Pool($T, $N), index: u32) -> ^_Pool_Slot(T) 
     if index < u32(N) {
         return &p._slots[index]
     }
-    ov_idx := int(index) - N
-    if ov_idx < 0 || ov_idx >= len(p._overflow) do return nil
-    return p._overflow[ov_idx]
+    ov := index - u32(N)
+    if ov >= p._overflow_used do return nil
+    page_idx := int(ov / POOL_PAGE_SIZE)
+    if page_idx >= len(p._pages) || p._pages[page_idx] == nil do return nil
+    return &p._pages[page_idx][ov % POOL_PAGE_SIZE]
 }
 
 pool_create :: proc(p: ^Pool($T, $N)) -> (Handle, ^T) {
@@ -91,22 +98,29 @@ pool_create :: proc(p: ^Pool($T, $N)) -> (Handle, ^T) {
     if len(p._overflow_free) > 0 {
         idx := p._overflow_free[len(p._overflow_free) - 1]
         pop(&p._overflow_free)
-        slot := p._overflow[int(idx) - N]
+        slot := _slot_ptr(p, idx)
         slot.alive = true
         slot.data = {}
         p.count += 1
         return Handle{ index = idx, generation = slot.generation, type_key = INVALID_TYPE_KEY }, &slot.data
     }
 
-    if p._overflow == nil {
-        p._overflow = make([dynamic]^_Pool_Slot(T), 0, 16)
+    if p._pages == nil {
+        p._pages = make([dynamic]^[POOL_PAGE_SIZE]_Pool_Slot(T), 0, 4)
     }
-    slot := new(_Pool_Slot(T))
+    ov := p._overflow_used
+    page_idx := int(ov / POOL_PAGE_SIZE)
+    slot_in_page := int(ov % POOL_PAGE_SIZE)
+    for len(p._pages) <= page_idx {
+        page := new([POOL_PAGE_SIZE]_Pool_Slot(T))
+        append(&p._pages, page)
+    }
+    slot := &p._pages[page_idx][slot_in_page]
     slot.generation = 1
     slot.alive = true
     slot.data = {}
-    append(&p._overflow, slot)
-    idx := u32(N + len(p._overflow) - 1)
+    p._overflow_used += 1
+    idx := u32(N) + ov
     p.count += 1
     return Handle{ index = idx, generation = slot.generation, type_key = INVALID_TYPE_KEY }, &slot.data
 }
@@ -122,7 +136,7 @@ pool_destroy :: proc(p: ^Pool($T, $N), h: Handle) {
         p.count -= 1
         return
     }
-    slot := p._overflow[int(h.index) - N]
+    slot := _slot_ptr(p, h.index)
     slot.alive      = false
     slot.generation += 1
     context.allocator = runtime.default_allocator()
@@ -171,7 +185,7 @@ pool_iterator :: proc(p: ^Pool($T, $N)) -> Pool_Iterator(T, N) {
 
 pool_next :: proc(it: ^Pool_Iterator($T, $N)) -> (data: ^T, h: Handle, ok: bool) {
     if it.pool == nil do return
-    total := N + len(it.pool._overflow)
+    total := N + int(it.pool._overflow_used)
     for it.index < total {
         i := it.index
         it.index += 1

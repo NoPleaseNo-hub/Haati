@@ -457,7 +457,7 @@ generate_app :: proc(w: ^db.World) -> bool {
 		host_entries := make([dynamic]PhaseEntry)
 		defer delete(host_entries)
 		for e in app_entries {
-			if e.pkg_name == host.name || !gen_facts.is_runnable(runnables[:], e.pkg_name) {
+			if gen_facts.is_included_for_host(runnables[:], host.name, e.pkg_name) {
 				append(&host_entries, e)
 			}
 		}

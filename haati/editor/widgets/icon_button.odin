@@ -9,7 +9,10 @@ package widgets
 // an EMPTY label and draws the glyph centered on the button's own rect. That
 // mistake has been made twice in this codebase, so it is fixed in one place.
 
+import "core:strings"
 import im "haati:external/odin-imgui"
+import icons "haati:editor/icons"
+import thm "haati:editor/theme"
 
 // icon_button's `tooltip` parameter shadows the tooltip proc, so the package
 // reaches it under a second name (ui_help.odin).
@@ -38,13 +41,19 @@ icon_button :: proc(
 	tooltip: cstring = "",
 	active := false,
 	size: f32 = 0,
+	active_color := im.Vec4{},
 	loc := #caller_location,
 ) -> (clicked: bool) {
 	h := size > 0 ? size : im.GetFrameHeight()
-	if active do im.PushStyleColorImVec4(.Button, im.GetStyleColorVec4(.ButtonActive)^)
+	n: i32 = 0
+	if active {
+		p := thm.palette()
+		bg := active_color.w > 0 ? active_color : p.accent_soft
+		n = _push_toggle_style(true, bg, false)
+	}
 	clicked = im.Button(id, im.Vec2{h, h})
-	if active do im.PopStyleColor()
 	icon_draw_centered(glyph, im.GetItemRectMin(), im.GetItemRectMax())
+	if n > 0 do im.PopStyleColor(n)
 	// Through the shared tooltip so debug tooltips can add the attribute that
 	// registered whatever this button is part of. The parameter shadows the
 	// proc name, so the call goes through the alias. `loc` is the CALLER's,
@@ -52,4 +61,111 @@ icon_button :: proc(
 	// this helper.
 	_tooltip(tooltip, im.HoveredFlags_AllowWhenDisabled, loc)
 	return
+}
+
+// Transparent-at-rest toolbar/inline icon button using theme hover/active washes.
+ghost_icon_button :: proc(
+	glyph: cstring,
+	id: cstring,
+	tooltip: cstring = "",
+	active := false,
+	size: f32 = 0,
+	active_color := im.Vec4{},
+	loc := #caller_location,
+) -> (clicked: bool) {
+	h := size > 0 ? size : im.GetFrameHeight()
+	p := thm.palette()
+	if active {
+		bg := active_color.w > 0 ? active_color : p.accent_soft
+		n := _push_toggle_style(true, bg, false)
+		clicked = im.Button(id, im.Vec2{h, h})
+		icon_draw_centered(glyph, im.GetItemRectMin(), im.GetItemRectMax())
+		im.PopStyleColor(n)
+	} else {
+		im.PushStyleColorImVec4(.Button, {0, 0, 0, 0})
+		im.PushStyleColorImVec4(.ButtonHovered, p.bg_hover)
+		im.PushStyleColorImVec4(.ButtonActive, p.bg_active)
+		im.PushStyleColorImVec4(.Text, p.text_muted)
+		clicked = im.Button(id, im.Vec2{h, h})
+		icon_draw_centered(glyph, im.GetItemRectMin(), im.GetItemRectMax())
+		im.PopStyleColor(4)
+	}
+	_tooltip(tooltip, im.HoveredFlags_AllowWhenDisabled, loc)
+	return
+}
+
+// Clickable asset/object slot button paired with an optional inline picker trigger.
+object_field_button :: proc(
+	id: cstring,
+	display: cstring,
+	empty_hint: cstring = "None",
+	width: f32 = 0,
+	has_value := false,
+	missing := false,
+	tooltip: cstring = "",
+	picker_tooltip: cstring = "Pick...",
+	show_picker := true,
+	loc := #caller_location,
+) -> (clicked, picker_clicked: bool) {
+	p := thm.palette()
+	im.PushID(id)
+	defer im.PopID()
+
+	picker_w := show_picker ? (im.GetFrameHeight() + im.GetStyle().ItemSpacing.x) : f32(0)
+	avail := width > 0 ? width : im.GetContentRegionAvail().x
+	slot_w := max(f32(60.0), avail - picker_w)
+
+	shown := display
+	if shown == nil || len(string(shown)) == 0 {
+		shown = empty_hint
+	}
+	lbl := temp_cstr(strings.concatenate({string(shown), "##slot"}, context.temp_allocator))
+
+	text_col := p.text_primary
+	if missing {
+		text_col = p.status_error
+	} else if !has_value {
+		text_col = p.text_muted
+	}
+
+	im.PushStyleVarImVec2(.ButtonTextAlign, {0.0, 0.5})
+	im.PushStyleColorImVec4(.Button, p.bg_recessed)
+	im.PushStyleColorImVec4(.ButtonHovered, p.bg_hover)
+	im.PushStyleColorImVec4(.ButtonActive, p.bg_active)
+	im.PushStyleColorImVec4(.Text, text_col)
+	clicked = im.Button(lbl, {slot_w, 0})
+	im.PopStyleColor(4)
+	im.PopStyleVar()
+	_tooltip(tooltip, im.HoveredFlags_AllowWhenDisabled, loc)
+
+	if show_picker {
+		im.SameLine(0, im.GetStyle().ItemSpacing.x)
+		picker_clicked = icon_button(icons.ICON_MD_SEARCH, "##pick", picker_tooltip, loc = loc)
+	}
+	return
+}
+
+// Draws a rounded pill badge at `pos` using `dl` and returns its rendered size.
+draw_pill_badge :: proc(
+	dl: ^im.DrawList,
+	pos: im.Vec2,
+	text: cstring,
+	bg_col: im.Vec4,
+	text_col := im.Vec4{},
+	pad := im.Vec2{6, 2},
+	rounding: f32 = 4,
+	border_col := im.Vec4{},
+) -> im.Vec2 {
+	sz := im.CalcTextSize(text, nil, false, -1)
+	box_sz := im.Vec2{sz.x + pad.x * 2, sz.y + pad.y * 2}
+	if dl != nil {
+		pmax := pos + box_sz
+		im.DrawList_AddRectFilled(dl, pos, pmax, im.GetColorU32ImVec4(bg_col), rounding)
+		if border_col.w > 0 {
+			im.DrawList_AddRect(dl, pos, pmax, im.GetColorU32ImVec4(border_col), rounding, 1.0, {})
+		}
+		fg := text_col.w > 0 ? text_col : _contrast_button_fg(bg_col)
+		im.DrawList_AddText(dl, pos + pad, im.GetColorU32ImVec4(fg), text)
+	}
+	return box_sz
 }

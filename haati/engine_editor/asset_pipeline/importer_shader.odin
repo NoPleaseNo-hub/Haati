@@ -26,21 +26,7 @@ _FALLBACK_FRAG_MSL := #load("../../engine/gfx/shaders/compiled/world.frag.msl")
 _warned_missing_toolchain := false
 
 _resolve_shader_tool :: proc(tool: string) -> (string, bool) {
-	exe_ext := ".exe" when ODIN_OS == .Windows else ""
-	name := strings.concatenate({tool, exe_ext}, context.temp_allocator)
-	if custom_dir, custom_ok := os.lookup_env("MH_SHADER_TOOLS_DIR", context.temp_allocator); custom_ok && custom_dir != "" {
-		cand, cerr := filepath.join({custom_dir, name}, context.temp_allocator)
-		if cerr == nil && os.exists(cand) do return cand, true
-	}
-	path, found := os.lookup_env("PATH", context.temp_allocator)
-	if !found do return "", false
-	sep := ";" when ODIN_OS == .Windows else ":"
-	for dir in strings.split(path, sep, context.temp_allocator) {
-		if dir == "" do continue
-		p, err := filepath.join({dir, name}, context.temp_allocator)
-		if err == nil && os.exists(p) do return p, true
-	}
-	return "", false
+	return engine.resolve_host_tool(tool, "tools/shader_tools", "MH_SHADER_TOOLS_DIR", false, context.temp_allocator)
 }
 
 _have_shader_toolchain :: proc() -> bool {
@@ -192,20 +178,37 @@ _resolve_shader_include_dir :: proc() -> string {
     return "haati/engine/gfx/shaders"
 }
 
-// Runs a toolchain command; compile errors land in the editor console with
-// the tool's stderr. A missing executable gets the install hint.
+@(private = "file")
+_shader_tool_seq: u64 = 0
+
+// Runs a toolchain command silently via bg_process_start_to_file (isolated
+// handle whitelist & CREATE_NO_WINDOW on Windows); compile errors land in the
+// editor console with the tool's output.
 _run_tool :: proc(command: []string, source_path: string) -> bool {
-    state, _, stderr, err := os.process_exec({command = command}, context.temp_allocator)
-    if err != nil {
+    if len(command) == 0 do return false
+    tmp_dir, derr := os.temp_dir(context.temp_allocator)
+    if derr != nil do tmp_dir = "."
+    seq := _shader_tool_seq
+    _shader_tool_seq = seq + 1
+    fname := fmt.tprintf("mh_shader_%d_%d.log", os.get_pid(), seq)
+    tmp_log, jerr := filepath.join({tmp_dir, fname}, context.temp_allocator)
+    if jerr != nil do tmp_log = fname
+    defer os.remove(tmp_log)
+
+    bp, started := engine.bg_process_start_to_file("", command, nil, tmp_log)
+    if !started {
         when ODIN_OS == .Windows {
-            log.errorf("[Pipeline] Could not run %s (%v) — install Vulkan SDK or shaderc & spirv-cross", command[0], err)
+            log.errorf("[Pipeline] Could not run %s — install Vulkan SDK or shaderc & spirv-cross", command[0])
         } else {
-            log.errorf("[Pipeline] Could not run %s (%v) — shader authoring needs `brew install shaderc spirv-cross`", command[0], err)
+            log.errorf("[Pipeline] Could not run %s — shader authoring needs `brew install shaderc spirv-cross`", command[0])
         }
         return false
     }
-    if !state.exited || state.exit_code != 0 {
-        log.errorf("[Pipeline] %s failed for %s:\n%s", command[0], source_path, string(stderr))
+    exited, exit_code := engine.bg_process_wait(&bp, 30000)
+    out_bytes, rerr := os.read_entire_file(tmp_log, context.temp_allocator)
+    err_text := rerr == nil ? string(out_bytes) : ""
+    if !exited || exit_code != 0 {
+        log.errorf("[Pipeline] %s failed for %s (exited=%v code=%d):\n%s", command[0], source_path, exited, exit_code, err_text)
         return false
     }
     return true

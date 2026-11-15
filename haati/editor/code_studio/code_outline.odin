@@ -29,15 +29,60 @@ Outline_Symbol :: struct {
 	doc_comment: string, // contiguous `//` lines immediately above declaration / attributes
 }
 
-@(private = "file")
-_is_outline_ident :: #force_inline proc(s: string) -> bool {
-	if len(s) == 0 do return false
-	for i in 0 ..< len(s) {
-		c := s[i]
-		ok := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c == '_') || (i > 0 && c >= '0' && c <= '9')
-		if !ok do return false
+is_odin_ident_start :: #force_inline proc(c: byte) -> bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+}
+
+is_odin_ident_char :: #force_inline proc(c: byte) -> bool {
+	return is_odin_ident_start(c) || (c >= '0' && c <= '9')
+}
+
+is_valid_odin_ident :: #force_inline proc(s: string) -> bool {
+	if len(s) == 0 || !is_odin_ident_start(s[0]) do return false
+	for i in 1 ..< len(s) {
+		if !is_odin_ident_char(s[i]) do return false
 	}
 	return true
+}
+
+sanitize_odin_ident :: proc(raw: string, allocator := context.temp_allocator) -> string {
+	sb := strings.builder_make(allocator)
+	for i in 0 ..< len(raw) {
+		c := raw[i]
+		if (i == 0 ? is_odin_ident_start(c) : is_odin_ident_char(c)) {
+			strings.write_byte(&sb, c)
+		} else {
+			strings.write_byte(&sb, '_')
+		}
+	}
+	res := strings.to_string(sb)
+	return len(res) > 0 ? res : "unnamed"
+}
+
+// Extracts `receiver` before `.` or `^.` immediately preceding `ident_start`, ignoring `..` / `..<` ranges.
+extract_dot_receiver_before :: proc(src: string, ident_start: int) -> string {
+	dot_idx := ident_start - 1
+	if dot_idx < 0 || dot_idx >= len(src) || src[dot_idx] != '.' do return ""
+	if dot_idx > 0 && src[dot_idx - 1] == '.' do return ""
+	rec_end := dot_idx
+	if rec_end > 0 && src[rec_end - 1] == '^' {
+		rec_end -= 1
+	}
+	rec_start := rec_end
+	for rec_start > 0 && is_odin_ident_char(src[rec_start - 1]) {
+		rec_start -= 1
+	}
+	return rec_end > rec_start ? src[rec_start:rec_end] : ""
+}
+
+// Extracts the identifier and optional `.` / `^.` receiver spanning byte column `col`.
+odin_ident_at :: proc(line: string, col: int) -> (ident: string, receiver: string, ok: bool) {
+	if col < 0 || col >= len(line) || !is_odin_ident_char(line[col]) do return "", "", false
+	ws := col
+	for ws > 0 && is_odin_ident_char(line[ws - 1]) do ws -= 1
+	we := col + 1
+	for we < len(line) && is_odin_ident_char(line[we]) do we += 1
+	return line[ws:we], extract_dot_receiver_before(line, ws), true
 }
 
 extract_odin_package_name :: proc(src: string) -> string {
@@ -46,7 +91,7 @@ extract_odin_package_name :: proc(src: string) -> string {
 		if strings.has_prefix(ln, "package ") {
 			rest := strings.trim_space(ln[len("package "):])
 			end := 0
-			for end < len(rest) && ((rest[end] >= 'a' && rest[end] <= 'z') || (rest[end] >= 'A' && rest[end] <= 'Z') || (rest[end] >= '0' && rest[end] <= '9') || rest[end] == '_') {
+			for end < len(rest) && is_odin_ident_char(rest[end]) {
 				end += 1
 			}
 			if end > 0 do return rest[:end]
@@ -71,7 +116,7 @@ extract_odin_outline_symbols :: proc(src: string, allocator := context.temp_allo
 		cc := strings.index(ln, "::")
 		if cc <= 0 do continue
 		lhs := strings.trim_space(ln[:cc])
-		if !_is_outline_ident(lhs) do continue
+		if !is_valid_odin_ident(lhs) do continue
 
 		rhs := strings.trim_space(ln[cc + 2:])
 		kind: Outline_Symbol_Kind

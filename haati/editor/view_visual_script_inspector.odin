@@ -13,9 +13,7 @@ package editor
 //     with Slider Min/Max & Tooltips, persisted in `r.instance_overrides`!
 
 import "core:fmt"
-import "core:os"
 import "core:path/filepath"
-import "core:slice"
 import "core:strings"
 import "haati:editor/icons"
 import "haati:editor/inspector"
@@ -34,34 +32,6 @@ visual_script_runner_inspector_install :: proc() {
 }
 
 @(private = "file")
-_list_mhgraph_assets :: proc(allocator := context.temp_allocator) -> []string {
-	out := make([dynamic]string, 0, 12, allocator)
-	repo_root := engine.resolve_repo_root(context.temp_allocator)
-	search_dirs := [2]string{"assets/scripts", "haati/assets/scripts"}
-	for sd in search_dirs {
-		scripts_dir, _ := filepath.join({repo_root, sd}, context.temp_allocator)
-		if h, err := os.open(scripts_dir); err == nil {
-			if entries, rerr := os.read_dir(h, -1, context.temp_allocator); rerr == nil {
-				for e in entries {
-					if strings.has_suffix(e.name, ".bodin") || strings.has_suffix(e.name, ".mhgraph") {
-						rel_cand := fmt.aprintf("assets/scripts/%s", e.name, allocator = allocator)
-						already := false
-						for ex in out do if ex == rel_cand { already = true; break }
-						if !already do append(&out, rel_cand)
-					}
-				}
-			}
-			os.close(h)
-		}
-	}
-	if len(out) == 0 {
-		append(&out, strings.clone("assets/scripts/hover_oscillator.bodin", allocator))
-	}
-	slice.sort(out[:])
-	return out[:]
-}
-
-@(private = "file")
 _visual_script_runner_inspector :: proc(ctx: ^inspector.Component_Ctx) {
 	r := cast(^engine.VisualScriptRunner)ctx.ptr
 	if r == nil {
@@ -72,7 +42,7 @@ _visual_script_runner_inspector :: proc(ctx: ^inspector.Component_Ctx) {
 
 	// 1. Blueprint Asset Selector + `[ + New ]` + `[ Open Studio ]`
 	im.TextColored(p.accent, icons.ICON_MD_ACCOUNT_TREE + " Blueprint Script Asset (.bodin)")
-	assets := _list_mhgraph_assets(context.temp_allocator)
+	assets := vs.list_blueprint_assets(context.temp_allocator)
 	cur_lbl := r.graph_path != "" ? filepath.base(r.graph_path) : "<Select .bodin>"
 
 	im.SetNextItemWidth(max(im.GetContentRegionAvail().x - 74.0, 110.0))
@@ -130,14 +100,11 @@ _visual_script_runner_inspector :: proc(ctx: ^inspector.Component_Ctx) {
 	// 2. Cached Graph Metadata: Runtime Cost Badge + `👁 Instance Editable` Variables!
 	g := engine.visual_script_get_cached_graph(r.graph_path)
 	if g != nil {
-		if !engine.vg_has_tick_event(g) {
-			im.TextColored({0.28, 0.94, 0.62, 1.0}, icons.ICON_MD_BOLT + " Event-Driven Blueprint (0.00 ms Idle CPU)")
-		} else {
-			im.TextColored({0.96, 0.74, 0.30, 1.0}, icons.ICON_MD_REFRESH + " Opt-In Frame Tick Active")
-		}
+		vs.draw_runner_perf_and_fuse_status(g, engine.visual_script_get_entity_bb(r.owner), r.owner, inline = false, reset_btn_id = "Reset Loop Fuse##vsr_fuse")
 
 		// Evaluate current effective variable values (`defaults + instance_overrides`)
 		bb: engine.VG_Runtime_Blackboard
+		defer engine.vg_destroy_blackboard(&bb)
 		engine.vg_sync_blackboard(g, &bb)
 		if r.instance_overrides != "" {
 			engine.vg_apply_instance_overrides(g, &bb, r.instance_overrides)
@@ -159,82 +126,57 @@ _visual_script_runner_inspector :: proc(ctx: ^inspector.Component_Ctx) {
 				}
 
 				im.PushIDInt(i32(vi))
-				new_val_str := ""
-				changed     := false
-
-				#partial switch v.pin_type {
-				case .Bool:
-					bv := bb.slots[vi].val_bool
-					if im.Checkbox(fmt.ctprintf("%s", v.name), &bv) {
-						new_val_str = bv ? "true" : "false"
-						changed     = true
+				c_icon, t_icon, v_col := thm.studio_var_icon_and_color(v.pin_type, v.is_array, v.array_is_bounded, false)
+				if v.is_array {
+					im.TextColored(v_col, "%s", fmt.ctprintf("%s", c_icon))
+					im.SameLine(0, 4)
+					im.TextDisabled("%s", fmt.ctprintf("%s : %s (Array)", v.name, engine.vg_var_odin_type_ex(g, v)))
+					if v.tooltip_text != "" {
+						widgets.tooltip(fmt.ctprintf("%s", v.tooltip_text))
 					}
-				case .Int:
-					iv := bb.slots[vi].val_int
-					if im.DragInt(fmt.ctprintf("%s", v.name), &iv, 1.0) {
-						new_val_str = fmt.tprintf("%d", iv)
-						changed     = true
-					}
-				case .Int64:
-					i64v := bb.slots[vi].val_i64
-					step_one: i64 = 1
-					if im.InputScalar(fmt.ctprintf("%s", v.name), .S64, &i64v, &step_one) {
-						new_val_str = fmt.tprintf("%d", i64v)
-						changed     = true
-					}
-				case .Float:
-					fv := bb.slots[vi].val_f32
-					has_range := v.slider_max > v.slider_min
-					ed := has_range \
-						? im.SliderFloat(fmt.ctprintf("%s", v.name), &fv, v.slider_min, v.slider_max) \
-						: im.DragFloat(fmt.ctprintf("%s", v.name), &fv, 0.05)
-					if ed {
-						new_val_str = fmt.tprintf("%.4f", fv)
-						changed     = true
-					}
-				case .Vec2:
-					v2 := bb.slots[vi].val_vec2
-					if im.DragFloat2(fmt.ctprintf("%s", v.name), &v2, 0.05) {
-						new_val_str = fmt.tprintf("%.4f,%.4f", v2.x, v2.y)
-						changed     = true
-					}
-				case .Vec3:
-					v3 := bb.slots[vi].val_vec3
-					if im.DragFloat3(fmt.ctprintf("%s", v.name), &v3, 0.05) {
-						new_val_str = fmt.tprintf("%.4f,%.4f,%.4f", v3.x, v3.y, v3.z)
-						changed     = true
-					}
-				case .Vec4:
-					v4 := bb.slots[vi].val_vec4
-					if im.DragFloat4(fmt.ctprintf("%s", v.name), &v4, 0.05) {
-						new_val_str = fmt.tprintf("%.4f,%.4f,%.4f,%.4f", v4.x, v4.y, v4.z, v4.w)
-						changed     = true
-					}
-				case .Quat:
-					q4 := bb.slots[vi].val_quat
-					if im.DragFloat4(fmt.ctprintf("%s", v.name), &q4, 0.02) {
-						new_val_str = fmt.tprintf("%.4f,%.4f,%.4f,%.4f", q4.x, q4.y, q4.z, q4.w)
-						changed     = true
-					}
-				case .String, .Asset:
-					sbuf: [128]u8
-					if bb.slots[vi].val_cstr != nil {
-						sval := string(bb.slots[vi].val_cstr)
-						ncopy := min(len(sval), len(sbuf) - 1)
-						copy(sbuf[:ncopy], sval[:ncopy])
-					}
-					hint: cstring = v.pin_type == .Asset ? "assets/..." : "string value..."
-					if im.InputTextWithHint(fmt.ctprintf("%s", v.name), hint, cstring(raw_data(sbuf[:])), len(sbuf)) {
-						new_val_str = strings.clone(string(cstring(raw_data(sbuf[:]))), context.temp_allocator)
-						changed     = true
-					}
+					im.PopID()
+					continue
 				}
+				if v.pin_type == .Struct_Val {
+					flds, sz, _ := engine.vg_struct_layout(g, v.custom_type_name, context.temp_allocator)
+					im.TextColored(v_col, "%s", fmt.ctprintf("%s", t_icon))
+					im.SameLine(0, 4)
+					im.TextDisabled("%s", fmt.ctprintf("%s : %s (%d fields, %dB)", v.name, engine.vg_var_odin_type_ex(g, v), len(flds), sz))
+					if v.tooltip_text != "" {
+						widgets.tooltip(fmt.ctprintf("%s", v.tooltip_text))
+					}
+					im.PopID()
+					continue
+				}
+
+				im.TextColored(v_col, "%s", fmt.ctprintf("%s", t_icon))
+				im.SameLine(0, 4)
+
+				init_str := bb.slots[vi].val_cstr != nil ? string(bb.slots[vi].val_cstr) : ""
+				id_tag   := fmt.tprintf("vsr_var_%d", vi)
+				changed, edited_str := vs.draw_hot_slot_value_editor(
+					g,
+					id_tag,
+					v.pin_type,
+					v.custom_type_name,
+					&bb.slots[vi],
+					init_str,
+					v.name,
+					v.slider_min,
+					v.slider_max,
+					0,
+					false,
+					false,
+				)
 
 				if v.tooltip_text != "" {
 					widgets.tooltip(fmt.ctprintf("%s", v.tooltip_text))
 				}
 
 				if changed {
+					new_val_str := (v.pin_type == .String || v.pin_type == .Asset) \
+						? edited_str \
+						: vs.format_slot_override_value(v.pin_type, &bb.slots[vi], "", context.temp_allocator)
 					updated := engine.vg_set_instance_override_value(r.instance_overrides, v.name, new_val_str, context.temp_allocator)
 					if r.instance_overrides != "" do delete(r.instance_overrides)
 					r.instance_overrides = strings.clone(updated)
@@ -243,18 +185,10 @@ _visual_script_runner_inspector :: proc(ctx: ^inspector.Component_Ctx) {
 						engine.visual_script_set_entity_string_var(r.owner, vi, new_val_str)
 					} else if ptr := engine.visual_script_get_entity_var_ptr(r.owner, vi); ptr != nil {
 						tmp_bb: engine.VG_Runtime_Blackboard
+						defer engine.vg_destroy_blackboard(&tmp_bb)
 						engine.vg_sync_blackboard(g, &tmp_bb)
 						engine.vg_apply_instance_overrides(g, &tmp_bb, r.instance_overrides)
-						#partial switch v.pin_type {
-						case .Bool:  (cast(^bool)ptr)^    = tmp_bb.slots[vi].val_bool
-						case .Int:   (cast(^i32)ptr)^     = tmp_bb.slots[vi].val_int
-						case .Int64: (cast(^i64)ptr)^     = tmp_bb.slots[vi].val_i64
-						case .Float: (cast(^f32)ptr)^     = tmp_bb.slots[vi].val_f32
-						case .Vec2:  (cast(^[2]f32)ptr)^  = tmp_bb.slots[vi].val_vec2
-						case .Vec3:  (cast(^[3]f32)ptr)^  = tmp_bb.slots[vi].val_vec3
-						case .Vec4:  (cast(^[4]f32)ptr)^  = tmp_bb.slots[vi].val_vec4
-						case .Quat:  (cast(^[4]f32)ptr)^  = tmp_bb.slots[vi].val_quat
-						}
+						engine.vg_write_slot_to_var_ptr(ptr, v.pin_type, &tmp_bb.slots[vi])
 					}
 				}
 				im.PopID()

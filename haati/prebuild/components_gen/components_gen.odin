@@ -199,7 +199,7 @@ _collect_field_types :: proc(root: db.Entity, pkg_path: string, fields: ^db.Comp
 		visited[e] = true
 		for f in db.get(fields, e).fields {
 			append(&out, f.type)
-			if named, ok := _named_type(f.type); ok && strings.index_byte(named, '.') < 0 {
+			if named, pkg, _, ok := gen_facts.unwrap_named_type(f.type); ok && pkg == "" {
 				key := fmt.tprintf("%s/%s", pkg_path, named)
 				if nested, found := struct_by_name[key]; found do append(&work, nested)
 			}
@@ -413,38 +413,13 @@ _PRIMITIVE_TYPES := []string{
 // named type the generated file can refer to.
 @(private = "file")
 _pointer_type_arg :: proc(rendered: string, qual: string) -> (string, bool) {
-	t, ok := _named_type(rendered)
+	t, pkg, _, ok := gen_facts.unwrap_named_type(rendered)
 	if !ok do return "", false
 	if slice.contains(_PRIMITIVE_TYPES, t) do return "", false
-	if dot := strings.index_byte(t, '.'); dot >= 0 {
+	if pkg != "" {
 		// Only the engine is imported by every generated file. In the engine's
 		// own file the qualifier is empty and its types are unqualified.
-		if qual == "" || t[:dot] != "engine" do return "", false
-	}
-	return t, true
-}
-
-// The plain (possibly qualified) type name a rendered type expression ends
-// in, with array and pointer layers stripped. false for unnamed types.
-@(private = "file")
-_named_type :: proc(rendered: string) -> (string, bool) {
-	t := strings.trim_space(rendered)
-	for {
-		if strings.has_prefix(t, "^") {
-			t = t[1:]
-			continue
-		}
-		if strings.has_prefix(t, "[") {
-			close := strings.index_byte(t, ']')
-			if close < 0 do return "", false
-			t = t[close + 1:]
-			continue
-		}
-		break
-	}
-	if t == "" do return "", false
-	for c in t {
-		if !(c == '_' || c == '.' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) do return "", false
+		if qual == "" || pkg != "engine" do return "", false
 	}
 	return t, true
 }
@@ -819,7 +794,7 @@ generate_scene_file :: proc(w: ^db.World) -> bool {
 	strings.write_string(&b, "\t\t}\n")
 	strings.write_string(&b, "\t}\n")
 	strings.write_string(&b, "\tfor &bc in sf.breadcrumbs {\n")
-	strings.write_string(&b, "\t\tif pptr_guid_is_empty(bc.scene_source.guid) {\n")
+	strings.write_string(&b, "\t\tif asset_guid_is_empty(bc.scene_source.guid) {\n")
 	strings.write_string(&b, "\t\t\tif nid, ok := remap[bc.scene_source.local_id]; ok {\n")
 	strings.write_string(&b, "\t\t\t\tbc.scene_source.local_id = nid\n")
 	strings.write_string(&b, "\t\t\t}\n")

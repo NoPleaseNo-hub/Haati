@@ -13,7 +13,8 @@ import sysinfo "core:sys/info"
 import "core:thread"
 
 MAX_QUEUED_JOBS      :: 4096
-MAX_WORKER_THREADS   :: 16
+MAX_WORKER_THREADS   :: 64
+MAX_PAR_BATCHES      :: 64
 PER_WORKER_QUEUE_CAP :: 512
 
 Job_Proc          :: #type proc(user_data: rawptr)
@@ -60,10 +61,11 @@ _Job_System_State :: struct {
 	workers:             [MAX_WORKER_THREADS]^thread.Thread,
 	wqueues:             [MAX_WORKER_THREADS]_Worker_Queue,
 	num_workers:         int,
+	sleeping_workers:    i32,
 	rr_cursor:           u32,
 	total_jobs_executed: u64,
 	total_steals:        u64,
-	slot_jobs:           [MAX_WORKER_THREADS + 1]u64, // 0 = caller/main, 1..16 = workers
+	slot_jobs:           [MAX_WORKER_THREADS + 1]u64, // 0 = caller/main, 1..64 = workers
 }
 
 @(private = "file")
@@ -151,6 +153,10 @@ _global_pop :: proc() -> (job: Job_Desc, ok: bool) {
 
 @(private = "file")
 _execute_job_desc :: proc(job: Job_Desc, slot_idx: int) {
+	prev_alloc := context.allocator
+	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev_alloc
+
 	prev_user := context.user_ptr
 	context.user_ptr = job.ctx_user_ptr
 	if job.fn != nil {
@@ -224,10 +230,43 @@ _worker_proc :: proc(t: ^thread.Thread) {
 			continue
 		}
 
-		// 4. Wait until work arrives or shutdown requested
+		// 3b. Brief pause-loop spin before paying condition-variable lock/wait cost
+		spun_job := false
+		for _ in 0 ..< 32 {
+			if _jobs.stopping do break
+			if job, ok := _wqueue_pop_local(&_jobs.wqueues[w_idx]); ok {
+				_execute_job_desc(job, slot)
+				free_all(context.temp_allocator)
+				spun_job = true
+				break
+			}
+			if job, ok, _ := _try_steal_any_worker(w_idx, n_workers); ok {
+				intrinsics.atomic_add_explicit(&_jobs.total_steals, 1, .Relaxed)
+				_execute_job_desc(job, slot)
+				free_all(context.temp_allocator)
+				spun_job = true
+				break
+			}
+			if intrinsics.atomic_load_explicit(&_jobs.count, .Relaxed) > 0 {
+				if job, ok := _global_pop(); ok {
+					_execute_job_desc(job, slot)
+					free_all(context.temp_allocator)
+					spun_job = true
+					break
+				}
+			}
+			intrinsics.cpu_relax()
+		}
+		if spun_job do continue
+
+		// 4. Wait until work arrives or shutdown requested (SeqCst sleeping_workers prevents lost wakeups)
 		sync.mutex_lock(&_jobs.mutex)
 		for _jobs.count == 0 && !_jobs.stopping && !_any_wqueue_nonempty(_jobs.num_workers) {
-			sync.cond_wait(&_jobs.cond, &_jobs.mutex)
+			intrinsics.atomic_add_explicit(&_jobs.sleeping_workers, 1, .Seq_Cst)
+			if _jobs.count == 0 && !_jobs.stopping && !_any_wqueue_nonempty(_jobs.num_workers) {
+				sync.cond_wait(&_jobs.cond, &_jobs.mutex)
+			}
+			intrinsics.atomic_sub_explicit(&_jobs.sleeping_workers, 1, .Seq_Cst)
 		}
 		if _jobs.stopping && _jobs.count == 0 && !_any_wqueue_nonempty(_jobs.num_workers) {
 			sync.mutex_unlock(&_jobs.mutex)
@@ -256,6 +295,7 @@ job_system_init :: proc(requested_workers: int = 0) {
 	}
 	_jobs.initialized = true
 	_jobs.stopping = false
+	_jobs.sleeping_workers = 0
 	_jobs.head = 0
 	_jobs.tail = 0
 	_jobs.count = 0
@@ -309,6 +349,7 @@ job_system_shutdown :: proc() {
 	sync.mutex_lock(&_jobs.mutex)
 	_jobs.initialized = false
 	_jobs.num_workers = 0
+	_jobs.sleeping_workers = 0
 	_jobs.head = 0
 	_jobs.tail = 0
 	_jobs.count = 0
@@ -352,7 +393,24 @@ _try_execute_one_job :: proc() -> bool {
 	return false
 }
 
-job_dispatch :: proc(fn: Job_Proc, user_data: rawptr = nil, counter: ^Job_Counter = nil) {
+@(private = "file")
+_wake_one :: proc() {
+	if intrinsics.atomic_load_explicit(&_jobs.sleeping_workers, .Seq_Cst) <= 0 do return
+	sync.mutex_lock(&_jobs.mutex)
+	sync.cond_signal(&_jobs.cond)
+	sync.mutex_unlock(&_jobs.mutex)
+}
+
+@(private = "file")
+_wake_all :: proc() {
+	if intrinsics.atomic_load_explicit(&_jobs.sleeping_workers, .Seq_Cst) <= 0 do return
+	sync.mutex_lock(&_jobs.mutex)
+	sync.cond_broadcast(&_jobs.cond)
+	sync.mutex_unlock(&_jobs.mutex)
+}
+
+@(private = "file")
+_dispatch_job_internal :: proc(fn: Job_Proc, user_data: rawptr, counter: ^Job_Counter, wake: bool) {
 	if fn == nil do return
 	if !_jobs.initialized {
 		job_system_init()
@@ -381,10 +439,7 @@ job_dispatch :: proc(fn: Job_Proc, user_data: rawptr = nil, counter: ^Job_Counte
 	}
 
 	if enqueued {
-		// Hold global lock momentarily only to avoid lost condition signals
-		sync.mutex_lock(&_jobs.mutex)
-		sync.cond_signal(&_jobs.cond)
-		sync.mutex_unlock(&_jobs.mutex)
+		if wake do _wake_one()
 		return
 	}
 
@@ -395,7 +450,9 @@ job_dispatch :: proc(fn: Job_Proc, user_data: rawptr = nil, counter: ^Job_Counte
 		_jobs.tail = (_jobs.tail + 1) % MAX_QUEUED_JOBS
 		_jobs.count += 1
 		enqueued = true
-		sync.cond_signal(&_jobs.cond)
+		if wake && intrinsics.atomic_load_explicit(&_jobs.sleeping_workers, .Seq_Cst) > 0 {
+			sync.cond_signal(&_jobs.cond)
+		}
 	}
 	sync.mutex_unlock(&_jobs.mutex)
 
@@ -405,10 +462,23 @@ job_dispatch :: proc(fn: Job_Proc, user_data: rawptr = nil, counter: ^Job_Counte
 	}
 }
 
+job_dispatch :: proc(fn: Job_Proc, user_data: rawptr = nil, counter: ^Job_Counter = nil) {
+	_dispatch_job_internal(fn, user_data, counter, true)
+}
+
 job_wait :: proc(counter: ^Job_Counter) {
 	if counter == nil do return
+	spin := 0
 	for intrinsics.atomic_load(&counter.remaining) > 0 {
-		if !_try_execute_one_job() {
+		if _try_execute_one_job() {
+			spin = 0
+			continue
+		}
+		if spin < 32 {
+			intrinsics.cpu_relax()
+			spin += 1
+		} else {
+			spin = 0
 			thread.yield()
 		}
 	}
@@ -444,7 +514,6 @@ job_parallel_for :: proc(count: int, min_batch: int, fn: Parallel_For_Proc, user
 		job_system_init()
 	}
 
-	MAX_PAR_BATCHES :: 32
 	max_batches := clamp(_jobs.num_workers + 1, 1, MAX_PAR_BATCHES)
 	batch_size := max((count + max_batches - 1) / max_batches, eff_min)
 	num_batches := (count + batch_size - 1) / batch_size
@@ -455,7 +524,8 @@ job_parallel_for :: proc(count: int, min_batch: int, fn: Parallel_For_Proc, user
 
 	items: [MAX_PAR_BATCHES]_Parallel_Batch_Item
 	counter: Job_Counter
-	for b in 0 ..< num_batches - 1 {
+	dispatched := num_batches - 1
+	for b in 0 ..< dispatched {
 		s := b * batch_size
 		e := min(s + batch_size, count)
 		items[b] = _Parallel_Batch_Item{
@@ -464,7 +534,12 @@ job_parallel_for :: proc(count: int, min_batch: int, fn: Parallel_For_Proc, user
 			start_idx = s,
 			end_idx   = e,
 		}
-		job_dispatch(_parallel_batch_thunk, &items[b], &counter)
+		_dispatch_job_internal(_parallel_batch_thunk, &items[b], &counter, false)
+	}
+	if dispatched == 1 {
+		_wake_one()
+	} else if dispatched > 1 {
+		_wake_all()
 	}
 
 	// Execute the final batch directly on the calling thread

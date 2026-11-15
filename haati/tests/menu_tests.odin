@@ -215,7 +215,7 @@ test_view_menu_and_toolbar_do_not_mix :: proc(t: ^testing.T) {
 @(test)
 test_view_chrome_id_is_the_ini_key :: proc(t: ^testing.T) {
 	testing.expect_value(t, editor.view_id_of(icons.TITLE_CONSOLE), "Console")
-	testing.expect_value(t, editor.view_id_of(icons.TITLE_PROJECT_INSPECTOR), "Project Inspector")
+	testing.expect_value(t, editor.view_id_of(icons.TITLE_SCENE_2D), "Scene 2D")
 	// A title written without the marker still keys something stable.
 	testing.expect_value(t, editor.view_id_of("Plain"), "Plain")
 }

@@ -342,6 +342,9 @@ node_set_locked :: proc(tH: Transform_Handle, locked: bool) {
     if w == nil do return
     t := pool_get(&w.transforms, Handle(tH))
     if t == nil do return
+    prev := context.allocator
+    context.allocator = runtime.default_allocator()
+    defer context.allocator = prev
     if _locked_nodes == nil {
         _locked_nodes = make(map[Local_ID]bool)
     }

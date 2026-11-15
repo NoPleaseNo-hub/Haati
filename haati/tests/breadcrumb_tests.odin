@@ -221,7 +221,7 @@ test_breadcrumb_cross_asset_roundtrip :: proc(t: ^testing.T) {
 	testing.expect_value(t, got.scene_instance, engine.Local_ID(11))
 	testing.expect_value(t, got.scene_source.local_id, engine.Local_ID(7))
 	testing.expect(t, got.scene_source.guid == asset)
-	testing.expect(t, !engine.pptr_guid_is_empty(got.scene_source.guid))
+	testing.expect(t, !engine.asset_guid_is_empty(got.scene_source.guid))
 }
 
 // breadcrumb_create must dedup on (scene_instance, src) regardless of whether
@@ -280,7 +280,7 @@ test_breadcrumb_materialize_target_branches :: proc(t: ^testing.T) {
 	in_cross := engine.PPtr{local_id = 7, guid = engine.Asset_GUID(guid_id)}
 	out_cross, ok_cross := engine.breadcrumb_materialize_target(s, 200, in_cross)
 	testing.expect(t, ok_cross)
-	testing.expect(t, engine.pptr_guid_is_empty(out_cross.guid))
+	testing.expect(t, engine.asset_guid_is_empty(out_cross.guid))
 	testing.expect_value(t, len(s.breadcrumb_data), 1)
 
 	bc, bc_ok := engine.breadcrumb_get(s, out_cross.local_id)

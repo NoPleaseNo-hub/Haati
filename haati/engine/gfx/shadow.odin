@@ -226,8 +226,52 @@ shadow_point_face_vp :: proc(light_pos: [3]f32, face: int, range: f32) -> matrix
 	return proj * view
 }
 
+// Gribb-Hartmann normalized frustum plane extraction (nx, ny, nz, d): L, R, B, T, Near, Far (z01).
+frustum_extract_planes :: proc(vp: matrix[4, 4]f32) -> (planes: [6][4]f32, valid: bool) {
+	r0 := [4]f32{vp[0, 0], vp[0, 1], vp[0, 2], vp[0, 3]}
+	r1 := [4]f32{vp[1, 0], vp[1, 1], vp[1, 2], vp[1, 3]}
+	r2 := [4]f32{vp[2, 0], vp[2, 1], vp[2, 2], vp[2, 3]}
+	r3 := [4]f32{vp[3, 0], vp[3, 1], vp[3, 2], vp[3, 3]}
+
+	raw_planes := [6][4]f32{
+		r3 + r0, // Left
+		r3 - r0, // Right
+		r3 + r1, // Bottom
+		r3 - r1, // Top
+		r2,      // Near (z01: 0 <= z_clip <= w_clip)
+		r3 - r2, // Far
+	}
+	for i in 0 ..< 6 {
+		p := raw_planes[i]
+		n_len := math.sqrt(p.x * p.x + p.y * p.y + p.z * p.z)
+		if n_len < 1e-6 do return {}, false
+		planes[i] = p / n_len
+	}
+	return planes, true
+}
+
+// Tests whether a world-space sphere intersects or lies inside the frustum.
+// Set skip_near=true for directional shadow cascades so upstream casters behind the near plane still cast shadows.
+frustum_sphere_visible :: #force_inline proc(planes: [6][4]f32, has_frustum: bool, center: [3]f32, radius: f32, skip_near: bool = false) -> bool {
+	if !has_frustum do return true
+	for p, i in planes {
+		if skip_near && i == 4 do continue
+		dist := p.x * center.x + p.y * center.y + p.z * center.z + p.w
+		if dist < -radius do return false
+	}
+	return true
+}
+
 @(private = "file")
-_render_shadow_tile :: proc(rp: ^sdl.GPURenderPass, tile_col, tile_row: i32, vp: matrix[4, 4]f32) {
+_render_shadow_tile :: proc(
+	rp:          ^sdl.GPURenderPass,
+	tile_col:    i32,
+	tile_row:    i32,
+	vp:          matrix[4, 4]f32,
+	is_ortho:    bool = false,
+	light_pos:   [3]f32 = {},
+	light_range: f32 = 0,
+) {
 	sdl.SetGPUViewport(rp, sdl.GPUViewport{
 		x         = f32(tile_col * SHADOW_TILE_SIZE),
 		y         = f32(tile_row * SHADOW_TILE_SIZE),
@@ -236,11 +280,22 @@ _render_shadow_tile :: proc(rp: ^sdl.GPURenderPass, tile_col, tile_row: i32, vp:
 		min_depth = 0.0,
 		max_depth = 1.0,
 	})
+	planes, has_frustum := frustum_extract_planes(vp)
 	bound_vb: ^sdl.GPUBuffer
 	bound_ib: ^sdl.GPUBuffer
 	for &d in _pass.draws {
 		if !d.is_mesh || d.no_shadow || d.mesh.vbuf == nil || d.mesh.ibuf == nil || d.mesh_count == 0 do continue
 		if d.kind != .Tris && d.kind != .Tris_Depth do continue
+		if d.bounds_radius > 0 {
+			if light_range > 0 {
+				delta := d.bounds_center - light_pos
+				max_d := light_range + d.bounds_radius
+				if linalg.dot(delta, delta) > max_d * max_d do continue
+			}
+			if has_frustum && !frustum_sphere_visible(planes, true, d.bounds_center, d.bounds_radius, skip_near = is_ortho) {
+				continue
+			}
+		}
 		if d.mesh.vbuf != bound_vb {
 			vb := sdl.GPUBufferBinding{buffer = d.mesh.vbuf}
 			sdl.BindGPUVertexBuffers(rp, 0, &vb, 1)
@@ -367,22 +422,25 @@ shadow_render_pass :: proc(cam_pos: [3]f32) {
 	sdl.BindGPUGraphicsPipeline(rp, _shadow.pipeline)
 	if dir_idx >= 0 {
 		for tile in 0 ..< 3 {
-			_render_shadow_tile(rp, i32(tile % 4), i32(tile / 4), light.shadow_mats[tile])
+			_render_shadow_tile(rp, i32(tile % 4), i32(tile / 4), light.shadow_mats[tile], is_ortho = true)
 		}
 	}
 	if spot_idx >= 0 {
-		_render_shadow_tile(rp, i32(3 % 4), i32(3 / 4), light.shadow_mats[3])
+		gl := light.lights[spot_idx]
+		_render_shadow_tile(rp, i32(3 % 4), i32(3 / 4), light.shadow_mats[3], is_ortho = false, light_pos = gl.pos_type.xyz, light_range = gl.dir_range.w)
 	}
 	if point0_idx >= 0 {
+		gl := light.lights[point0_idx]
 		for f in 0 ..< 6 {
 			tile := 4 + f
-			_render_shadow_tile(rp, i32(tile % 4), i32(tile / 4), light.shadow_mats[tile])
+			_render_shadow_tile(rp, i32(tile % 4), i32(tile / 4), light.shadow_mats[tile], is_ortho = false, light_pos = gl.pos_type.xyz, light_range = gl.dir_range.w)
 		}
 	}
 	if point1_idx >= 0 {
+		gl := light.lights[point1_idx]
 		for f in 0 ..< 6 {
 			tile := 10 + f
-			_render_shadow_tile(rp, i32(tile % 4), i32(tile / 4), light.shadow_mats[tile])
+			_render_shadow_tile(rp, i32(tile % 4), i32(tile / 4), light.shadow_mats[tile], is_ortho = false, light_pos = gl.pos_type.xyz, light_range = gl.dir_range.w)
 		}
 	}
 	sdl.EndGPURenderPass(rp)

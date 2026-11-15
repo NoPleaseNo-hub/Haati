@@ -31,85 +31,6 @@ ExtractString :: proc(expr: ^ast.Expr) -> string {
 	return ""
 }
 
-// ExtractStringExtended returns a string from Basic_Lit, nameof(ident), Ident, or Selector_Expr (field name).
-ExtractStringExtended :: proc(expr: ^ast.Expr) -> string {
-	if expr == nil do return ""
-	if bl, ok := expr.derived.(^ast.Basic_Lit); ok {
-		s := bl.tok.text
-		if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' do return s[1 : len(s)-1]
-		return s
-	}
-	if call, ok := expr.derived.(^ast.Call_Expr); ok && call.expr != nil && len(call.args) == 1 {
-		if id, ok_callee := call.expr.derived.(^ast.Ident); ok_callee && id.name == "nameof" {
-			if arg_id, ok_arg := call.args[0].derived.(^ast.Ident); ok_arg do return arg_id.name
-		}
-	}
-	if id, ok := expr.derived.(^ast.Ident); ok do return id.name
-	if sel, ok := expr.derived.(^ast.Selector_Expr); ok && sel.field != nil {
-		if fid, ok := sel.field.derived.(^ast.Ident); ok do return fid.name
-	}
-	return ""
-}
-
-// ResolveString resolves an expression to a string: constant lookup (same-package) or ExtractStringExtended.
-ResolveString :: proc(expr: ^ast.Expr, constants: ^map[string]string) -> string {
-	if expr == nil do return ""
-	if id, ok := expr.derived.(^ast.Ident); ok {
-		if constants != nil {
-			if v, ok2 := constants[id.name]; ok2 do return v
-		}
-		return id.name
-	}
-	if sel, ok := expr.derived.(^ast.Selector_Expr); ok && sel.field != nil {
-		if fid, ok := sel.field.derived.(^ast.Ident); ok && constants != nil {
-			if v, ok2 := constants[fid.name]; ok2 do return v
-		}
-		if fid, ok := sel.field.derived.(^ast.Ident); ok do return fid.name
-	}
-	return ExtractStringExtended(expr)
-}
-
-// ExtractInt returns an int from Basic_Lit or Unary_Expr(-, expr).
-ExtractInt :: proc(expr: ^ast.Expr) -> int {
-	if expr == nil do return 0
-	#partial switch e in expr.derived {
-	case ^ast.Basic_Lit:
-		n, _ := strconv.parse_int(e.tok.text)
-		return n
-	case ^ast.Unary_Expr:
-		if e.op.text == "-" {
-			return -ExtractInt(e.expr)
-		}
-		return 0
-	case:
-		return 0
-	}
-}
-
-// ExtractKeyName returns enum variant name from Ident, Selector_Expr, Implicit_Selector_Expr, or first arg of Call_Expr.
-ExtractKeyName :: proc(expr: ^ast.Expr) -> string {
-	if expr == nil do return ""
-	#partial switch ex in expr.derived {
-	case ^ast.Ident:
-		return ex.name
-	case ^ast.Selector_Expr:
-		if ex.field != nil {
-			if id, ok := ex.field.derived.(^ast.Ident); ok do return id.name
-		}
-		return ""
-	case ^ast.Implicit_Selector_Expr:
-		if ex.field != nil {
-			if id, ok := ex.field.derived.(^ast.Ident); ok do return id.name
-		}
-		return ""
-	case ^ast.Call_Expr:
-		if len(ex.args) > 0 do return ExtractKeyName(ex.args[0])
-		return ""
-	case:
-		return ""
-	}
-}
-
 // BuildConstants builds a map of same-package string constant name -> value from the package AST.
 BuildConstants :: proc(pkg: ^ast.Package) -> map[string]string {
 	m: map[string]string
@@ -150,26 +71,6 @@ AttrElemKeyValue :: proc(elem: ^ast.Expr) -> (key: string, value: ^ast.Expr, fou
 	case:
 		return "", nil, false
 	}
-}
-
-// AttrFindFieldValue finds the attribute element with the given key and returns its value expression.
-AttrFindFieldValue :: proc(attr: ^ast.Attribute, key: string) -> (value: ^ast.Expr, found: bool) {
-	if attr == nil || attr.elems == nil do return nil, false
-	for elem in attr.elems {
-		k, val, ok := AttrElemKeyValue(elem)
-		if ok && k == key do return val, true
-	}
-	return nil, false
-}
-
-// CompLitGetField returns the value expression for the named field in a compound literal.
-CompLitGetField :: proc(comp: ^ast.Comp_Lit, field_name: string) -> (value: ^ast.Expr, found: bool) {
-	if comp == nil || comp.elems == nil do return nil, false
-	for sub in comp.elems {
-		k, val, ok := AttrElemKeyValue(sub)
-		if ok && k == field_name do return val, true
-	}
-	return nil, false
 }
 
 // StructFieldTag returns the raw tag string from an ast.Field (parser already filled field.tag).
@@ -401,6 +302,99 @@ StructFields :: proc(v_decl: ^ast.Value_Decl) -> []Struct_Field {
 		})
 	}
 	return out[:]
+}
+
+Proc_Param :: struct {
+	name:        string,
+	type_str:    string,
+	is_by_ref:   bool,
+	default_val: string,
+}
+
+Proc_Sig :: struct {
+	params:      []Proc_Param,
+	results:     []Proc_Param,
+	doc_comment: string,
+}
+
+_extract_field_list_params :: proc(fl: ^ast.Field_List, unnamed_prefix: string) -> []Proc_Param {
+	out: [dynamic]Proc_Param
+	if fl == nil do return out[:]
+	idx := 0
+	for field_expr in fl.list {
+		f, ok := field_expr.derived.(^ast.Field)
+		if !ok do continue
+		type_expr := f.type
+		named_list := f.names
+		if type_expr == nil && f.default_value == nil && len(f.names) == 1 {
+			// Unnamed parameter/return in Odin parser: e.g. `-> f32` stores type in `names[0]` with `type == nil`
+			type_expr = f.names[0]
+			named_list = nil
+		}
+		is_ptr := false
+		if type_expr != nil {
+			_, is_ptr = type_expr.derived.(^ast.Pointer_Type)
+		}
+		type_str := RenderValue(type_expr)
+		def_str := RenderValue(f.default_value)
+		if len(named_list) == 0 {
+			append(&out, Proc_Param{
+				name        = fmt.tprintf("%s_%d", unnamed_prefix, idx),
+				type_str    = type_str,
+				is_by_ref   = is_ptr,
+				default_val = def_str,
+			})
+			idx += 1
+		} else {
+			for nexpr in named_list {
+				pname := RenderValue(nexpr)
+				if pname == "" {
+					pname = fmt.tprintf("%s_%d", unnamed_prefix, idx)
+				}
+				append(&out, Proc_Param{
+					name        = pname,
+					type_str    = type_str,
+					is_by_ref   = is_ptr,
+					default_val = def_str,
+				})
+				idx += 1
+			}
+		}
+	}
+	return out[:]
+}
+
+// ExtractProcSignature extracts parameter/result metadata and leading `//` docs
+// from a top-level proc literal declaration.
+ExtractProcSignature :: proc(v_decl: ^ast.Value_Decl) -> Proc_Sig {
+	sig: Proc_Sig
+	if v_decl == nil || len(v_decl.values) == 0 do return sig
+	pv, is_proc := v_decl.values[0].derived.(^ast.Proc_Lit)
+	if !is_proc || pv.type == nil do return sig
+	pt, is_ptype := pv.type.derived.(^ast.Proc_Type)
+	if !is_ptype do return sig
+
+	sig.params  = _extract_field_list_params(pt.params, "param")
+	sig.results = _extract_field_list_params(pt.results, "out")
+
+	if v_decl.docs != nil && len(v_decl.docs.list) > 0 {
+		sb := strings.builder_make()
+		for tok, ti in v_decl.docs.list {
+			txt := tok.text
+			if strings.has_prefix(txt, "///") {
+				txt = txt[3:]
+			} else if strings.has_prefix(txt, "//") {
+				txt = txt[2:]
+			} else if strings.has_prefix(txt, "/*") && strings.has_suffix(txt, "*/") && len(txt) >= 4 {
+				txt = txt[2 : len(txt)-2]
+			}
+			txt = strings.trim_space(txt)
+			if ti > 0 do strings.write_byte(&sb, '\n')
+			strings.write_string(&sb, txt)
+		}
+		sig.doc_comment = strings.to_string(sb)
+	}
+	return sig
 }
 
 // AttrOrigin renders where one registration came from, in the form

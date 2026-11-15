@@ -57,3 +57,35 @@ test_audio_biquad_lpf_sidechain_and_occlusion :: proc(t: ^testing.T) {
 	audio.audio_bus_set_volume(.SFX, 0.5)
 	testing.expect(t, abs(audio.audio_bus_effective_gain(.SFX) - 0.5) < 1e-4, "SFX bus gain mismatch")
 }
+
+@(test)
+test_audio_atomic_biquad_and_hrtf_rear_attenuation :: proc(t: ^testing.T) {
+	biquad: audio.Audio_Atomic_Biquad
+	audio.audio_biquad_publish(&biquad, true, audio.audio_biquad_lowpass_coeffs(1000.0, 48000.0))
+
+	N :: 512
+	sr := f32(48000.0)
+	high_buf: [N]f32
+	for i in 0 ..< N {
+		high_buf[i] = math.sin(2.0 * f32(math.PI) * 8000.0 * (f32(i) / sr))
+	}
+	audio.audio_biquad_process(&biquad, high_buf[:], 1)
+	sum_hi: f32
+	for i in N / 2 ..< N do sum_hi += high_buf[i] * high_buf[i]
+	testing.expect(t, math.sqrt(sum_hi / f32(N / 2)) < 0.12, "published atomic biquad LPF should attenuate 8 kHz")
+
+	audio.audio_biquad_publish(&biquad, false, {})
+	audio.audio_biquad_reset(&biquad)
+	for i in 0 ..< N {
+		high_buf[i] = math.sin(2.0 * f32(math.PI) * 8000.0 * (f32(i) / sr))
+	}
+	audio.audio_biquad_process(&biquad, high_buf[:], 1)
+	sum_bypass: f32
+	for i in N / 2 ..< N do sum_bypass += high_buf[i] * high_buf[i]
+	testing.expect(t, math.sqrt(sum_bypass / f32(N / 2)) > 0.6, "bypassed atomic biquad must leave 8 kHz signal unattenuated")
+
+	front_hz := audio.spatial_hrtf_lowpass_hz({0, 0, 0}, {0, 0, 0, 1}, {0, 0, -5}, 1.0)
+	rear_hz  := audio.spatial_hrtf_lowpass_hz({0, 0, 0}, {0, 0, 0, 1}, {0, 0, 5}, 1.0)
+	testing.expectf(t, abs(front_hz - 22000.0) < 1e-2, "front HRTF LPF should stay open (~22kHz), got %.1f", front_hz)
+	testing.expectf(t, abs(rear_hz - 3200.0) < 1e-2, "rear HRTF LPF should attenuate toward 3.2kHz, got %.1f", rear_hz)
+}

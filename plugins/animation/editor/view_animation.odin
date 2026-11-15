@@ -1004,7 +1004,7 @@ _pv_draw_toolbar :: proc(doc: ^inspector.Asset_Doc, clip: ^anim.AnimationClip, l
 	}
 	widgets.tooltip("Playhead frame")
 	im.SameLine()
-	im.TextDisabled(fmt.ctprintf("/ %d", i32(math.round(length * fps))))
+	widgets.text_disabledf("/ %d", i32(math.round(length * fps)))
 
 	if clip != nil && doc != nil {
 		// Save sits at the right end, away from the transport.
@@ -1366,7 +1366,7 @@ _pv_draw_sheet :: proc(doc: ^inspector.Asset_Doc, clip: ^anim.AnimationClip, cli
 		im.OpenPopup("##anim_ruler_ctx")
 	}
 	if im.BeginPopup("##anim_ruler_ctx") {
-		im.TextDisabled(fmt.ctprintf("Timeline Signal @ %.3fs", _pv.ruler_ctx_t))
+		widgets.text_disabledf("Timeline Signal @ %.3fs", _pv.ruler_ctx_t)
 		im.Separator()
 		if im.MenuItem("Add Signal Marker") {
 			_pv_add_event(doc, clip, _pv.ruler_ctx_t, "signal", "", 0, 0)
@@ -1865,7 +1865,7 @@ _pv_draw_event_footer :: proc(doc: ^inspector.Asset_Doc, clip: ^anim.AnimationCl
 	ev := &clip.events[_pv.sel_event]
 
 	im.AlignTextToFramePadding()
-	im.TextColored(im.Vec4{1.0, 0.85, 0.25, 1.0}, fmt.ctprintf("Signal %d   t", _pv.sel_event))
+	widgets.text_coloredf(im.Vec4{1.0, 0.85, 0.25, 1.0}, "Signal %d   t", _pv.sel_event)
 	im.SameLine()
 	im.SetNextItemWidth(65)
 	_pv_field_undo(doc, clip, im.DragFloat("##anim_ev_t", &ev.time, 0.002, 0, max(clip.length, 0.0001), "%.3f"))

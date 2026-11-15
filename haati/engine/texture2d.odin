@@ -4,7 +4,6 @@ import gfx "gfx"
 import stbi "vendor:stb/image"
 import "base:runtime"
 import "core:encoding/uuid"
-import "core:os"
 import "core:strings"
 
 // GUID-keyed texture cache. The GPU side lives in ^gfx.Texture, which is
@@ -45,7 +44,7 @@ _texture_sprites_free :: proc(tex: ^Texture2D) {
 texture_cache: map[Asset_GUID]Texture2D
 
 texture_cache_init :: proc() {
-    texture_cache = make(map[Asset_GUID]Texture2D)
+    texture_cache = make(map[Asset_GUID]Texture2D, runtime.default_allocator())
     // Cached textures bake pixels_per_unit at load — evict on reimport so
     // new settings apply without a restart.
     @(static) hooked := false
@@ -164,10 +163,14 @@ texture_upsert_procedural :: proc(guid: Asset_GUID, rgba_pixels: []u8, width, he
     return &texture_cache[guid], true
 }
 
-// stb decodes top-down RGBA8, matching SDL_GPU's top-left uv origin.
+// stb decodes top-down RGBA8, matching SDL_GPU's top-left uv origin; pre-compressed DDS streams straight to BCn GPU memory.
 _texture_decode_file :: proc(path: string) -> ^gfx.Texture {
-    data, read_err := os.read_entire_file(path, context.temp_allocator)
+    data, read_err := vfs_read_entire_file(path, context.temp_allocator)
     if read_err != nil do return nil
+
+    if len(data) >= 4 && string(data[:4]) == "DDS " {
+        return gfx.texture_create_dds(data)
+    }
 
     w, h, channels: i32
     pixels := stbi.load_from_memory(raw_data(data), i32(len(data)), &w, &h, &channels, 4)

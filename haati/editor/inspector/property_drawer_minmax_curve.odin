@@ -24,13 +24,14 @@ _mm_mode_names := [engine.MinMax_Mode]cstring{
 // One clickable curve plot with its own editor popup.
 @(private = "file")
 _mm_curve_cell :: proc(c: ^engine.Curve, id: cstring, w: f32) {
-	h := im.GetFrameHeight()
+	cw := max(w, 1.0)
+	h := max(im.GetFrameHeight(), 1.0)
 	p0 := im.GetCursorScreenPos()
 	popup_id := fmt.ctprintf("mm_curve_edit%s", id)
-	if im.InvisibleButton(id, im.Vec2{w, h}) {
+	if im.InvisibleButton(id, im.Vec2{cw, h}) {
 		im.OpenPopup(popup_id)
 	}
-	_curve_plot(c, p0, im.Vec2{p0.x + w, p0.y + h})
+	_curve_plot(c, p0, im.Vec2{p0.x + cw, p0.y + h})
 	if im.BeginPopup(popup_id) {
 		_curve_editor(c)
 		im.EndPopup()

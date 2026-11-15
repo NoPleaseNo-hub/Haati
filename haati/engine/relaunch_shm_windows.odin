@@ -139,17 +139,20 @@ relaunch_shm_create :: proc(shm_name: string, snap: Relaunch_SHM_Snapshot) -> (R
 }
 
 // Waits briefly (up to `timeout_ms`) for `mh_relaunch` to pin the shared memory section (`bridged == 1`).
-relaunch_shm_wait_bridged :: proc(h: Relaunch_SHM_Handle, timeout_ms: int = 300) -> bool {
+relaunch_shm_wait_bridged :: proc(h: Relaunch_SHM_Handle, timeout_ms: int = 3000) -> bool {
 	if h == nil do return false
 	view := win.MapViewOfFile(win.HANDLE(h), win.FILE_MAP_ALL_ACCESS, 0, 0, win.SIZE_T(size_of(Relaunch_SHM_Header)))
 	if view == nil do return false
 	defer win.UnmapViewOfFile(view)
 
 	hdr := cast(^Relaunch_SHM_Header)view
-	steps := max(timeout_ms / 5, 1)
-	for _ in 0 ..< steps {
+	t0 := time.tick_now()
+	for {
 		if intrinsics.atomic_load(&hdr.bridged) != 0 {
 			return true
+		}
+		if time.duration_milliseconds(time.tick_since(t0)) >= f64(timeout_ms) {
+			break
 		}
 		time.sleep(5 * time.Millisecond)
 	}

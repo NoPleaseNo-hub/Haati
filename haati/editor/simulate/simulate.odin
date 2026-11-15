@@ -100,6 +100,12 @@ install :: proc(hooks: Hooks, hosts: []Host) {
 
 shutdown :: proc() {
     if _state != .Stopped do stop()
+    prev := context.allocator
+    context.allocator = runtime.default_allocator()
+    defer context.allocator = prev
+    _clear_loaded_scenes()
+    delete(_loaded_at_start)
+    _loaded_at_start = nil
     delete(_selection)
     _selection = nil
 }
@@ -190,7 +196,9 @@ start :: proc(paused := false) -> bool {
     _record_loaded_scenes()
 
     {
+        prev := context.allocator
         context.allocator = runtime.default_allocator()
+        defer context.allocator = prev
         clear(&_selection)
         if _hooks.selection_ids != nil {
             for id in _hooks.selection_ids() do append(&_selection, id)
@@ -345,7 +353,9 @@ available :: proc() -> bool {
 }
 
 _record_loaded_scenes :: proc() {
+    prev := context.allocator
     context.allocator = runtime.default_allocator()
+    defer context.allocator = prev
     _clear_loaded_scenes()
     sm := engine.ctx_scene_manager()
     for i in 0 ..< sm.count {
@@ -369,7 +379,9 @@ _record_loaded_scenes :: proc() {
 }
 
 _clear_loaded_scenes :: proc() {
+    prev := context.allocator
     context.allocator = runtime.default_allocator()
+    defer context.allocator = prev
     for l in _loaded_at_start {
         delete(l.path)
         if l.snapshot != nil do delete(l.snapshot)

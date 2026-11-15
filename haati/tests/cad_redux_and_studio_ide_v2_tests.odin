@@ -209,7 +209,8 @@ test_silent_bg_process_runner_zero_flash :: proc(t: ^testing.T) {
 	log_path, _ := filepath.join({repo_root, "builds", fmt.tprintf("mh_bg_proc_test_%d.log", os.get_pid())}, context.temp_allocator)
 	defer _ = os.remove(log_path)
 
-	bg, started := engine.bg_process_start_to_file(repo_root, {"odin", "version"}, nil, log_path)
+	odin_exe := engine.resolve_odin_binary(context.temp_allocator)
+	bg, started := engine.bg_process_start_to_file(repo_root, {odin_exe, "version"}, nil, log_path)
 	testing.expect(t, started, "expected silent bg_process_start_to_file(`odin version`) to start cleanly")
 	if !started do return
 
@@ -217,7 +218,8 @@ test_silent_bg_process_runner_zero_flash :: proc(t: ^testing.T) {
 	testing.expect(t, exited && code == 0, "expected `odin version` background process to exit with code 0")
 
 	data, rerr := os.read_entire_file(log_path, context.temp_allocator)
-	testing.expect(t, rerr == nil && strings.contains(string(data), "odin version"), "expected redirected log file to contain `odin version` output")
+	out_str := string(data)
+	testing.expect(t, rerr == nil && (strings.contains(out_str, "odin version") || strings.contains(out_str, "odin.exe version")), "expected redirected log file to contain `odin version` output")
 }
 
 // 5. Strict Core ABI Locks + Tooltip & `#c_varargs` ImGui CString Safety across all edited files

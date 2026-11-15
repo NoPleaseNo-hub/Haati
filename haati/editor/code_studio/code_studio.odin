@@ -18,7 +18,9 @@ package code_studio
 import "base:runtime"
 import "core:c"
 import "core:fmt"
+import "core:hash"
 import "core:math"
+import "core:mem"
 import "core:os"
 import "core:path/filepath"
 import "core:slice"
@@ -32,7 +34,8 @@ import "haati:engine"
 import hot "haati:engine/hot_api"
 import im "haati:external/odin-imgui"
 
-STUDIO_BUF_CAP :: 96 * 1024 // 96 KB buffer for full files; scoped bodies are typically < 4 KB
+STUDIO_MIN_BUF_CAP :: 128 * 1024 // Initial backing buffer for full files; grows dynamically via `.CallbackResize`
+SCOPED_MIN_BUF_CAP :: 64 * 1024  // Initial backing buffer for scoped procedure/node bodies; grows dynamically
 
 CODE_ZOOM_MIN  :: f32(0.65)
 CODE_ZOOM_MAX  :: f32(2.40)
@@ -62,15 +65,17 @@ _Surface_IDE_State :: struct {
 	caret_col:          int,
 
 	// Autocomplete state
-	ac_open:            bool,
-	ac_dismissed_pos:   int, // Suppresses re-opening at exact same cursor offset after `Esc`
-	ac_selected_idx:    int,
-	ac_replace_start:   int,
-	ac_force_open:      bool,
-	ac_pending_accept:  bool,
-	ac_refocus_input:   bool,
-	ac_accept_text:     [256]byte,
-	ac_accept_len:      int,
+	ac_open:              bool,
+	ac_dismissed_pos:     int, // Suppresses re-opening at exact same cursor offset after `Esc`
+	ac_selected_idx:      int,
+	ac_replace_start:     int,
+	ac_force_open:        bool,
+	ac_pending_accept:    bool,
+	ac_refocus_input:     bool,
+	ac_popup_interacting: bool,
+	ac_popup_dragging:    bool,
+	ac_accept_text:       [256]byte,
+	ac_accept_len:        int,
 
 	// Ctrl+Click symbol jump output (`req_jump_ident` set for 1 frame when user Ctrl+Clicks an identifier)
 	req_jump_ident:     string,
@@ -82,6 +87,9 @@ _Surface_IDE_State :: struct {
 	cmd_dup_line:       bool,
 	cmd_outdent_tab:    bool,
 	cmd_jump_offset:    int, // >= 0 jumps caret to byte offset (e.g. Find Next)
+	cmd_jump_line:      int, // > 0 scrolls & moves caret to 1-based line on next draw
+	cmd_paste_pending:  bool,
+	cmd_paste_text:     string,
 
 	// Autocomplete Up/Down cursor-lock (avoids ImGui forbidden `.CallbackHistory` on multiline inputs)
 	ac_lock_cursor:     bool,
@@ -106,6 +114,17 @@ _Surface_IDE_State :: struct {
 	goto_focus_next:    bool,
 	goto_buf:           [32]byte,
 	cmd_move_line_dir:  int, // `-1` = Alt+Up, `+1` = Alt+Down
+
+	// Document-revision syntax, line & unused-import cache (`0` tokenizer/layout work on idle frames)
+	cache_valid:                bool,
+	cache_hash:                 u64,
+	cache_len:                  int,
+	cache_max_cols:             int,
+	active_buf:                 ^[]byte,
+	cached_line_starts:         [dynamic]int,
+	cached_spans:               [dynamic]Syntax_Span,
+	cached_line_span_head:      [dynamic]int,
+	cached_unused_import_lines: [dynamic]int,
 }
 
 CODE_UNDO_MAX                 :: 64
@@ -155,7 +174,7 @@ _Scoped_Popup_State :: struct {
 	backing_proc_name: string,
 	full_file_cache:   string,
 
-	buf:               [32768]byte,
+	buf:               []byte,
 	dirty:             bool,
 	focused:           bool,
 	status_note:       string,
@@ -170,6 +189,7 @@ _Tab_Doc :: struct {
 	pkg_dir:     string,
 	buf:         []byte,
 	dirty:       bool,
+	uses_tabs:   bool,
 	scroll_line: int,
 	undo:        Code_Undo_Stack,
 }
@@ -210,6 +230,144 @@ _Studio_State :: struct {
 	nav_stack:              [32]_Code_Nav_Entry,
 	nav_len:                int,
 	nav_cursor:             int,
+
+	// Document-revision outline symbol cache
+	outline_valid:          bool,
+	outline_hash:           u64,
+	outline_len:            int,
+	outline_arena_init:     bool,
+	outline_arena:          mem.Dynamic_Arena,
+	outline_syms:           []Outline_Symbol,
+}
+
+@(private = "file")
+_fnv1a_src :: #force_inline proc(s: string) -> u64 {
+	return hash.fnv64a(transmute([]u8)s)
+}
+
+@(private = "file")
+_free_ide_surface_cache :: proc(ide: ^_Surface_IDE_State) {
+	if ide == nil do return
+	_clear_ide_pending_paste(ide)
+	context.allocator = runtime.default_allocator()
+	delete(ide.cached_line_starts)
+	delete(ide.cached_spans)
+	delete(ide.cached_line_span_head)
+	delete(ide.cached_unused_import_lines)
+	ide.cached_line_starts         = nil
+	ide.cached_spans               = nil
+	ide.cached_line_span_head      = nil
+	ide.cached_unused_import_lines = nil
+	ide.cache_valid                = false
+	ide.cache_hash                 = 0
+	ide.cache_len                  = 0
+	ide.cache_max_cols             = 0
+}
+
+@(private = "file")
+_is_unused_import_line :: proc(ide: ^_Surface_IDE_State, line_num: int) -> bool {
+	if ide == nil do return false
+	for u_ln in ide.cached_unused_import_lines {
+		if u_ln == line_num do return true
+	}
+	return false
+}
+
+@(private = "file")
+_clear_ide_pending_paste :: proc(ide: ^_Surface_IDE_State) {
+	if ide == nil do return
+	context.allocator = runtime.default_allocator()
+	if ide.cmd_paste_text != "" {
+		delete(ide.cmd_paste_text)
+		ide.cmd_paste_text = ""
+	}
+	ide.cmd_paste_pending = false
+}
+
+@(private = "file")
+_jump_ide_to_line :: proc(ide: ^_Surface_IDE_State, target_ln: int) {
+	if ide == nil || target_ln <= 0 do return
+	ide.cmd_jump_line = target_ln
+}
+
+@(private = "file")
+_ensure_ide_surface_cache :: proc(ide: ^_Surface_IDE_State, src: string) {
+	if ide == nil do return
+	h := _fnv1a_src(src)
+	if ide.cache_valid && ide.cache_hash == h && ide.cache_len == len(src) {
+		return
+	}
+
+	context.allocator = runtime.default_allocator()
+	clear(&ide.cached_line_starts)
+	clear(&ide.cached_spans)
+	clear(&ide.cached_line_span_head)
+	clear(&ide.cached_unused_import_lines)
+
+	// Single-pass line start + max column computation
+	append(&ide.cached_line_starts, 0)
+	line_start := 0
+	max_cols := 0
+	for i in 0 ..< len(src) {
+		if src[i] == '\n' {
+			cols := i - line_start
+			if cols > 0 && src[i - 1] == '\r' do cols -= 1
+			if cols > max_cols do max_cols = cols
+			append(&ide.cached_line_starts, i + 1)
+			line_start = i + 1
+		}
+	}
+	tail_cols := len(src) - line_start
+	if tail_cols > 0 && src[len(src) - 1] == '\r' do tail_cols -= 1
+	if tail_cols > max_cols do max_cols = tail_cols
+
+	spans := tokenize_odin_lines(src, ide.cached_line_starts[:], context.temp_allocator)
+	for sp in spans {
+		append(&ide.cached_spans, sp)
+	}
+
+	if strings.contains(src, "import") {
+		unused := detect_unused_odin_imports(src, context.temp_allocator)
+		for u in unused {
+			append(&ide.cached_unused_import_lines, u.line)
+		}
+	}
+
+	// Build O(1) first-span index per line so visible-line clipping jumps straight to first_ln_i
+	n_lines := len(ide.cached_line_starts)
+	resize(&ide.cached_line_span_head, n_lines)
+	s_idx := 0
+	for ln_i in 0 ..< n_lines {
+		target_ln := ln_i + 1
+		for s_idx < len(ide.cached_spans) && ide.cached_spans[s_idx].line < target_ln {
+			s_idx += 1
+		}
+		ide.cached_line_span_head[ln_i] = s_idx
+	}
+
+	ide.cache_valid    = true
+	ide.cache_hash     = h
+	ide.cache_len      = len(src)
+	ide.cache_max_cols = max_cols
+}
+
+@(private = "file")
+_get_cached_outline_symbols :: proc(src: string) -> []Outline_Symbol {
+	h := _fnv1a_src(src)
+	if _studio.outline_valid && _studio.outline_hash == h && _studio.outline_len == len(src) {
+		return _studio.outline_syms
+	}
+	if !_studio.outline_arena_init {
+		mem.dynamic_arena_init(&_studio.outline_arena)
+		_studio.outline_arena_init = true
+	} else {
+		mem.dynamic_arena_reset(&_studio.outline_arena)
+	}
+	_studio.outline_syms  = extract_odin_outline_symbols(src, mem.dynamic_arena_allocator(&_studio.outline_arena))
+	_studio.outline_valid = true
+	_studio.outline_hash  = h
+	_studio.outline_len   = len(src)
+	return _studio.outline_syms
 }
 
 @(private = "file")
@@ -399,7 +557,7 @@ code_undo_step_redo :: proc(st: ^Code_Undo_Stack) -> (entry: Code_Undo_Entry, ok
 @(private = "file")
 _active_undo_context :: proc() -> (
 	undo:      ^Code_Undo_Stack,
-	buf:       []byte,
+	buf:       ^[]byte,
 	ide:       ^_Surface_IDE_State,
 	dirty:     ^bool,
 	pkg_dir:   string,
@@ -407,14 +565,14 @@ _active_undo_context :: proc() -> (
 	ok:        bool,
 ) {
 	if _scoped.open && _scoped.focused {
-		return &_scoped.undo, _scoped.buf[:], &_scoped.ide, &_scoped.dirty, _scoped.backing_pkg_dir, true, true
+		return &_scoped.undo, &_scoped.buf, &_scoped.ide, &_scoped.dirty, _scoped.backing_pkg_dir, true, true
 	}
 	if _emb_scoped.open && _emb_scoped.focused {
-		return &_emb_scoped.undo, _emb_scoped.buf[:], &_emb_scoped.ide, &_emb_scoped.dirty, "haati/hot_scripts", true, true
+		return &_emb_scoped.undo, &_emb_scoped.buf, &_emb_scoped.ide, &_emb_scoped.dirty, "haati/hot_scripts", true, true
 	}
 	if (_studio.window_focused || _studio.emb_full_focused) && _studio.active_tab >= 0 && _studio.active_tab < len(_studio.tabs) {
 		t := &_studio.tabs[_studio.active_tab]
-		return &t.undo, t.buf, &_studio.ide, &t.dirty, t.pkg_dir, false, true
+		return &t.undo, &t.buf, &_studio.ide, &t.dirty, t.pkg_dir, false, true
 	}
 	return nil, nil, nil, nil, "", false, false
 }
@@ -443,7 +601,7 @@ code_studio_can_redo :: proc() -> bool {
 _apply_undo_or_redo_step :: proc(
 	is_undo:   bool,
 	undo:      ^Code_Undo_Stack,
-	buf:       []byte,
+	buf:       ^[]byte,
 	ide:       ^_Surface_IDE_State,
 	dirty:     ^bool,
 	pkg_dir:   string,
@@ -457,14 +615,13 @@ _apply_undo_or_redo_step :: proc(
 		entry, ok = code_undo_step_redo(undo)
 	}
 	if !ok do return false
-	_copy_to_c_buf(buf, entry.text)
+	_copy_to_c_buf_grow(buf, entry.text, is_scoped ? SCOPED_MIN_BUF_CAP : STUDIO_MIN_BUF_CAP)
 	if dirty != nil do dirty^ = true
 	_arm_ide_restore(ide, entry.text, entry.cursor)
 	ide.ac_open          = false
 	ide.ac_dismissed_pos = -1
-	s_now := _c_buf_string(buf)
-	submit_async_check(s_now, is_scoped, pkg_dir)
-	submit_async_autocomplete_index(s_now, is_scoped, is_scoped && pkg_dir == "" ? "haati/hot_scripts" : pkg_dir)
+	s_now := _c_buf_string(buf^)
+	_notify_buffer_edited(s_now, is_scoped, pkg_dir)
 	if im.GetCurrentContext() != nil {
 		_studio.last_undo_redo_frame = im.GetFrameCount()
 	}
@@ -488,7 +645,7 @@ code_studio_redo :: proc() -> bool {
 @(private = "file")
 _draw_undo_redo_buttons :: proc(
 	undo:      ^Code_Undo_Stack,
-	buf:       []byte,
+	buf:       ^[]byte,
 	ide:       ^_Surface_IDE_State,
 	dirty:     ^bool,
 	pkg_dir:   string,
@@ -513,10 +670,11 @@ _draw_undo_redo_buttons :: proc(
 	widgets.tooltip("Redo (Ctrl+Y / Ctrl+Shift+Z)")
 }
 
-configure_ide_defaults :: proc(explorer_zm, code_zm, problems_zm: f32, breadcrumbs, error_lens, sync_panes: bool) {
+configure_ide_defaults :: proc(explorer_zm, code_zm, problems_zm: f32, breadcrumbs, error_lens, sync_panes: bool, problem_delay_sec: f32 = 0.90) {
 	_ensure_zoom_init()
 	_studio.show_breadcrumbs = breadcrumbs
 	_studio.show_error_lens  = error_lens
+	set_problem_check_delay_sec(problem_delay_sec)
 	if sync_panes {
 		set_studio_explorer_zoom(explorer_zm)
 		set_studio_code_zoom(code_zm)
@@ -555,10 +713,12 @@ set_studio_problems_zoom :: proc(zoom: f32) {
 	_studio.problems_zoom = clamp(zoom, CODE_ZOOM_MIN, 2.00)
 }
 
-// Registers Blueprint `Using` namespace toggle/query hooks for the Scoped Node Popup IDE.
+// Registers Blueprint `Using` namespace toggle/query hooks for the Scoped Node Popup & Embedded Scoped IDEs.
 set_scoped_using_hooks :: proc(toggle_cb: Scoped_Using_Toggle_Fn, query_cb: Scoped_Using_Query_Fn) {
-	_scoped.using_toggle_cb = toggle_cb
-	_scoped.using_query_cb  = query_cb
+	_scoped.using_toggle_cb     = toggle_cb
+	_scoped.using_query_cb      = query_cb
+	_emb_scoped.using_toggle_cb = toggle_cb
+	_emb_scoped.using_query_cb  = query_cb
 }
 
 // Registers host editor hooks (`Relaunch (RAM Handoff)` and external IDE jump).
@@ -585,6 +745,10 @@ shutdown_studio :: proc() {
 	}
 	delete(_studio.tabs)
 	_clear_ide_pending_restore(&_studio.ide)
+	_free_ide_surface_cache(&_studio.ide)
+	if _studio.outline_arena_init {
+		mem.dynamic_arena_destroy(&_studio.outline_arena)
+	}
 	for f in _studio.discovered_files do delete(f)
 	delete(_studio.discovered_files)
 	for i in 0 ..< _studio.nav_len {
@@ -593,10 +757,12 @@ shutdown_studio :: proc() {
 	_studio = {}
 
 	_clear_scoped_state(&_scoped)
+	if len(_scoped.buf) > 0 do delete(_scoped.buf)
 	delete(_scoped.pins)
 	_scoped = {}
 
 	_clear_scoped_state(&_emb_scoped)
+	if len(_emb_scoped.buf) > 0 do delete(_emb_scoped.buf)
 	delete(_emb_scoped.pins)
 	_emb_scoped = {}
 }
@@ -622,6 +788,7 @@ _clear_scoped_state :: proc(s: ^_Scoped_Popup_State) {
 	}
 	clear(&s.pins)
 	_clear_ide_pending_restore(&s.ide)
+	_free_ide_surface_cache(&s.ide)
 	code_undo_free(&s.undo)
 	s.title             = ""
 	s.signature_banner  = ""
@@ -635,25 +802,211 @@ _clear_scoped_state :: proc(s: ^_Scoped_Popup_State) {
 }
 
 @(private = "file")
-_copy_to_c_buf :: proc(dst: []byte, text: string) {
-	// Normalize `\t` to 4 spaces so `im.CalcTextSize` sub-pixel syntax overlay matches `InputTextMultiline` 1:1!
-	norm, _ := strings.replace_all(text, "\t", "    ", context.temp_allocator)
-	clean, _ := strings.replace_all(norm, "\r\n", "\n", context.temp_allocator)
-	n := min(len(clean), len(dst) - 1)
-	if n > 0 do copy(dst[:n], clean[:n])
-	for i := n; i < len(dst); i += 1 do dst[i] = 0
+_ensure_buf_capacity :: proc(buf: ^[]byte, min_bytes: int, min_cap: int = STUDIO_MIN_BUF_CAP) {
+	if buf == nil do return
+	needed := max(min_bytes, min_cap, 1024)
+	if len(buf^) >= needed do return
+	new_cap := max(len(buf^) * 2, needed, min_cap)
+	prev_alloc := context.allocator
+	context.allocator = runtime.default_allocator()
+	new_buf := make([]byte, new_cap)
+	if len(buf^) > 0 {
+		old_str := widgets.buf_str(buf^)
+		n := min(len(old_str), new_cap - 1)
+		copy(new_buf[:n], old_str[:n])
+		new_buf[n] = 0
+		delete(buf^)
+	}
+	buf^ = new_buf
+	context.allocator = prev_alloc
+}
+
+// Detects whether an Odin source file uses leading hard `\t` characters for indentation.
+detect_odin_hard_tabs :: proc(src: string) -> bool {
+	line_start := true
+	for i := 0; i < len(src); i += 1 {
+		b := src[i]
+		if line_start {
+			if b == '\t' do return true
+			if b != ' ' && b != '\r' && b != '\n' {
+				line_start = false
+			}
+		}
+		if b == '\n' {
+			line_start = true
+		}
+	}
+	return false
+}
+
+// Restores leading `\t` hard tabs on save when `uses_tabs` is true, without corrupting
+// lines inside raw backtick multiline string literals.
+format_studio_buffer_for_disk :: proc(buf_str: string, uses_tabs: bool, allocator := context.temp_allocator) -> string {
+	if !uses_tabs || len(buf_str) == 0 do return buf_str
+	sb := strings.builder_make(0, len(buf_str), allocator)
+	i := 0
+	in_raw_str := false
+	block_comment_depth := 0
+	for i < len(buf_str) {
+		line_end := i
+		for line_end < len(buf_str) && buf_str[line_end] != '\n' {
+			line_end += 1
+		}
+		line := buf_str[i:line_end]
+		if in_raw_str || block_comment_depth > 0 {
+			strings.write_string(&sb, line)
+		} else {
+			k := 0
+			for k + 4 <= len(line) && line[k:k + 4] == "    " {
+				strings.write_byte(&sb, '\t')
+				k += 4
+			}
+			strings.write_string(&sb, line[k:])
+		}
+		if line_end < len(buf_str) && buf_str[line_end] == '\n' {
+			strings.write_byte(&sb, '\n')
+		}
+		// Advance lexical state to know whether the next line begins inside a raw backtick literal.
+		j := 0
+		in_dquote := false
+		in_squote := false
+		for j < len(line) {
+			ch := line[j]
+			if in_raw_str {
+				if ch == '`' do in_raw_str = false
+				j += 1
+				continue
+			}
+			if block_comment_depth > 0 {
+				if ch == '/' && j + 1 < len(line) && line[j + 1] == '*' {
+					block_comment_depth += 1
+					j += 2
+					continue
+				}
+				if ch == '*' && j + 1 < len(line) && line[j + 1] == '/' {
+					block_comment_depth -= 1
+					j += 2
+					continue
+				}
+				j += 1
+				continue
+			}
+			if in_dquote {
+				if ch == '\\' && j + 1 < len(line) {
+					j += 2
+					continue
+				}
+				if ch == '"' do in_dquote = false
+				j += 1
+				continue
+			}
+			if in_squote {
+				if ch == '\\' && j + 1 < len(line) {
+					j += 2
+					continue
+				}
+				if ch == '\'' do in_squote = false
+				j += 1
+				continue
+			}
+			if ch == '/' && j + 1 < len(line) {
+				if line[j + 1] == '/' do break
+				if line[j + 1] == '*' {
+					block_comment_depth += 1
+					j += 2
+					continue
+				}
+			}
+			if ch == '`' {
+				in_raw_str = true
+			} else if ch == '"' {
+				in_dquote = true
+			} else if ch == '\'' {
+				in_squote = true
+			}
+			j += 1
+		}
+		i = line_end + 1
+	}
+	return strings.to_string(sb)
 }
 
 @(private = "file")
-_c_buf_string :: proc(buf: []byte) -> string {
-	return string(cstring(raw_data(buf)))
+_copy_to_c_buf_grow :: proc(dst: ^[]byte, text: string, min_cap: int = STUDIO_MIN_BUF_CAP) {
+	// Normalize `\t` to 4 spaces so `im.CalcTextSize` sub-pixel syntax overlay matches `InputTextMultiline` 1:1!
+	// Disk writes convert leading 4-space indentation back to `\t` when `uses_tabs` is set.
+	norm, _ := strings.replace_all(text, "\t", "    ", context.temp_allocator)
+	clean, _ := strings.replace_all(norm, "\r\n", "\n", context.temp_allocator)
+	_ensure_buf_capacity(dst, len(clean) + 1, min_cap)
+	widgets.buf_set(dst^, clean)
+}
+
+@(private = "file")
+_c_buf_string :: #force_inline proc(buf: []byte) -> string {
+	return widgets.buf_str(buf)
+}
+
+@(private = "file")
+_notify_buffer_edited :: proc(src: string, is_scoped: bool, pkg_dir: string, force_compiler_now: bool = false) {
+	submit_async_check(src, is_scoped, pkg_dir, force_compiler_now)
+	ac_pkg := is_scoped && pkg_dir == "" ? "haati/hot_scripts" : pkg_dir
+	submit_async_autocomplete_index(src, is_scoped, ac_pkg)
+}
+
+// Resolves a workspace script/file path against active project, repo_root, and haati/ using forward slashes.
+resolve_workspace_path :: proc(abs_or_rel_path: string, allocator := context.temp_allocator) -> string {
+	repo_root := engine.resolve_repo_root(context.temp_allocator)
+	resolved := abs_or_rel_path
+	if !filepath.is_abs(resolved) || !os.exists(resolved) {
+		proj_root := engine.active_project_root()
+		proj_cand := ""
+		if proj_root != "" {
+			proj_cand, _ = filepath.join({proj_root, abs_or_rel_path}, context.temp_allocator)
+		}
+		cand1, _ := filepath.join({repo_root, abs_or_rel_path}, context.temp_allocator)
+		cand2, _ := filepath.join({repo_root, "haati", abs_or_rel_path}, context.temp_allocator)
+		if proj_cand != "" && os.exists(proj_cand) {
+			resolved = proj_cand
+		} else if os.exists(cand1) {
+			resolved = cand1
+		} else if os.exists(cand2) {
+			resolved = cand2
+		} else if !filepath.is_abs(resolved) && !os.exists(resolved) {
+			resolved = proj_cand != "" ? proj_cand : cand1
+		}
+	}
+	norm, _ := strings.replace_all(resolved, "\\", "/", allocator)
+	return norm
+}
+
+// Finds a registered @(hot_proc) entry by exact name.
+resolve_hot_proc_info :: proc(proc_name: string) -> (entry: engine.Hot_Proc_Entry, ok: bool) {
+	if proc_name == "" do return {}, false
+	for he in engine.hot_proc_entries() {
+		if he.name == proc_name do return he, true
+	}
+	return {}, false
 }
 
 @(private = "file")
 _infer_pkg_dir :: proc(abs_path: string, allocator := context.temp_allocator) -> string {
 	norm, _ := strings.replace_all(abs_path, "\\", "/", context.temp_allocator)
-	if strings.has_suffix(norm, ".bodin") {
-		return strings.clone("haati/hot_scripts", allocator)
+	if strings.has_suffix(norm, ".bodin") || strings.has_suffix(norm, ".mhgraph") || strings.contains(norm, "/assets/scripts/") {
+		return ""
+	}
+	if engine.has_active_project() {
+		proj_root, _ := strings.replace_all(engine.active_project_root(), "\\", "/", context.temp_allocator)
+		proj_root = strings.trim_right(proj_root, "/")
+		proj_prefix := strings.concatenate({proj_root, "/"}, context.temp_allocator)
+		if len(norm) >= len(proj_prefix) && strings.equal_fold(norm[:len(proj_prefix)], proj_prefix) {
+			dir: string
+			{
+				context.allocator = context.temp_allocator
+				dir = filepath.dir(norm)
+			}
+			dnorm, _ := strings.replace_all(dir, "\\", "/", allocator)
+			return dnorm
+		}
 	}
 	if idx := strings.index(norm, "haati/"); idx >= 0 {
 		dir: string
@@ -712,22 +1065,14 @@ open_scoped_node_popup :: proc(
 		})
 	}
 
-	_copy_to_c_buf(_scoped.buf[:], initial_body)
-	body_str := _c_buf_string(_scoped.buf[:])
+	_copy_to_c_buf_grow(&_scoped.buf, initial_body, SCOPED_MIN_BUF_CAP)
+	body_str := _c_buf_string(_scoped.buf)
 	code_undo_reset(&_scoped.undo, body_str, 0)
-	submit_async_check(body_str, true, "")
-	submit_async_autocomplete_index(body_str, true, "haati/hot_scripts")
+	_notify_buffer_edited(body_str, true, "")
 }
 
 open_scoped_proc_popup :: proc(title: string, abs_or_rel_file: string, proc_name: string) -> bool {
-	repo_root := engine.resolve_repo_root(context.temp_allocator)
-	resolved := abs_or_rel_file
-	if !os.exists(resolved) {
-		cand1, _ := filepath.join({repo_root, abs_or_rel_file}, context.temp_allocator)
-		cand2, _ := filepath.join({repo_root, "haati", abs_or_rel_file}, context.temp_allocator)
-		if os.exists(cand1) do resolved = cand1
-		else if os.exists(cand2) do resolved = cand2
-	}
+	resolved := resolve_workspace_path(abs_or_rel_file, context.temp_allocator)
 	raw, rerr := os.read_entire_file(resolved, context.temp_allocator)
 	if rerr != nil do return false
 
@@ -754,36 +1099,16 @@ open_scoped_proc_popup :: proc(title: string, abs_or_rel_file: string, proc_name
 		_scoped.dirty             = false
 	}
 
-	_copy_to_c_buf(_scoped.buf[:], sliced.body_text)
-	body_str := _c_buf_string(_scoped.buf[:])
+	_copy_to_c_buf_grow(&_scoped.buf, sliced.body_text, SCOPED_MIN_BUF_CAP)
+	body_str := _c_buf_string(_scoped.buf)
 	code_undo_reset(&_scoped.undo, body_str, 0)
-	submit_async_check(body_str, true, pkg_dir)
-	submit_async_autocomplete_index(body_str, true, pkg_dir)
+	_notify_buffer_edited(body_str, true, pkg_dir)
 	return true
-}
-
-@(private = "file")
-_canonical_studio_path :: proc(abs_or_rel_path: string, allocator := context.temp_allocator) -> string {
-	repo_root := engine.resolve_repo_root(context.temp_allocator)
-	resolved := abs_or_rel_path
-	if !filepath.is_abs(resolved) {
-		cand1, _ := filepath.join({repo_root, abs_or_rel_path}, context.temp_allocator)
-		cand2, _ := filepath.join({repo_root, "haati", abs_or_rel_path}, context.temp_allocator)
-		if os.exists(cand1) {
-			resolved = cand1
-		} else if os.exists(cand2) {
-			resolved = cand2
-		} else if !os.exists(resolved) {
-			resolved = cand1
-		}
-	}
-	norm, _ := strings.replace_all(resolved, "\\", "/", allocator)
-	return norm
 }
 
 open_file_in_studio :: proc(abs_or_rel_path: string, jump_line: int = 0) -> bool {
 	_ensure_zoom_init()
-	norm_abs := _canonical_studio_path(abs_or_rel_path, context.temp_allocator)
+	norm_abs := resolve_workspace_path(abs_or_rel_path, context.temp_allocator)
 
 	for &t, idx in _studio.tabs {
 		if t.abs_path == norm_abs {
@@ -792,9 +1117,7 @@ open_file_in_studio :: proc(abs_or_rel_path: string, jump_line: int = 0) -> bool
 			_studio.request_tab_select = idx
 			if jump_line > 0 do t.scroll_line = jump_line
 			if !was_active {
-				s := _c_buf_string(t.buf)
-				submit_async_check(s, false, t.pkg_dir)
-				submit_async_autocomplete_index(s, false, t.pkg_dir)
+				_notify_buffer_edited(_c_buf_string(t.buf), false, t.pkg_dir)
 			}
 			return true
 		}
@@ -806,9 +1129,11 @@ open_file_in_studio :: proc(abs_or_rel_path: string, jump_line: int = 0) -> bool
 	pkg_dir := _infer_pkg_dir(norm_abs, context.temp_allocator)
 	base_name := filepath.base(norm_abs)
 
+	raw_str := string(raw)
+	uses_tabs := detect_odin_hard_tabs(raw_str)
 	context.allocator = runtime.default_allocator()
-	buf := make([]byte, STUDIO_BUF_CAP)
-	_copy_to_c_buf(buf, string(raw))
+	buf: []byte
+	_copy_to_c_buf_grow(&buf, raw_str, STUDIO_MIN_BUF_CAP)
 	s := _c_buf_string(buf)
 	new_tab := _Tab_Doc{
 		title       = strings.clone(base_name),
@@ -816,6 +1141,7 @@ open_file_in_studio :: proc(abs_or_rel_path: string, jump_line: int = 0) -> bool
 		pkg_dir     = strings.clone(pkg_dir),
 		buf         = buf,
 		dirty       = false,
+		uses_tabs   = uses_tabs,
 		scroll_line = jump_line,
 	}
 	code_undo_reset(&new_tab.undo, s, 0)
@@ -824,8 +1150,7 @@ open_file_in_studio :: proc(abs_or_rel_path: string, jump_line: int = 0) -> bool
 	_studio.request_tab_select = _studio.active_tab
 	_clear_ide_pending_restore(&_studio.ide)
 	_studio.ide = {ac_dismissed_pos = -1, cmd_jump_offset = -1}
-	submit_async_check(s, false, pkg_dir)
-	submit_async_autocomplete_index(s, false, pkg_dir)
+	_notify_buffer_edited(s, false, pkg_dir)
 	return true
 }
 
@@ -894,6 +1219,18 @@ _code_input_callback :: proc "c" (data: ^im.InputTextCallbackData) -> i32 {
 	if data == nil || data.UserData == nil do return 0
 	ide := cast(^_Surface_IDE_State)data.UserData
 
+	if .CallbackResize in data.EventFlag {
+		if ide.active_buf != nil {
+			_ensure_buf_capacity(ide.active_buf, int(data.BufSize) + 1024, STUDIO_MIN_BUF_CAP)
+			if int(data.BufTextLen) >= 0 && int(data.BufTextLen) < len(ide.active_buf^) {
+				ide.active_buf^[data.BufTextLen] = 0
+			}
+			data.Buf     = cstring(raw_data(ide.active_buf^))
+			data.BufSize = i32(len(ide.active_buf^))
+		}
+		return 0
+	}
+
 	// 1. Character Filter (`Enter` accepts autocomplete when open, or triggers Smart Auto-Indent!)
 	if .CallbackCharFilter in data.EventFlag {
 		if data.EventChar == '\n' || data.EventChar == '\r' {
@@ -917,15 +1254,17 @@ _code_input_callback :: proc "c" (data: ^im.InputTextCallbackData) -> i32 {
 			ide.ac_pending_accept = true
 		} else if ide.cmd_outdent_tab {
 			ide.cmd_outdent_tab = false
-			raw_ptr := cast([^]byte)data.Buf
-			s := string(raw_ptr[:data.BufTextLen])
-			ls, _ := _line_bounds_at(s, int(data.CursorPos))
-			spaces := 0
-			for spaces < 4 && ls + spaces < len(s) && s[ls + spaces] == ' ' {
-				spaces += 1
-			}
-			if spaces > 0 {
-				im.InputTextCallbackData_DeleteChars(data, i32(ls), i32(spaces))
+			if data.Buf != nil && data.BufTextLen > 0 {
+				raw_ptr := cast([^]byte)data.Buf
+				s := string(raw_ptr[:data.BufTextLen])
+				ls, _ := _line_bounds_at(s, int(data.CursorPos))
+				spaces := 0
+				for spaces < 4 && ls + spaces < len(s) && s[ls + spaces] == ' ' {
+					spaces += 1
+				}
+				if spaces > 0 {
+					im.InputTextCallbackData_DeleteChars(data, i32(ls), i32(spaces))
+				}
 			}
 		} else {
 			im.InputTextCallbackData_InsertChars(data, data.CursorPos, "    ")
@@ -953,9 +1292,7 @@ _code_input_callback :: proc "c" (data: ^im.InputTextCallbackData) -> i32 {
 				im.InputTextCallbackData_DeleteChars(data, 0, data.BufTextLen)
 			}
 			if len(ide.cmd_restore_text) > 0 {
-				max_ins := max(int(data.BufSize) - 1, 0)
-				src_txt := len(ide.cmd_restore_text) > max_ins ? ide.cmd_restore_text[:max_ins] : ide.cmd_restore_text
-				c_txt := strings.clone_to_cstring(src_txt, context.temp_allocator)
+				c_txt := strings.clone_to_cstring(ide.cmd_restore_text, context.temp_allocator)
 				im.InputTextCallbackData_InsertChars(data, 0, c_txt)
 			}
 			cpos := clamp(i32(ide.cmd_restore_cursor), 0, data.BufTextLen)
@@ -969,48 +1306,86 @@ _code_input_callback :: proc "c" (data: ^im.InputTextCallbackData) -> i32 {
 
 		// 4a. Apply pending Autocomplete Accept (`Tab`, `Enter`, or mouse click on popup item)
 		if ide.ac_pending_accept && ide.ac_accept_len > 0 {
-			ide.ac_pending_accept   = false
-			ide.next_edit_immediate = true
-			rep_s := clamp(i32(ide.ac_replace_start), 0, data.CursorPos)
-			del_n := data.CursorPos - rep_s
+			ide.ac_pending_accept    = false
+			ide.next_edit_immediate  = true
+			cur_cpos := clamp(i32(ide.cursor_pos), 0, data.BufTextLen)
+			data.CursorPos      = cur_cpos
+			data.SelectionStart = cur_cpos
+			data.SelectionEnd   = cur_cpos
+			rep_s := clamp(i32(ide.ac_replace_start), 0, cur_cpos)
+			del_n := cur_cpos - rep_s
 			if del_n > 0 {
 				im.InputTextCallbackData_DeleteChars(data, rep_s, del_n)
 			}
 			ide.ac_accept_text[min(ide.ac_accept_len, len(ide.ac_accept_text) - 1)] = 0
 			im.InputTextCallbackData_InsertChars(data, rep_s, cstring(raw_data(ide.ac_accept_text[:])))
-			ide.ac_open = false
-			ide.ac_dismissed_pos = int(data.CursorPos)
+			new_cpos := clamp(rep_s + i32(ide.ac_accept_len), 0, data.BufTextLen)
+			data.CursorPos           = new_cpos
+			data.SelectionStart      = new_cpos
+			data.SelectionEnd        = new_cpos
+			ide.ac_open              = false
+			ide.ac_popup_interacting = false
+			ide.ac_popup_dragging    = false
+			ide.ac_dismissed_pos     = int(new_cpos)
+		}
+
+		// 4a-bis. Context-menu Paste at saved caret / selection
+		if ide.cmd_paste_pending {
+			if len(ide.cmd_paste_text) > 0 {
+				ide.next_edit_immediate = true
+				s_lo := clamp(i32(min(ide.sel_start, ide.sel_end)), 0, data.BufTextLen)
+				s_hi := clamp(i32(max(ide.sel_start, ide.sel_end)), 0, data.BufTextLen)
+				if s_hi <= s_lo {
+					s_lo = clamp(i32(ide.cursor_pos), 0, data.BufTextLen)
+					s_hi = s_lo
+				}
+				if s_hi > s_lo {
+					im.InputTextCallbackData_DeleteChars(data, s_lo, s_hi - s_lo)
+				}
+				clip := ide.cmd_paste_text
+				if len(clip) > 0 {
+					c_clip := strings.clone_to_cstring(clip, context.temp_allocator)
+					im.InputTextCallbackData_InsertChars(data, s_lo, c_clip)
+					new_p := clamp(s_lo + i32(len(clip)), 0, data.BufTextLen)
+					data.CursorPos      = new_p
+					data.SelectionStart = new_p
+					data.SelectionEnd   = new_p
+				}
+			}
+			_clear_ide_pending_paste(ide)
 		}
 
 		// 4b. Apply Smart Auto-Indent right after ImGui inserts `'\n'`!
 		if ide.cmd_auto_indent {
 			ide.cmd_auto_indent = false
-			cpos := int(data.CursorPos)
-			raw_ptr := cast([^]byte)data.Buf
-			s := string(raw_ptr[:data.BufTextLen])
-			if cpos > 0 && cpos <= len(s) && s[cpos - 1] == '\n' {
-				prev_ls, prev_le := _line_bounds_at(s, cpos - 1)
-				indent_n := 0
-				for prev_ls + indent_n < prev_le && s[prev_ls + indent_n] == ' ' {
-					indent_n += 1
-				}
-				// Trim trailing spaces on previous line to check if it opened a block (`{`, `(`, `:`)
-				trim_end := prev_le
-				for trim_end > prev_ls && (s[trim_end - 1] == ' ' || s[trim_end - 1] == '\r') {
-					trim_end -= 1
-				}
-				if trim_end > prev_ls {
-					last_ch := s[trim_end - 1]
-					if last_ch == '{' || last_ch == '(' || last_ch == ':' {
-						indent_n += 4
+			if data.Buf != nil && data.BufTextLen > 0 {
+				cpos := int(data.CursorPos)
+				raw_ptr := cast([^]byte)data.Buf
+				s := string(raw_ptr[:data.BufTextLen])
+				if cpos > 0 && cpos <= len(s) && s[cpos - 1] == '\n' {
+					prev_ls, prev_le := _line_bounds_at(s, cpos - 1)
+					indent_n := 0
+					for prev_ls + indent_n < prev_le && s[prev_ls + indent_n] == ' ' {
+						indent_n += 1
 					}
-				}
-				if indent_n > 0 {
-					indent_n = min(indent_n, 64)
-					var_spaces: [65]byte
-					for i in 0 ..< indent_n do var_spaces[i] = ' '
-					var_spaces[indent_n] = 0
-					im.InputTextCallbackData_InsertChars(data, data.CursorPos, cstring(raw_data(var_spaces[:])))
+					// Trim trailing spaces on previous line to check if it opened a block (`{`, `(`, `:`)
+					trim_end := prev_le
+					for trim_end > prev_ls && (s[trim_end - 1] == ' ' || s[trim_end - 1] == '\r') {
+						trim_end -= 1
+					}
+					if trim_end > prev_ls {
+						last_ch := s[trim_end - 1]
+						if last_ch == '{' || last_ch == '(' || last_ch == ':' {
+							indent_n += 4
+						}
+					}
+					if indent_n > 0 {
+						indent_n = min(indent_n, 64)
+						var_spaces: [65]byte
+						for i in 0 ..< indent_n do var_spaces[i] = ' '
+						var_spaces[indent_n] = 0
+						im.InputTextCallbackData_InsertChars(data, data.CursorPos, cstring(raw_data(var_spaces[:])))
+					}
 				}
 			}
 		}
@@ -1019,18 +1394,20 @@ _code_input_callback :: proc "c" (data: ^im.InputTextCallbackData) -> i32 {
 		if ide.cmd_toggle_comment {
 			ide.cmd_toggle_comment  = false
 			ide.next_edit_immediate = true
-			raw_ptr := cast([^]byte)data.Buf
-			s := string(raw_ptr[:data.BufTextLen])
-			ls, le := _line_bounds_at(s, int(data.CursorPos))
-			first_non_ws := ls
-			for first_non_ws < le && s[first_non_ws] == ' ' {
-				first_non_ws += 1
-			}
-			if first_non_ws + 2 <= le && s[first_non_ws] == '/' && s[first_non_ws + 1] == '/' {
-				del_cnt: i32 = (first_non_ws + 3 <= le && s[first_non_ws + 2] == ' ') ? 3 : 2
-				im.InputTextCallbackData_DeleteChars(data, i32(first_non_ws), del_cnt)
-			} else {
-				im.InputTextCallbackData_InsertChars(data, i32(first_non_ws), "// ")
+			if data.Buf != nil && data.BufTextLen >= 0 {
+				raw_ptr := cast([^]byte)data.Buf
+				s := string(raw_ptr[:data.BufTextLen])
+				ls, le := _line_bounds_at(s, int(data.CursorPos))
+				first_non_ws := ls
+				for first_non_ws < le && s[first_non_ws] == ' ' {
+					first_non_ws += 1
+				}
+				if first_non_ws + 2 <= le && s[first_non_ws] == '/' && s[first_non_ws + 1] == '/' {
+					del_cnt: i32 = (first_non_ws + 3 <= le && s[first_non_ws + 2] == ' ') ? 3 : 2
+					im.InputTextCallbackData_DeleteChars(data, i32(first_non_ws), del_cnt)
+				} else {
+					im.InputTextCallbackData_InsertChars(data, i32(first_non_ws), "// ")
+				}
 			}
 		}
 
@@ -1038,18 +1415,18 @@ _code_input_callback :: proc "c" (data: ^im.InputTextCallbackData) -> i32 {
 		if ide.cmd_dup_line {
 			ide.cmd_dup_line        = false
 			ide.next_edit_immediate = true
-			raw_ptr := cast([^]byte)data.Buf
-			s := string(raw_ptr[:data.BufTextLen])
-			ls, le := _line_bounds_at(s, int(data.CursorPos))
-			line_len := le - ls
-			if line_len + 2 < 1024 && int(data.BufTextLen) + line_len + 2 < int(data.BufSize) {
-				var_dup: [1024]byte
-				var_dup[0] = '\n'
+			if data.Buf != nil && data.BufTextLen >= 0 {
+				raw_ptr := cast([^]byte)data.Buf
+				s := string(raw_ptr[:data.BufTextLen])
+				ls, le := _line_bounds_at(s, int(data.CursorPos))
+				line_len := le - ls
+				dup_slice := make([]byte, line_len + 2, context.temp_allocator)
+				dup_slice[0] = '\n'
 				if line_len > 0 {
-					for k in 0 ..< line_len do var_dup[1 + k] = s[ls + k]
+					copy(dup_slice[1:1 + line_len], s[ls:le])
 				}
-				var_dup[1 + line_len] = 0
-				im.InputTextCallbackData_InsertChars(data, i32(le), cstring(raw_data(var_dup[:])))
+				dup_slice[1 + line_len] = 0
+				im.InputTextCallbackData_InsertChars(data, i32(le), cstring(raw_data(dup_slice)))
 			}
 		}
 
@@ -1058,10 +1435,10 @@ _code_input_callback :: proc "c" (data: ^im.InputTextCallbackData) -> i32 {
 			dir := ide.cmd_move_line_dir
 			ide.cmd_move_line_dir   = 0
 			ide.next_edit_immediate = true
-			raw_ptr := cast([^]byte)data.Buf
-			s := string(raw_ptr[:data.BufTextLen])
-			if moved, new_cpos, ok := move_line_in_source(s, int(data.CursorPos), dir, context.temp_allocator); ok {
-				if len(moved) + 1 < int(data.BufSize) {
+			if data.Buf != nil && data.BufTextLen > 0 {
+				raw_ptr := cast([^]byte)data.Buf
+				s := string(raw_ptr[:data.BufTextLen])
+				if moved, new_cpos, ok := move_line_in_source(s, int(data.CursorPos), dir, context.temp_allocator); ok {
 					c_moved := strings.clone_to_cstring(moved, context.temp_allocator)
 					im.InputTextCallbackData_DeleteChars(data, 0, data.BufTextLen)
 					im.InputTextCallbackData_InsertChars(data, 0, c_moved)
@@ -1145,8 +1522,8 @@ _draw_goto_line_bar :: proc(ide: ^_Surface_IDE_State, buf: []byte, scroll_to_lin
 // =============================================================================
 
 @(private = "file")
-_draw_find_replace_bar :: proc(ide: ^_Surface_IDE_State, buf: []byte, scroll_to_line: ^int = nil) -> (modified: bool) {
-	if !ide.find_open do return false
+_draw_find_replace_bar :: proc(ide: ^_Surface_IDE_State, buf: ^[]byte, scroll_to_line: ^int = nil) -> (modified: bool) {
+	if !ide.find_open || buf == nil do return false
 
 	p := thm.palette()
 	im.PushStyleColorImVec4(.ChildBg, p.is_light ? thm.lerp_col(p.bg_canvas, p.accent, 0.08) : thm.lerp_col(p.bg_canvas, p.accent, 0.14))
@@ -1160,7 +1537,7 @@ _draw_find_replace_bar :: proc(ide: ^_Surface_IDE_State, buf: []byte, scroll_to_
 		im.SetNextItemWidth(170)
 		find_enter := im.InputTextWithHint("##ide_find_q", "Search text...", cstring(raw_data(ide.find_buf[:])), len(ide.find_buf), {.EnterReturnsTrue})
 
-		src := _c_buf_string(buf)
+		src := _c_buf_string(buf^)
 		q   := _c_buf_string(ide.find_buf[:])
 		rep := _c_buf_string(ide.replace_buf[:])
 
@@ -1205,7 +1582,7 @@ _draw_find_replace_bar :: proc(ide: ^_Surface_IDE_State, buf: []byte, scroll_to_
 		if im.SmallButton("Replace All") && len(q) > 0 && match_count > 0 {
 			replaced, was_alloc := strings.replace_all(src, q, rep, context.temp_allocator)
 			_ = was_alloc
-			_copy_to_c_buf(buf, replaced)
+			_copy_to_c_buf_grow(buf, replaced, max(len(buf^), STUDIO_MIN_BUF_CAP))
 			modified = true
 		}
 		widgets.tooltip("Replace all occurrences in this buffer")
@@ -1254,7 +1631,7 @@ _draw_zoom_pill_controls :: proc(id_suffix: cstring) {
 @(private = "file")
 _draw_syntax_code_surface :: proc(
 	child_id:       cstring,
-	buf:            []byte,
+	buf:            ^[]byte,
 	size:           im.Vec2,
 	diags:          []Studio_Diagnostic,
 	ide:            ^_Surface_IDE_State,
@@ -1265,8 +1642,12 @@ _draw_syntax_code_surface :: proc(
 	dirty:          ^bool              = nil,
 	pkg_dir:        string             = "",
 ) -> (edited: bool) {
+	if buf == nil do return false
+	min_cap := is_scoped_body ? SCOPED_MIN_BUF_CAP : STUDIO_MIN_BUF_CAP
+	_ensure_buf_capacity(buf, 1, min_cap)
 	_ensure_zoom_init()
 	p  := thm.palette()
+	st := thm.studio_tokens()
 	io := im.GetIO()
 
 	// Inline Find & Replace Bar (`Ctrl+F`) + Go-to-Line Bar (`Ctrl+G`)
@@ -1275,7 +1656,7 @@ _draw_syntax_code_surface :: proc(
 		edited           = true
 		discrete_replace = true
 	}
-	_draw_goto_line_bar(ide, buf, scroll_to_line)
+	_draw_goto_line_bar(ide, buf^, scroll_to_line)
 
 	child_size := size
 	if ide.find_open && child_size.y > 40.0 {
@@ -1291,7 +1672,7 @@ _draw_syntax_code_surface :: proc(
 	im.PushFontFloat(nil, scaled_font_px)
 	defer im.PopFont()
 
-	im.PushStyleColorImVec4(.ChildBg, p.is_light ? thm.lerp_col(p.bg_canvas, {1, 1, 1, 1}, 0.5) : thm.lerp_col(p.bg_canvas, {0, 0, 0, 1}, 0.28))
+	im.PushStyleColorImVec4(.ChildBg, st.code_child_bg)
 	im.PushStyleVarImVec2(.WindowPadding, {0, 0})
 	// Disable wheel scrolling on the child container while `Ctrl` is held so `Ctrl + MouseWheel`
 	// zooms cleanly without jumping the vertical scrollbar!
@@ -1378,9 +1759,11 @@ _draw_syntax_code_surface :: proc(
 	}
 	if surface_focused && im.IsKeyPressed(.Escape, false) {
 		if ide.ac_open {
-			ide.ac_open          = false
-			ide.ac_force_open    = false
-			ide.ac_dismissed_pos = ide.cursor_pos
+			ide.ac_open              = false
+			ide.ac_force_open        = false
+			ide.ac_popup_interacting = false
+			ide.ac_popup_dragging    = false
+			ide.ac_dismissed_pos     = ide.cursor_pos
 		} else if ide.goto_open {
 			ide.goto_open = false
 		} else if ide.find_open {
@@ -1388,8 +1771,9 @@ _draw_syntax_code_surface :: proc(
 		}
 	}
 
-	src_before  := _c_buf_string(buf)
-	line_starts := compute_line_starts(src_before, context.temp_allocator)
+	src_before := _c_buf_string(buf^)
+	_ensure_ide_surface_cache(ide, src_before)
+	line_starts := ide.cached_line_starts[:]
 	num_lines   := max(len(line_starts), 1)
 	line_h      := im.GetTextLineHeight()
 	gutter_w    := max(im.CalcTextSize("9999").x + 22.0, 46.0)
@@ -1410,6 +1794,13 @@ _draw_syntax_code_surface :: proc(
 	ide.caret_line = caret_ln
 	ide.caret_col  = caret_col
 
+	if ide.cmd_jump_line > 0 && len(line_starts) > 0 {
+		clamped_jmp := clamp(ide.cmd_jump_line, 1, len(line_starts))
+		ide.cmd_jump_offset  = line_starts[clamped_jmp - 1]
+		ide.cmd_jump_line    = 0
+		ide.ac_refocus_input = true
+		im.SetScrollY(max(f32(clamped_jmp - 3) * line_h, 0.0))
+	}
 	if scroll_to_line != nil && scroll_to_line^ > 0 {
 		im.SetScrollY(max(f32(scroll_to_line^ - 3) * line_h, 0.0))
 		scroll_to_line^ = 0
@@ -1427,36 +1818,35 @@ _draw_syntax_code_surface :: proc(
 	avail   := im.GetContentRegionAvail()
 	total_h := max(f32(num_lines + 5) * line_h + pad_y * 2.0, avail.y)
 
-	max_line_px := avail.x - gutter_w
-	for ln_i in 0 ..< len(line_starts) {
-		ls := line_starts[ln_i]
-		le := ln_i + 1 < len(line_starts) ? (line_starts[ln_i + 1] - 1) : len(src_before)
-		if le > ls && src_before[le - 1] == '\r' do le -= 1
-		if le > ls {
-			w := im.CalcTextSize(fmt.ctprintf("%s", src_before[ls:le])).x + 64.0
-			if w > max_line_px do max_line_px = w
-		}
-	}
+	char_adv_est := max(im.CalcTextSize("M").x, 7.0)
+	max_line_px  := max(avail.x - gutter_w, f32(ide.cache_max_cols) * char_adv_est + 64.0)
+	win_pos      := im.GetWindowPos()
+	win_h        := im.GetWindowHeight()
+	first_ln_i   := clamp(int(math.floor((win_pos.y - origin.y - pad_y) / max(line_h, 1.0))) - 2, 0, num_lines - 1)
+	last_ln_i    := clamp(int(math.ceil((win_pos.y + win_h - origin.y - pad_y) / max(line_h, 1.0))) + 2, first_ln_i, num_lines - 1)
 
-	// 1. Gutter backdrop, Active Caret Line Highlight, & Error Line Tinting
-	gutter_bg := p.is_light ? thm.lerp_col(p.bg_canvas, {0, 0, 0, 1}, 0.04) : thm.lerp_col(p.bg_canvas, {1, 1, 1, 1}, 0.03)
-	im.DrawList_AddRectFilled(dl, origin, {origin.x + gutter_w, origin.y + total_h}, im.GetColorU32ImVec4(gutter_bg))
+	// 1. Gutter backdrop, Active Caret Line Highlight, & Error Line Tinting (clipped to visible viewport)
+	im.DrawList_AddRectFilled(dl, origin, {origin.x + gutter_w, origin.y + total_h}, im.GetColorU32ImVec4(st.gutter_bg))
 	im.DrawList_AddLine(dl, {origin.x + gutter_w, origin.y}, {origin.x + gutter_w, origin.y + total_h}, im.GetColorU32ImVec4(p.border_subtle), 1.0)
 
-	for ln := 1; ln <= num_lines; ln += 1 {
-		ly := origin.y + pad_y + f32(ln - 1) * line_h
+	gutter_tooltip_shown := false
+	for ln_i in first_ln_i ..= last_ln_i {
+		ln := ln_i + 1
+		ly := origin.y + pad_y + f32(ln_i) * line_h
 		if ln == caret_ln && surface_focused {
-			act_tint := p.is_light ? thm.with_alpha(p.accent, 0.07) : im.Vec4{1.0, 1.0, 1.0, 0.04}
-			im.DrawList_AddRectFilled(dl, {origin.x + gutter_w + 1, ly}, {origin.x + gutter_w + max_line_px, ly + line_h}, im.GetColorU32ImVec4(act_tint))
+			im.DrawList_AddRectFilled(dl, {origin.x + gutter_w + 1, ly}, {origin.x + gutter_w + max_line_px, ly + line_h}, im.GetColorU32ImVec4(st.active_line_tint))
 		}
 		if d, has_d := diag_by_line[ln]; has_d {
-			row_tint := d.is_warning ? im.Vec4{0.95, 0.72, 0.20, 0.14} : im.Vec4{0.96, 0.26, 0.28, 0.16}
+			row_tint := d.is_warning ? st.diag_warn_row : st.diag_err_row
 			im.DrawList_AddRectFilled(dl, {origin.x + gutter_w + 1, ly}, {origin.x + gutter_w + max_line_px, ly + line_h}, im.GetColorU32ImVec4(row_tint))
-			dot_col := d.is_warning ? im.Vec4{0.98, 0.78, 0.25, 1.0} : im.Vec4{1.0, 0.34, 0.36, 1.0}
+			dot_col := d.is_warning ? st.diag_warn_fg : st.diag_err_fg
 			im.DrawList_AddCircleFilled(dl, {origin.x + 8.0, ly + line_h * 0.5}, 3.5, im.GetColorU32ImVec4(dot_col))
 
 			im.SetCursorScreenPos({origin.x, ly})
 			im.InvisibleButton(fmt.ctprintf("##ln_err_%d", ln), {gutter_w, line_h})
+			if im.IsItemHovered() {
+				gutter_tooltip_shown = true
+			}
 			widgets.tooltip(fmt.ctprintf("Line %d:%d — %s", d.line, d.column, d.message))
 		}
 		num_col := ln == caret_ln ? p.accent : p.text_muted
@@ -1496,17 +1886,18 @@ _draw_syntax_code_surface :: proc(
 	im.PushStyleColorImVec4(.InputTextCursor, p.accent)
 	im.PushStyleColorImVec4(.TextSelectedBg, thm.with_alpha(p.accent, 0.28))
 
-	in_flags: im.InputTextFlags = {.NoUndoRedo, .CallbackAlways, .CallbackCompletion, .CallbackCharFilter}
+	in_flags: im.InputTextFlags = {.NoUndoRedo, .CallbackResize, .CallbackAlways, .CallbackCompletion, .CallbackCharFilter}
 
 	prev_cursor := ide.cursor_pos
 	if ide.ac_refocus_input {
 		im.SetKeyboardFocusHere()
 		ide.ac_refocus_input = false
 	}
+	ide.active_buf = buf
 	if im.InputTextMultiline(
 		"##odin_code_input",
-		cstring(raw_data(buf)),
-		uint(len(buf)),
+		cstring(raw_data(buf^)),
+		uint(len(buf^)),
 		{max_line_px, total_h},
 		in_flags,
 		_code_input_callback,
@@ -1514,6 +1905,7 @@ _draw_syntax_code_surface :: proc(
 	) {
 		edited = true
 	}
+	ide.active_buf = nil
 	input_active := im.IsItemActive()
 	im.PopStyleColor(4)
 	im.PopStyleVar(2)
@@ -1525,10 +1917,10 @@ _draw_syntax_code_surface :: proc(
 	ide.cmd_restore_applied = false
 
 	if edited {
-		cur_s := _c_buf_string(buf)
+		cur_s := _c_buf_string(buf^)
 		if strings.contains_rune(cur_s, '\t') {
-			_copy_to_c_buf(buf, cur_s)
-			cur_s = _c_buf_string(buf)
+			_copy_to_c_buf_grow(buf, cur_s, is_scoped_body ? SCOPED_MIN_BUF_CAP : STUDIO_MIN_BUF_CAP)
+			cur_s = _c_buf_string(buf^)
 		}
 		if !just_restored && undo != nil {
 			code_undo_record_edit(undo, cur_s, ide.cursor_pos, im.GetTime(), discrete_replace || ide.next_edit_immediate)
@@ -1542,13 +1934,16 @@ _draw_syntax_code_surface :: proc(
 		}
 	}
 
-	// 4. Paint `core:odin/tokenizer` Syntax Spans & Red Diagnostic Underlines!
-	src_now := _c_buf_string(buf)
-	ls_now  := compute_line_starts(src_now, context.temp_allocator)
-	spans   := tokenize_odin_lines(src_now, ls_now, context.temp_allocator)
+	// 4. Paint cached `core:odin/tokenizer` Syntax Spans & Diagnostic Underlines (visible viewport lines only)
+	src_now := _c_buf_string(buf^)
+	_ensure_ide_surface_cache(ide, src_now)
+	ls_now := ide.cached_line_starts[:]
+	spans  := ide.cached_spans[:]
 
-	span_idx := 0
-	for ln_i in 0 ..< len(ls_now) {
+	vis_first := clamp(first_ln_i, 0, max(len(ls_now) - 1, 0))
+	vis_last  := clamp(last_ln_i, vis_first, max(len(ls_now) - 1, 0))
+	span_idx := len(ide.cached_line_span_head) > vis_first ? ide.cached_line_span_head[vis_first] : 0
+	if len(ls_now) > 0 do for ln_i in vis_first ..= vis_last {
 		ln := ln_i + 1
 		ls := ls_now[ln_i]
 		le := ln_i + 1 < len(ls_now) ? (ls_now[ln_i + 1] - 1) : len(src_now)
@@ -1557,6 +1952,7 @@ _draw_syntax_code_surface :: proc(
 		ly := origin.y + pad_y + f32(ln_i) * line_h
 		base_x := code_x + pad_x
 
+		is_unused_imp := !is_scoped_body && _is_unused_import_line(ide, ln)
 		if len(line_str) > 0 {
 			col_cursor := 0
 			for span_idx < len(spans) && spans[span_idx].line < ln {
@@ -1569,18 +1965,20 @@ _draw_syntax_code_surface :: proc(
 				ce := clamp(sp.col_end, cs, len(line_str))
 				if cs > col_cursor {
 					x_off := col_cursor > 0 ? im.CalcTextSize(fmt.ctprintf("%s", line_str[:col_cursor])).x : 0.0
-					im.DrawList_AddText(dl, {base_x + x_off, ly}, im.GetColorU32ImVec4(p.text_primary), fmt.ctprintf("%s", line_str[col_cursor:cs]))
+					plain_col := is_unused_imp ? p.text_muted : p.text_primary
+					im.DrawList_AddText(dl, {base_x + x_off, ly}, im.GetColorU32ImVec4(plain_col), fmt.ctprintf("%s", line_str[col_cursor:cs]))
 				}
 				if ce > cs {
 					x_off := cs > 0 ? im.CalcTextSize(fmt.ctprintf("%s", line_str[:cs])).x : 0.0
-					col := role_color(sp.role, &p)
+					col := is_unused_imp ? p.text_muted : role_color(sp.role, &p)
 					im.DrawList_AddText(dl, {base_x + x_off, ly}, im.GetColorU32ImVec4(col), fmt.ctprintf("%s", line_str[cs:ce]))
 				}
 				col_cursor = ce
 			}
 			if col_cursor < len(line_str) {
 				x_off := col_cursor > 0 ? im.CalcTextSize(fmt.ctprintf("%s", line_str[:col_cursor])).x : 0.0
-				im.DrawList_AddText(dl, {base_x + x_off, ly}, im.GetColorU32ImVec4(p.text_primary), fmt.ctprintf("%s", line_str[col_cursor:]))
+				tail_col := is_unused_imp ? p.text_muted : p.text_primary
+				im.DrawList_AddText(dl, {base_x + x_off, ly}, im.GetColorU32ImVec4(tail_col), fmt.ctprintf("%s", line_str[col_cursor:]))
 			}
 		}
 
@@ -1589,14 +1987,15 @@ _draw_syntax_code_surface :: proc(
 			c1 := clamp(max(d.end_column - 1, c0 + 4), 0, len(line_str))
 			x0 := c0 > 0 ? im.CalcTextSize(fmt.ctprintf("%s", line_str[:c0])).x : 0.0
 			x1 := c1 > c0 ? im.CalcTextSize(fmt.ctprintf("%s", line_str[:c1])).x : (x0 + 28.0)
-			u_col := d.is_warning ? im.Vec4{0.98, 0.78, 0.25, 0.95} : im.Vec4{1.0, 0.32, 0.34, 0.95}
+			u_col := d.is_warning ? thm.with_alpha(st.diag_warn_fg, 0.95) : thm.with_alpha(st.diag_err_fg, 0.95)
 			im.DrawList_AddLine(dl, {base_x + x0, ly + line_h - 1.0}, {base_x + max(x1, x0 + 18.0), ly + line_h - 1.0}, im.GetColorU32ImVec4(u_col), 2.0)
 
 			// Inline Diagnostic Error Lens (JetBrains / VS Error Lens right after line content)
 			if _studio.show_error_lens && d.message != "" {
 				line_end_x := len(line_str) > 0 ? im.CalcTextSize(fmt.ctprintf("%s", line_str)).x : 0.0
-				lens_col   := d.is_warning ? im.Vec4{0.96, 0.78, 0.30, 0.80} : im.Vec4{1.0, 0.44, 0.46, 0.86}
-				lens_msg   := len(d.message) > 96 ? fmt.tprintf("%s...", d.message[:96]) : d.message
+				lens_col   := d.is_warning ? thm.with_alpha(st.diag_warn_fg, 0.80) : thm.with_alpha(st.diag_err_fg, 0.86)
+				lens_pref  := widgets.utf8_safe_prefix(d.message, 96)
+				lens_msg   := len(lens_pref) < len(d.message) ? fmt.tprintf("%s...", lens_pref) : d.message
 				im.DrawList_AddText(
 					dl,
 					{base_x + line_end_x + 22.0, ly},
@@ -1604,6 +2003,14 @@ _draw_syntax_code_surface :: proc(
 					fmt.ctprintf("// [%s] %s", d.is_warning ? "Warn" : "Error", lens_msg),
 				)
 			}
+		} else if is_unused_imp && len(line_str) > 0 {
+			line_end_x := im.CalcTextSize(fmt.ctprintf("%s", line_str)).x
+			im.DrawList_AddText(
+				dl,
+				{base_x + line_end_x + 22.0, ly},
+				im.GetColorU32ImVec4(thm.with_alpha(p.text_muted, 0.82)),
+				"// unused import",
+			)
 		}
 	}
 
@@ -1623,7 +2030,7 @@ _draw_syntax_code_surface :: proc(
 	hover_ident_hash := u64(0)
 	ide.req_jump_ident = ""
 	ide.req_jump_rec   = ""
-	if im.IsWindowHovered() && !ide.ac_open && (!im.IsMouseDown(.Left) || im.IsMouseClicked(.Left)) {
+	if im.IsWindowHovered(im.HoveredFlags_AllowWhenBlockedByPopup) && !gutter_tooltip_shown && !ide.ac_open && (!im.IsMouseDown(.Left) || im.IsMouseClicked(.Left)) {
 		mpos := im.GetIO().MousePos
 		if mpos.x >= code_x + pad_x {
 			h_ln_i := int(math.floor((mpos.y - (origin.y + pad_y)) / max(line_h, 1.0)))
@@ -1637,24 +2044,14 @@ _draw_syntax_code_surface :: proc(
 					hit_col := -1
 					max_scan := min(len(hline), 180)
 					for ci in 0 ..< max_scan {
+						if ci + 1 < len(hline) && (hline[ci + 1] & 0xC0) == 0x80 do continue
 						w_ci := im.CalcTextSize(fmt.ctprintf("%s", hline[:ci + 1])).x
 						if rel_x <= w_ci {
 							hit_col = ci
 							break
 						}
 					}
-					if hit_col >= 0 && _is_code_ident_byte(hline[hit_col]) {
-						ws := hit_col
-						for ws > 0 && _is_code_ident_byte(hline[ws - 1]) do ws -= 1
-						we := hit_col + 1
-						for we < len(hline) && _is_code_ident_byte(hline[we]) do we += 1
-						ident := hline[ws:we]
-						rec := ""
-						if ws > 1 && hline[ws - 1] == '.' {
-							rs := ws - 1
-							for rs > 0 && _is_code_ident_byte(hline[rs - 1]) do rs -= 1
-							if ws - 1 > rs do rec = hline[rs:ws - 1]
-						}
+					if ident, rec, ok := odin_ident_at(hline, hit_col); ok {
 						if io.KeyCtrl {
 							im.SetMouseCursor(.Hand)
 							if im.IsMouseClicked(.Left) {
@@ -1665,11 +2062,8 @@ _draw_syntax_code_surface :: proc(
 						base_info := resolve_symbol_hover_info(ident, rec, pins, context.temp_allocator)
 						doc_str   := extract_odin_proc_doc_comment(src_now, ident, context.temp_allocator)
 						if doc_str == "" {
-							for he in engine.hot_proc_entries() {
-								if he.name == ident && he.source_file != "" {
-									doc_str = extract_odin_proc_doc_from_file(he.source_file, ident, context.temp_allocator)
-									break
-								}
+							if he, hok := resolve_hot_proc_info(ident); hok && he.source_file != "" {
+								doc_str = extract_odin_proc_doc_from_file(he.source_file, ident, context.temp_allocator)
 							}
 						}
 						if doc_str != "" && !strings.contains(base_info, doc_str) {
@@ -1679,15 +2073,89 @@ _draw_syntax_code_surface :: proc(
 						} else {
 							hover_peek_str = base_info
 						}
-						h := u64(14695981039346656037)
-						for b in transmute([]byte)ident {
-							h = (h ~ u64(b)) * 1099511628211
-						}
-						hover_ident_hash = h ~ (u64(h_ln_i + 1) << 32)
+						hover_ident_hash = _fnv1a_src(ident) ~ (u64(h_ln_i + 1) << 32)
 					}
 				}
 			}
 		}
+	}
+
+	// Right-click editor context menu (Copy, Paste, Toggle Comment, Duplicate, Find/Go-to, Comment Unused Imports)
+	if im.IsWindowHovered(im.HoveredFlags_ChildWindows | im.HoveredFlags_AllowWhenBlockedByActiveItem) && im.IsMouseReleased(.Right) && !ide.ac_open {
+		im.OpenPopup("##odin_code_ctx_popup")
+	}
+	if im.BeginPopup("##odin_code_ctx_popup") {
+		widgets.popup_header(icons.ICON_MD_CODE, "Odin Editor")
+		s_min := clamp(min(ide.sel_start, ide.sel_end), 0, len(src_now))
+		s_max := clamp(max(ide.sel_start, ide.sel_end), 0, len(src_now))
+		if s_max > s_min {
+			_ = widgets.menu_copy_item("Copy Selection", src_now[s_min:s_max], "code_ctx_sel", "Ctrl+C")
+		} else {
+			im.BeginDisabled()
+			_ = im.MenuItem(fmt.ctprintf("%s  Copy Selection", icons.ICON_MD_CONTENT_COPY), "Ctrl+C")
+			im.EndDisabled()
+		}
+
+		cur_line_txt := ""
+		if ide.caret_line >= 1 && ide.caret_line <= len(ls_now) {
+			cls := ls_now[ide.caret_line - 1]
+			cle := ide.caret_line < len(ls_now) ? (ls_now[ide.caret_line] - 1) : len(src_now)
+			if cle > cls && src_now[cle - 1] == '\r' do cle -= 1
+			if cle > cls do cur_line_txt = src_now[cls:cle]
+		}
+		if cur_line_txt != "" {
+			_ = widgets.menu_copy_item("Copy Current Line", cur_line_txt, "code_ctx_line")
+		} else {
+			im.BeginDisabled()
+			_ = im.MenuItem(fmt.ctprintf("%s  Copy Current Line", icons.ICON_MD_CONTENT_COPY))
+			im.EndDisabled()
+		}
+
+		if im.MenuItem(fmt.ctprintf("%s  Paste", icons.ICON_MD_CONTENT_PASTE), "Ctrl+V") {
+			clip_c := im.GetClipboardText()
+			if clip_c != nil {
+				clip_s := string(clip_c)
+				if clip_s != "" {
+					_clear_ide_pending_paste(ide)
+					context.allocator = runtime.default_allocator()
+					ide.cmd_paste_text    = strings.clone(clip_s)
+					ide.cmd_paste_pending = true
+					ide.ac_refocus_input  = true
+				}
+			}
+		}
+		im.Separator()
+		if im.MenuItem("Toggle Line Comment", "Ctrl+/") {
+			ide.cmd_toggle_comment = true
+			ide.ac_refocus_input   = true
+		}
+		if im.MenuItem("Duplicate Line", "Ctrl+D") {
+			ide.cmd_dup_line     = true
+			ide.ac_refocus_input = true
+		}
+		if im.MenuItem(fmt.ctprintf("%s  Find & Replace", icons.ICON_MD_SEARCH), "Ctrl+F") {
+			ide.find_open       = true
+			ide.find_focus_next = true
+		}
+		if im.MenuItem("Go to Line...", "Ctrl+G") {
+			ide.goto_open       = true
+			ide.goto_focus_next = true
+		}
+		if !is_scoped_body && len(ide.cached_unused_import_lines) > 0 {
+			im.Separator()
+			if im.MenuItem(fmt.ctprintf("Comment Unused Imports (%d)", len(ide.cached_unused_import_lines))) {
+				if updated, cnt := comment_out_unused_odin_imports(src_now, context.temp_allocator); cnt > 0 {
+					c_jump := min(ide.cursor_pos, len(updated))
+					_arm_ide_restore(ide, updated, c_jump)
+					if undo != nil {
+						code_undo_record_edit(undo, updated, c_jump, im.GetTime(), true)
+					}
+					if dirty != nil do dirty^ = true
+					_notify_buffer_edited(updated, false, pkg_dir)
+				}
+			}
+		}
+		im.EndPopup()
 	}
 
 	im.EndChild()
@@ -1703,7 +2171,8 @@ _draw_syntax_code_surface :: proc(
 		}
 	}
 
-	if input_active && ide.cursor_pos != ide.ac_dismissed_pos {
+	keep_ac_for_popup := ide.ac_open && (ide.ac_popup_interacting || ide.ac_pending_accept)
+	if (input_active || keep_ac_for_popup) && ide.cursor_pos != ide.ac_dismissed_pos {
 		ac_items, rep_start := query_autocomplete_suggestions(src_now, ide.cursor_pos, pins, ide.ac_force_open, is_scoped_body, context.temp_allocator)
 		if len(ac_items) > 0 {
 			ide.ac_open          = true
@@ -1721,47 +2190,68 @@ _draw_syntax_code_surface :: proc(
 
 			_draw_autocomplete_popup(caret_screen_pos, ac_items, ide)
 		} else {
-			ide.ac_open       = false
-			ide.ac_accept_len = 0
+			ide.ac_open              = false
+			ide.ac_accept_len        = 0
+			ide.ac_popup_interacting = false
+			ide.ac_popup_dragging    = false
 		}
-	} else if !input_active {
-		ide.ac_open       = false
-		ide.ac_force_open = false
-		ide.ac_accept_len = 0
+	} else if !input_active && !keep_ac_for_popup {
+		ide.ac_open              = false
+		ide.ac_force_open        = false
+		ide.ac_accept_len        = 0
+		ide.ac_popup_interacting = false
+		ide.ac_popup_dragging    = false
 	}
 
 	return edited
 }
 
 @(private = "file")
-_is_code_ident_byte :: #force_inline proc(c: byte) -> bool {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+_studio_monitor_bounds :: proc(anchor: im.Vec2) -> (pos: im.Vec2, size: im.Vec2) {
+	pio := im.GetPlatformIO()
+	if pio != nil && pio.Monitors.Data != nil && pio.Monitors.Size > 0 {
+		mons := (cast([^]im.PlatformMonitor)pio.Monitors.Data)[:pio.Monitors.Size]
+		for m in mons {
+			if anchor.x >= m.MainPos.x && anchor.x < m.MainPos.x + m.MainSize.x &&
+			   anchor.y >= m.MainPos.y && anchor.y < m.MainPos.y + m.MainSize.y {
+				if m.WorkSize.x > 0 && m.WorkSize.y > 0 do return m.WorkPos, m.WorkSize
+				return m.MainPos, m.MainSize
+			}
+		}
+	}
+	vp := im.GetWindowViewport()
+	if vp == nil do vp = im.GetMainViewport()
+	if vp.WorkSize.x > 0 && vp.WorkSize.y > 0 do return vp.WorkPos, vp.WorkSize
+	return vp.Pos, vp.Size
 }
 
 @(private = "file")
 _draw_call_tip_pill :: proc(above_caret_pos: im.Vec2, tip: Call_Tip_Info) {
 	p  := thm.palette()
-	vp := im.GetMainViewport()
+	st := thm.studio_tokens()
+	mon_pos, mon_size := _studio_monitor_bounds(above_caret_pos)
+	max_x := max(mon_pos.x + 12.0, mon_pos.x + mon_size.x - 360.0)
 	pos := im.Vec2{
-		clamp(above_caret_pos.x, vp.Pos.x + 12.0, vp.Pos.x + vp.Size.x - 360.0),
-		max(above_caret_pos.y, vp.Pos.y + 12.0),
+		clamp(above_caret_pos.x, mon_pos.x + 12.0, max_x),
+		max(above_caret_pos.y, mon_pos.y + 12.0),
 	}
 
 	im.SetNextWindowPos(pos, .Always)
-	im.PushStyleColorImVec4(.WindowBg, p.is_light ? im.Vec4{0.96, 0.98, 1.0, 0.98} : im.Vec4{0.08, 0.11, 0.16, 0.97})
+	im.PushStyleColorImVec4(.WindowBg, p.bg_popup)
 	im.PushStyleColorImVec4(.Border, thm.with_alpha(p.accent, 0.72))
 	im.PushStyleVar(.WindowBorderSize, 1.1)
 	im.PushStyleVar(.WindowRounding, 5.0)
 	im.PushStyleVarImVec2(.WindowPadding, {8, 4})
 
 	// NOTE: Never pass internal `WindowFlag.Tooltip` (bit 25) to `im.Begin()` — Dear ImGui asserts `IM_ASSERT` (`SIGABRT`)!
+	widgets.pin_tooltip_to_current_viewport()
 	im.SetNextWindowBgAlpha(0.96)
 	flags: im.WindowFlags = {.NoTitleBar, .NoResize, .NoMove, .NoSavedSettings, .NoFocusOnAppearing, .NoMouseInputs, .NoNavInputs, .NoNavFocus, .NoDocking, .AlwaysAutoResize}
 	if im.Begin("##mh_odin_call_tip", nil, flags) {
 		if tip.receiver != "" {
-			im.TextColored({0.52, 0.80, 1.00, 1.0}, "%s", fmt.ctprintf("%s.%s(", tip.receiver, tip.callee))
+			im.TextColored(st.sig_call_fg, "%s", fmt.ctprintf("%s.%s(", tip.receiver, tip.callee))
 		} else {
-			im.TextColored({0.52, 0.80, 1.00, 1.0}, "%s", fmt.ctprintf("%s(", tip.callee))
+			im.TextColored(st.sig_call_fg, "%s", fmt.ctprintf("%s(", tip.callee))
 		}
 		for param, pi in tip.params {
 			if pi > 0 {
@@ -1770,16 +2260,16 @@ _draw_call_tip_pill :: proc(above_caret_pos: im.Vec2, tip: Call_Tip_Info) {
 			}
 			im.SameLine(0, 0)
 			if pi == tip.active_param {
-				im.TextColored({1.00, 0.84, 0.32, 1.0}, "%s", fmt.ctprintf("[%s]", param))
+				im.TextColored(st.sig_active_param_fg, "%s", fmt.ctprintf("[%s]", param))
 			} else {
 				im.TextColored(p.text_primary, "%s", fmt.ctprintf("%s", param))
 			}
 		}
 		im.SameLine(0, 0)
-		im.TextColored({0.52, 0.80, 1.00, 1.0}, ")")
+		im.TextColored(st.sig_call_fg, ")")
 		if ret_idx := strings.index(tip.signature, "->"); ret_idx >= 0 {
 			im.SameLine(0, 5)
-			im.TextColored({0.46, 0.94, 0.62, 1.0}, "%s", fmt.ctprintf("%s", tip.signature[ret_idx:]))
+			im.TextColored(st.sig_return_fg, "%s", fmt.ctprintf("%s", tip.signature[ret_idx:]))
 		}
 	}
 	im.End()
@@ -1794,52 +2284,63 @@ _studio_zoom_val :: #force_inline proc() -> f32 {
 }
 
 @(private = "file")
-_completion_kind_badge :: proc(k: Completion_Kind) -> (badge: string, col: im.Vec4) {
+_completion_kind_badge :: proc(k: Completion_Kind) -> (icon: cstring, badge: cstring, col: im.Vec4) {
+	sk: thm.Studio_Symbol_Kind = .Local_Var
 	switch k {
-	case .Pin_Ref:   return "^Ref",   {1.00, 0.50, 0.66, 1.0}
-	case .Pin_Copy:  return "Copy",   {0.48, 0.84, 1.00, 1.0}
-	case .Pin_Out:   return "-> Out", {0.46, 0.94, 0.62, 1.0}
-	case .Field:     return "field",  {0.42, 0.88, 0.94, 1.0}
-	case .Local_Var: return "local",  {0.92, 0.82, 0.48, 1.0}
-	case .Hot_API:   return "hot",    {0.40, 0.96, 0.68, 1.0}
-	case .Procedure: return "proc",   {0.52, 0.74, 1.00, 1.0}
-	case .Type_Sym:  return "type",   {0.36, 0.84, 0.94, 1.0}
-	case .Keyword:   return "kw",     {0.80, 0.56, 0.98, 1.0}
+	case .Pin_Ref:   sk = .Pin_Ref
+	case .Pin_Copy:  sk = .Pin_Copy
+	case .Pin_Out:   sk = .Pin_Out
+	case .Field:     sk = .Field
+	case .Local_Var: sk = .Local_Var
+	case .Hot_API:   sk = .Hot_API
+	case .Procedure: sk = .Procedure
+	case .Type_Sym:  sk = .Type_Sym
+	case .Keyword:   sk = .Keyword
 	}
-	return "sym", {0.75, 0.78, 0.82, 1.0}
+	return thm.studio_symbol_visual(sk)
 }
 
 @(private = "file")
 _draw_autocomplete_popup :: proc(anchor_pos: im.Vec2, items: []Autocomplete_Item, ide: ^_Surface_IDE_State) {
 	p  := thm.palette()
-	vp := im.GetMainViewport()
+	mon_pos, mon_size := _studio_monitor_bounds(anchor_pos)
 
 	pop_w := f32(430.0)
 	row_h := im.GetTextLineHeightWithSpacing()
 	pop_h := min(f32(len(items)) * row_h + 30.0, 270.0)
 
 	pos := anchor_pos
-	if pos.x + pop_w > vp.Pos.x + vp.Size.x - 12.0 {
-		pos.x = max(vp.Pos.x + 12.0, vp.Pos.x + vp.Size.x - pop_w - 12.0)
+	if pos.x + pop_w > mon_pos.x + mon_size.x - 12.0 {
+		pos.x = max(mon_pos.x + 12.0, mon_pos.x + mon_size.x - pop_w - 12.0)
 	}
-	if pos.y + pop_h > vp.Pos.y + vp.Size.y - 12.0 {
-		pos.y = max(vp.Pos.y + 12.0, anchor_pos.y - pop_h - im.GetTextLineHeight() - 6.0)
+	if pos.y + pop_h > mon_pos.y + mon_size.y - 12.0 {
+		pos.y = max(mon_pos.y + 12.0, anchor_pos.y - pop_h - im.GetTextLineHeight() - 6.0)
 	}
 
 	im.SetNextWindowPos(pos, .Always)
 	im.SetNextWindowSize({pop_w, pop_h}, .Always)
-	im.PushStyleColorImVec4(.WindowBg, p.is_light ? im.Vec4{0.97, 0.98, 1.0, 0.98} : im.Vec4{0.10, 0.12, 0.16, 0.98})
+	im.PushStyleColorImVec4(.WindowBg, p.bg_popup)
 	im.PushStyleColorImVec4(.Border, thm.with_alpha(p.accent, 0.65))
 	im.PushStyleVar(.WindowBorderSize, 1.2)
 	im.PushStyleVar(.WindowRounding, 6.0)
 
 	// NOTE: Never pass internal `WindowFlag.Tooltip` (bit 25) to `im.Begin()` — Dear ImGui asserts `IM_ASSERT` (`SIGABRT`)!
+	widgets.pin_tooltip_to_current_viewport()
 	im.SetNextWindowBgAlpha(0.98)
 	flags: im.WindowFlags = {.NoTitleBar, .NoResize, .NoMove, .NoSavedSettings, .NoFocusOnAppearing, .NoNavInputs, .NoNavFocus, .NoDocking}
 	if im.Begin("##mh_odin_ac_popup", nil, flags) {
+		hov := im.IsWindowHovered(im.HoveredFlags_RootAndChildWindows | im.HoveredFlags_AllowWhenBlockedByActiveItem)
+		if im.IsMouseClicked(.Left) && hov {
+			ide.ac_popup_dragging = true
+		}
+		if !im.IsMouseDown(.Left) {
+			ide.ac_popup_dragging = false
+		}
+		ide.ac_popup_interacting = hov || ide.ac_popup_dragging || im.IsWindowFocused(im.FocusedFlags_RootAndChildWindows)
+
 		for item, idx in items {
 			is_sel := idx == ide.ac_selected_idx
-			badge, bcol := _completion_kind_badge(item.kind)
+			ic, badge, bcol := _completion_kind_badge(item.kind)
 			row_min := im.GetCursorScreenPos()
 			avail_w := im.GetContentRegionAvail().x
 
@@ -1869,12 +2370,12 @@ _draw_autocomplete_popup :: proc(anchor_pos: im.Vec2, items: []Autocomplete_Item
 			}
 
 			dl := im.GetWindowDrawList()
-			im.DrawList_AddText(dl, {row_min.x + 6.0, row_min.y + 1.0}, im.GetColorU32ImVec4(bcol), fmt.ctprintf("%s", badge))
-			im.DrawList_AddText(dl, {row_min.x + 68.0, row_min.y + 1.0}, im.GetColorU32ImVec4(p.text_primary), fmt.ctprintf("%s", item.label))
+			im.DrawList_AddText(dl, {row_min.x + 6.0, row_min.y + 1.0}, im.GetColorU32ImVec4(bcol), fmt.ctprintf("%s %s", ic, badge))
+			im.DrawList_AddText(dl, {row_min.x + 84.0, row_min.y + 1.0}, im.GetColorU32ImVec4(p.text_primary), fmt.ctprintf("%s", item.label))
 			if item.detail != "" {
 				det_c := fmt.ctprintf("%s", item.detail)
 				det_w := im.CalcTextSize(det_c).x
-				det_x := max(row_min.x + avail_w - det_w - 6.0, row_min.x + 210.0)
+				det_x := max(row_min.x + avail_w - det_w - 6.0, row_min.x + 220.0)
 				im.DrawList_AddText(dl, {det_x, row_min.y + 1.0}, im.GetColorU32ImVec4(p.text_muted), det_c)
 			}
 		}
@@ -1891,19 +2392,34 @@ _draw_autocomplete_popup :: proc(anchor_pos: im.Vec2, items: []Autocomplete_Item
 // =============================================================================
 
 @(private = "file")
+_draw_scoped_pin_badge :: proc(pin: Scoped_Pin_Badge, show_mode_tag: bool) {
+	if pin.is_output {
+		ic, _, col := thm.studio_symbol_visual(.Pin_Out)
+		im.TextColored(col, "%s", fmt.ctprintf("%s %s: %s", ic, pin.name, pin.odin_type))
+	} else if pin.pass_mode == .By_Reference {
+		ic, _, col := thm.studio_symbol_visual(.Pin_Ref)
+		tag := show_mode_tag ? " (Ref)" : ""
+		im.TextColored(col, "%s", fmt.ctprintf("%s %s: ^%s%s", ic, pin.name, pin.odin_type, tag))
+	} else {
+		ic, _, col := thm.studio_symbol_visual(.Pin_Copy)
+		tag := show_mode_tag ? " (Copy)" : ""
+		im.TextColored(col, "%s", fmt.ctprintf("%s %s: %s%s", ic, pin.name, pin.odin_type, tag))
+	}
+}
+
+@(private = "file")
 _draw_checker_and_hot_pills :: proc(snap: Checker_Snapshot) {
-	chk_col := im.Vec4{0.55, 0.62, 0.70, 1.0}
+	p := thm.palette()
+	chk_col := p.text_muted
 	switch snap.stage {
 	case .Idle, .Pending_Syntax:
-		chk_col = {0.72, 0.78, 0.88, 1.0}
-	case .Syntax_OK:
-		chk_col = {0.36, 0.88, 0.60, 1.0}
-	case .Compiler_OK:
-		chk_col = {0.28, 0.94, 0.56, 1.0}
+		chk_col = p.text_muted
+	case .Syntax_OK, .Compiler_OK:
+		chk_col = p.status_success
 	case .Running_Compiler:
-		chk_col = {0.42, 0.78, 1.00, 1.0}
+		chk_col = p.status_info
 	case .Syntax_Error, .Compiler_Error:
-		chk_col = {1.00, 0.38, 0.40, 1.0}
+		chk_col = p.status_error
 	}
 	lbl_txt := snap.summary_label != "" ? snap.summary_label : "Idle (Typecheck ready)"
 	im.TextColored(chk_col, "%s", fmt.ctprintf("%s %s", icons.ICON_MD_CHECK, lbl_txt))
@@ -1914,10 +2430,10 @@ _draw_checker_and_hot_pills :: proc(snap: Checker_Snapshot) {
 		im.SameLine()
 		im.TextDisabled("|")
 		im.SameLine()
-		hcol := im.Vec4{0.42, 0.86, 1.0, 1.0}
-		if hot_st == .Swapped_OK do hcol = {0.34, 0.96, 0.62, 1.0}
-		else if hot_st == .Compile_Failed do hcol = {1.0, 0.40, 0.40, 1.0}
-		else if hot_st == .Schema_Changed do hcol = {1.0, 0.78, 0.28, 1.0}
+		hcol := p.status_info
+		if hot_st == .Swapped_OK do hcol = p.status_success
+		else if hot_st == .Compile_Failed do hcol = p.status_error
+		else if hot_st == .Schema_Changed do hcol = p.status_warning
 		_ = hot_gen
 		_ = hot_ms
 		im.TextColored(hcol, "%s", fmt.ctprintf("%s %s", icons.ICON_MD_PLAY_ARROW, hot_msg))
@@ -1945,8 +2461,180 @@ _toggle_scoped_enlarge :: proc() {
 }
 
 @(private = "file")
+_draw_using_spaces_popup :: proc(
+	popup_id:   cstring,
+	search_id:  cstring,
+	search_buf: []byte,
+	sc:         ^_Scoped_Popup_State = nil,
+	tab:        ^_Tab_Doc            = nil,
+	ide:        ^_Surface_IDE_State  = nil,
+) {
+	if !im.BeginPopup(popup_id) do return
+	defer im.EndPopup()
+
+	p := thm.palette()
+	is_scoped := sc != nil
+	if is_scoped {
+		im.TextColored(p.accent, icons.ICON_MD_CODE + " Blueprint Using & Spaces")
+		sr := widgets.search_bar(search_buf, widgets.Search_Bar_Opts{
+			id    = search_id,
+			hint  = "Search math, linalg, self, ease...",
+			mode  = .Popup,
+			width = 260,
+		})
+		if sr.escape_close {
+			im.CloseCurrentPopup()
+			return
+		}
+		terms := widgets.search_terms(sr.query)
+		im.Separator()
+		for spec in USING_SPACE_CATALOG {
+			if !spec.hot_safe do continue
+			if len(terms) > 0 && !widgets.search_match(fmt.tprintf("%s %s %s", spec.label, spec.description, spec.pkg_alias), terms) {
+				continue
+			}
+			active := sc.using_query_cb != nil && sc.using_query_cb(spec.id, sc.commit_user_ptr)
+			if im.MenuItem(fmt.ctprintf("%s %s", active ? icons.ICON_MD_CHECK : " ", spec.label)) && sc.using_toggle_cb != nil {
+				new_sig := sc.using_toggle_cb(spec.id, sc.commit_user_ptr)
+				if new_sig != "" {
+					context.allocator = runtime.default_allocator()
+					delete(sc.signature_banner)
+					sc.signature_banner = strings.clone(new_sig)
+				}
+				_notify_buffer_edited(_c_buf_string(sc.buf[:]), true, sc.backing_pkg_dir)
+			}
+			widgets.tooltip(fmt.ctprintf("%s", spec.description))
+		}
+		return
+	}
+
+	if tab == nil do return
+	is_hot_script := strings.contains(tab.pkg_dir, "hot_scripts")
+	src_cur := _c_buf_string(tab.buf)
+
+	im.TextColored(p.accent, icons.ICON_MD_CODE + " Import & Using Spaces")
+	sr := widgets.search_bar(search_buf, widgets.Search_Bar_Opts{
+		id    = search_id,
+		hint  = "Search engine, input_manager, math, physics3d...",
+		mode  = .Popup,
+		width = 300,
+	})
+	if sr.escape_close {
+		im.CloseCurrentPopup()
+		return
+	}
+	terms := widgets.search_terms(sr.query)
+	unused_now := detect_unused_odin_imports(src_cur, context.temp_allocator)
+	if len(unused_now) > 0 {
+		if im.SmallButton(fmt.ctprintf("Comment Unused Imports (%d)", len(unused_now))) {
+			if updated, cnt := comment_out_unused_odin_imports(src_cur, context.temp_allocator); cnt > 0 {
+				_copy_to_c_buf_grow(&tab.buf, updated, STUDIO_MIN_BUF_CAP)
+				tab.dirty = true
+				s_after := _c_buf_string(tab.buf)
+				cpos := ide != nil ? min(ide.cursor_pos, len(s_after)) : 0
+				code_undo_record_edit(&tab.undo, s_after, cpos, im.GetTime(), true)
+				_notify_buffer_edited(s_after, false, tab.pkg_dir)
+			}
+		}
+		widgets.tooltip("Comment out unused import lines (shown grayed out) so Odin check compiles cleanly")
+	}
+	im.Separator()
+
+	for spec in USING_SPACE_CATALOG {
+		if spec.id == "self" do continue
+		if len(terms) > 0 && !widgets.search_match(fmt.tprintf("%s %s %s", spec.label, spec.description, spec.pkg_alias), terms) {
+			continue
+		}
+		using_line := strings.has_prefix(spec.id, "using_") ? fmt.tprintf("using %s", spec.pkg_alias) : ""
+		already_in := (spec.import_line != "" && strings.contains(src_cur, spec.import_line)) && (using_line == "" || strings.contains(src_cur, using_line))
+		blocked_in_hot := is_hot_script && !spec.hot_safe
+		if blocked_in_hot do im.BeginDisabled()
+		lbl := blocked_in_hot \
+			? fmt.ctprintf("  %s (Plugin/Engine files only)", spec.label) \
+			: fmt.ctprintf("%s %s", already_in ? icons.ICON_MD_CHECK : "+", spec.label)
+		if im.MenuItem(lbl) && !already_in {
+			if new_src, changed := _inject_using_space_into_full_file(src_cur, spec, context.temp_allocator); changed {
+				_copy_to_c_buf_grow(&tab.buf, new_src, STUDIO_MIN_BUF_CAP)
+				tab.dirty = true
+				s_after := _c_buf_string(tab.buf)
+				cpos := ide != nil ? ide.cursor_pos : 0
+				code_undo_record_edit(&tab.undo, s_after, cpos, im.GetTime(), true)
+				_notify_buffer_edited(s_after, false, tab.pkg_dir)
+			}
+		}
+		if blocked_in_hot do im.EndDisabled()
+		widgets.tooltip(fmt.ctprintf("%s", spec.description))
+	}
+}
+
+@(private = "file")
+_draw_scoped_using_chip_bar :: proc(sc: ^_Scoped_Popup_State, popup_id: cstring, search_id: cstring) {
+	if sc == nil || !sc.is_graph_node || sc.using_toggle_cb == nil || sc.using_query_cb == nil do return
+	p := thm.palette()
+	if im.SmallButton(fmt.ctprintf("%s + Using / Spaces##btn_%s", icons.ICON_MD_ADD, popup_id)) {
+		im.OpenPopup(popup_id)
+	}
+	widgets.tooltip("Select Odin `using` scopes and packages (`using self` Blueprint vars, `using math`, `using linalg`, `ease`, `rand`) without guessing imports!")
+
+	for spec in USING_SPACE_CATALOG {
+		if !spec.hot_safe do continue
+		if sc.using_query_cb(spec.id, sc.commit_user_ptr) {
+			im.SameLine()
+			im.PushStyleColorImVec4(.Button, thm.with_alpha(p.accent, 0.24))
+			if im.SmallButton(fmt.ctprintf("%s %s##uchip_%s_%s", icons.ICON_MD_CHECK, spec.label, spec.id, popup_id)) {
+				new_sig := sc.using_toggle_cb(spec.id, sc.commit_user_ptr)
+				if new_sig != "" {
+					context.allocator = runtime.default_allocator()
+					delete(sc.signature_banner)
+					sc.signature_banner = strings.clone(new_sig)
+				}
+				_notify_buffer_edited(_c_buf_string(sc.buf[:]), true, sc.backing_pkg_dir)
+			}
+			im.PopStyleColor()
+			widgets.tooltip(fmt.ctprintf("%s (Click chip to toggle)", spec.description))
+		}
+	}
+
+	_draw_using_spaces_popup(popup_id, search_id, sc.using_search_buf[:], sc = sc)
+}
+
+@(private = "file")
+_draw_surface_diagnostics_panel :: proc(
+	id_prefix:        string,
+	diags:            []Studio_Diagnostic,
+	ide:              ^_Surface_IDE_State,
+	tab:              ^_Tab_Doc = nil,
+	hot_stderr:       string    = "",
+	stderr_height:    f32       = 68.0,
+	show_file_in_loc: bool      = false,
+	allow_open_file:  bool      = false,
+) {
+	st := thm.studio_tokens()
+	for d, di in diags {
+		col := d.is_warning ? st.diag_warn_fg : st.diag_err_fg
+		sev_ic := cstring(d.is_warning ? icons.ICON_MD_WARNING : icons.ICON_MD_ERROR)
+		sev_lb := d.is_warning ? "Warn" : "Error"
+		loc_str := show_file_in_loc \
+			? fmt.tprintf("%s:%d:%d", filepath.base(d.file), d.line, d.column) \
+			: fmt.tprintf("Line %d:%d", d.line, d.column)
+		if jumped, _ := widgets.diagnostic_row(fmt.tprintf("%s_%d", id_prefix, di), col, sev_ic, sev_lb, loc_str, d.message); jumped {
+			if allow_open_file && d.file != "" && os.exists(d.file) && (tab == nil || d.file != tab.abs_path) {
+				open_file_in_studio(d.file, d.line)
+			} else if tab != nil {
+				_jump_to_tab_line(tab, d.line)
+			} else if ide != nil {
+				_jump_ide_to_line(ide, d.line)
+			}
+		}
+	}
+	if hot_stderr != "" {
+		_ = widgets.copyable_code_block(fmt.tprintf("##%s_stderr", id_prefix), hot_stderr, "Hot Cartridge Build Output", stderr_height)
+	}
+}
+
+@(private = "file")
 _commit_scoped_popup :: proc(trigger_hot_swap: bool) {
-	body_now := _c_buf_string(_scoped.buf[:])
+	body_now := _c_buf_string(_scoped.buf)
 	if _scoped.is_graph_node {
 		if _scoped.commit_cb != nil {
 			_scoped.commit_cb(_scoped.node_uid, body_now, trigger_hot_swap, _scoped.commit_user_ptr)
@@ -1958,12 +2646,13 @@ _commit_scoped_popup :: proc(trigger_hot_swap: bool) {
 	if _scoped.backing_file_abs != "" && _scoped.backing_proc_name != "" {
 		if updated_full, ok := splice_odin_procedure_body(_scoped.full_file_cache, _scoped.backing_proc_name, body_now, context.temp_allocator); ok {
 			if os.write_entire_file(_scoped.backing_file_abs, transmute([]u8)updated_full) == nil {
+				prev_alloc := context.allocator
 				context.allocator = runtime.default_allocator()
 				delete(_scoped.full_file_cache)
 				_scoped.full_file_cache = strings.clone(updated_full)
+				context.allocator = prev_alloc
 				_scoped.dirty = false
-				submit_async_check(body_now, true, _scoped.backing_pkg_dir, true)
-				submit_async_autocomplete_index(body_now, true, _scoped.backing_pkg_dir)
+				_notify_buffer_edited(body_now, true, _scoped.backing_pkg_dir, true)
 				if trigger_hot_swap {
 					if strings.contains(_scoped.backing_pkg_dir, "hot_scripts") {
 						engine.hot_cartridge_trigger_async_build(false)
@@ -2040,7 +2729,7 @@ draw_scoped_node_popup :: proc() {
 		widgets.tooltip("Save scoped body changes without triggering a DLL build yet")
 
 		im.SameLine()
-		_draw_undo_redo_buttons(&_scoped.undo, _scoped.buf[:], &_scoped.ide, &_scoped.dirty, _scoped.backing_pkg_dir, true, "scoped")
+		_draw_undo_redo_buttons(&_scoped.undo, &_scoped.buf, &_scoped.ide, &_scoped.dirty, _scoped.backing_pkg_dir, true, "scoped")
 
 		im.SameLine()
 		if im.Button(fmt.ctprintf("%s Find (Ctrl+F)", icons.ICON_MD_SEARCH)) {
@@ -2082,61 +2771,7 @@ draw_scoped_node_popup :: proc() {
 		im.Separator()
 
 		// Interactive `[ + Using / Spaces ▾ ]` Namespace Chip Bar (Zero-Guess `using` & package discovery!)
-		if _scoped.is_graph_node && _scoped.using_toggle_cb != nil && _scoped.using_query_cb != nil {
-			if im.SmallButton(fmt.ctprintf("%s + Using / Spaces", icons.ICON_MD_ADD)) {
-				im.OpenPopup("##scoped_using_spaces_popup")
-			}
-			widgets.tooltip("Select Odin `using` scopes and packages (`using self` Blueprint vars, `using math`, `using linalg`, `ease`, `rand`) without guessing imports!")
-
-			for spec in USING_SPACE_CATALOG {
-				if !spec.hot_safe do continue
-				if _scoped.using_query_cb(spec.id, _scoped.commit_user_ptr) {
-					im.SameLine()
-					im.PushStyleColorImVec4(.Button, thm.with_alpha(p.accent, 0.24))
-					if im.SmallButton(fmt.ctprintf("%s %s##uchip_%s", icons.ICON_MD_CHECK, spec.label, spec.id)) {
-						new_sig := _scoped.using_toggle_cb(spec.id, _scoped.commit_user_ptr)
-						if new_sig != "" {
-							context.allocator = runtime.default_allocator()
-							delete(_scoped.signature_banner)
-							_scoped.signature_banner = strings.clone(new_sig)
-						}
-						s_cur := _c_buf_string(_scoped.buf[:])
-						submit_async_check(s_cur, true, _scoped.backing_pkg_dir)
-						submit_async_autocomplete_index(s_cur, true, "haati/hot_scripts")
-					}
-					im.PopStyleColor()
-					widgets.tooltip(fmt.ctprintf("%s (Click chip to toggle)", spec.description))
-				}
-			}
-
-			if im.BeginPopup("##scoped_using_spaces_popup") {
-				im.TextColored(p.accent, icons.ICON_MD_CODE + " Blueprint Using & Spaces")
-				im.SetNextItemWidth(260)
-				im.InputTextWithHint("##sc_using_q", "Search math, linalg, self, ease...", cstring(raw_data(_scoped.using_search_buf[:])), len(_scoped.using_search_buf))
-				uq := strings.to_lower(_c_buf_string(_scoped.using_search_buf[:]), context.temp_allocator)
-				im.Separator()
-				for spec in USING_SPACE_CATALOG {
-					if !spec.hot_safe do continue
-					if uq != "" && !strings.contains(strings.to_lower(spec.label, context.temp_allocator), uq) && !strings.contains(strings.to_lower(spec.description, context.temp_allocator), uq) {
-						continue
-					}
-					active := _scoped.using_query_cb(spec.id, _scoped.commit_user_ptr)
-					if im.MenuItem(fmt.ctprintf("%s %s", active ? icons.ICON_MD_CHECK : " ", spec.label)) {
-						new_sig := _scoped.using_toggle_cb(spec.id, _scoped.commit_user_ptr)
-						if new_sig != "" {
-							context.allocator = runtime.default_allocator()
-							delete(_scoped.signature_banner)
-							_scoped.signature_banner = strings.clone(new_sig)
-						}
-						s_cur := _c_buf_string(_scoped.buf[:])
-						submit_async_check(s_cur, true, _scoped.backing_pkg_dir)
-						submit_async_autocomplete_index(s_cur, true, "haati/hot_scripts")
-					}
-					widgets.tooltip(fmt.ctprintf("%s", spec.description))
-				}
-				im.EndPopup()
-			}
-		}
+		_draw_scoped_using_chip_bar(&_scoped, "##scoped_using_spaces_popup", "##sc_using_q")
 
 		// Locked Pin Signature Header (Double-clicking also toggles Smart Enlarge!)
 		banner_bg := p.is_light ? thm.lerp_col(p.bg_canvas, p.accent, 0.08) : thm.lerp_col(p.bg_canvas, p.accent, 0.14)
@@ -2153,13 +2788,7 @@ draw_scoped_node_popup :: proc() {
 				im.TextDisabled("Pins in Scope:")
 				for pin in _scoped.pins {
 					im.SameLine()
-					if pin.is_output {
-						im.TextColored({0.46, 0.94, 0.62, 1.0}, "%s", fmt.ctprintf("-> %s: %s", pin.name, pin.odin_type))
-					} else if pin.pass_mode == .By_Reference {
-						im.TextColored({1.00, 0.50, 0.66, 1.0}, "%s", fmt.ctprintf("%s %s: ^%s (Ref)", icons.ICON_MD_DIAMOND, pin.name, pin.odin_type))
-					} else {
-						im.TextColored({0.48, 0.82, 1.00, 1.0}, "%s", fmt.ctprintf("%s %s: %s (Copy)", icons.ICON_MD_CIRCLE, pin.name, pin.odin_type))
-					}
+					_draw_scoped_pin_badge(pin, true)
 				}
 			}
 		}
@@ -2178,37 +2807,34 @@ draw_scoped_node_popup :: proc() {
 		for sn, si in snippets {
 			im.SameLine()
 			if im.SmallButton(fmt.ctprintf("%s##snip_%d", sn.lbl, si)) {
-				cur := _c_buf_string(_scoped.buf[:])
+				cur := _c_buf_string(_scoped.buf)
 				sep := len(cur) > 0 && !strings.has_suffix(cur, "\n") ? "\n" : ""
-				_copy_to_c_buf(_scoped.buf[:], strings.concatenate({cur, sep, sn.code}, context.temp_allocator))
+				_copy_to_c_buf_grow(&_scoped.buf, strings.concatenate({cur, sep, sn.code}, context.temp_allocator), SCOPED_MIN_BUF_CAP)
 				_scoped.dirty = true
-				s_after := _c_buf_string(_scoped.buf[:])
+				s_after := _c_buf_string(_scoped.buf)
 				code_undo_record_edit(&_scoped.undo, s_after, len(s_after), im.GetTime(), true)
-				submit_async_check(s_after, true, _scoped.backing_pkg_dir)
-				submit_async_autocomplete_index(s_after, true, _scoped.backing_pkg_dir != "" ? _scoped.backing_pkg_dir : "haati/hot_scripts")
+				_notify_buffer_edited(s_after, true, _scoped.backing_pkg_dir)
 			}
 		}
 
 		// Main Scoped Body Code Surface (with Smart Autocomplete, Zoom, Auto-Indent, Bracket Match)
-		err_panel_h: f32 = len(snap.diagnostics) > 0 ? 92.0 : 44.0
+		err_panel_h: f32 = len(snap.diagnostics) > 0 ? 116.0 : 44.0
 		code_h := max(im.GetContentRegionAvail().y - err_panel_h - 6.0, 120.0)
-		if _draw_syntax_code_surface("##scoped_node_code", _scoped.buf[:], {0, code_h}, snap.diagnostics, &_scoped.ide, _scoped.pins[:], true, nil, &_scoped.undo, &_scoped.dirty, _scoped.backing_pkg_dir) {
+		if _draw_syntax_code_surface("##scoped_node_code", &_scoped.buf, {0, code_h}, snap.diagnostics, &_scoped.ide, _scoped.pins[:], true, nil, &_scoped.undo, &_scoped.dirty, _scoped.backing_pkg_dir) {
 			_scoped.dirty = true
-			s_now := _c_buf_string(_scoped.buf[:])
-			submit_async_check(s_now, true, _scoped.backing_pkg_dir)
-			submit_async_autocomplete_index(s_now, true, _scoped.backing_pkg_dir != "" ? _scoped.backing_pkg_dir : "haati/hot_scripts")
+			_notify_buffer_edited(_c_buf_string(_scoped.buf), true, _scoped.backing_pkg_dir)
 		}
 
-		// Closing brace + Caret Telemetry + Live Diagnostics Footer
+		// Closing brace + Caret Telemetry + Live Copyable Diagnostics Footer
 		im.TextColored(p.accent, "} // end node body")
 		im.SameLine(0, 16)
 		_draw_ide_footer_telemetry(&_scoped.ide)
 
 		if len(snap.diagnostics) > 0 {
-			for d in snap.diagnostics {
-				col := d.is_warning ? im.Vec4{0.98, 0.78, 0.25, 1.0} : im.Vec4{1.0, 0.38, 0.40, 1.0}
-				im.TextColored(col, "%s", fmt.ctprintf("  Line %d:%d — %s", d.line, d.column, d.message))
+			if im.BeginChild("##scoped_node_diags", {0, 0}, {.Borders}) {
+				_draw_surface_diagnostics_panel("scoped_diag", snap.diagnostics, &_scoped.ide)
 			}
+			im.EndChild()
 		}
 	}
 	im.End()
@@ -2225,6 +2851,9 @@ _refresh_workspace_odin_files :: proc() {
 	for f in _studio.discovered_files do delete(f)
 	clear(&_studio.discovered_files)
 
+	if proj_root := engine.active_project_root(); proj_root != "" {
+		_walk_odin_dir(proj_root, proj_root, 0)
+	}
 	repo_root := engine.resolve_repo_root(context.temp_allocator)
 	roots := [4]string{"assets/scripts", "haati/hot_scripts", "haati/packages", "haati/engine"}
 	for r in roots {
@@ -2266,14 +2895,16 @@ _toolbar_sameline_if_fits :: #force_inline proc(next_item_est_w: f32) {
 }
 
 @(private = "file")
-_outline_symbol_visual :: proc(k: Outline_Symbol_Kind) -> (icon: string, col: im.Vec4) {
+_outline_symbol_visual :: proc(k: Outline_Symbol_Kind) -> (icon: cstring, col: im.Vec4) {
+	sk: thm.Studio_Symbol_Kind = .Procedure
 	switch k {
-	case .Hot_Proc: return icons.ICON_MD_BOLT,        {0.40, 0.96, 0.68, 1.0}
-	case .Proc:     return icons.ICON_MD_FUNCTIONS,   {0.52, 0.78, 1.00, 1.0}
-	case .Struct:   return icons.ICON_MD_DATA_OBJECT, {0.42, 0.88, 0.94, 1.0}
-	case .Enum:     return icons.ICON_MD_LIST_ALT,    {0.94, 0.78, 0.42, 1.0}
+	case .Hot_Proc: sk = .Hot_Proc
+	case .Proc:     sk = .Procedure
+	case .Struct:   sk = .Struct
+	case .Enum:     sk = .Enum
 	}
-	return icons.ICON_MD_CODE, {0.78, 0.82, 0.88, 1.0}
+	ic, _, scol := thm.studio_symbol_visual(sk)
+	return ic, scol
 }
 
 @(private = "file")
@@ -2372,20 +3003,18 @@ _jump_to_definition_by_ident :: proc(act: ^_Tab_Doc, ident: string, outline_syms
 	}
 	// 2. Search `@(hot_proc)` registry entries
 	decl_pat := fmt.tprintf("%s ::", ident)
-	for he in engine.hot_proc_entries() {
-		if he.name == ident && he.source_file != "" {
-			if raw, err := os.read_entire_file(he.source_file, context.temp_allocator); err == nil {
-				ln := 1
-				for line in strings.split_lines(string(raw), context.temp_allocator) {
-					if strings.contains(line, decl_pat) {
-						_nav_push_current()
-						if open_file_in_studio(he.source_file, ln) && _studio.active_tab >= 0 && _studio.active_tab < len(_studio.tabs) {
-							_jump_to_tab_line(&_studio.tabs[_studio.active_tab], ln)
-						}
-						return true
+	if he, hok := resolve_hot_proc_info(ident); hok && he.source_file != "" {
+		if raw, err := os.read_entire_file(he.source_file, context.temp_allocator); err == nil {
+			ln := 1
+			for line in strings.split_lines(string(raw), context.temp_allocator) {
+				if strings.contains(line, decl_pat) {
+					_nav_push_current()
+					if open_file_in_studio(he.source_file, ln) && _studio.active_tab >= 0 && _studio.active_tab < len(_studio.tabs) {
+						_jump_to_tab_line(&_studio.tabs[_studio.active_tab], ln)
 					}
-					ln += 1
+					return true
 				}
+				ln += 1
 			}
 		}
 	}
@@ -2414,6 +3043,7 @@ _jump_to_definition_by_ident :: proc(act: ^_Tab_Doc, ident: string, outline_syms
 draw_micro_studio_window :: proc() {
 	_ensure_zoom_init()
 	p  := thm.palette()
+	st := thm.studio_tokens()
 	io := im.GetIO()
 
 	_studio.window_hovered = im.IsWindowHovered(im.HoveredFlags_RootAndChildWindows)
@@ -2440,25 +3070,27 @@ draw_micro_studio_window :: proc() {
 	// -------------------------------------------------------------------------
 	// Responsive Non-Clipping Top IDE Toolbar (Fixed 1.0x Chrome — Never Clips!)
 	// -------------------------------------------------------------------------
-	if !_nav_can_back() do im.BeginDisabled()
+	can_back := _nav_can_back()
+	if !can_back do im.BeginDisabled()
 	if im.Button(fmt.ctprintf("%s##ide_nav_back", icons.ICON_MD_ARROW_LEFT)) {
 		_nav_step(-1)
 	}
-	if !_nav_can_back() do im.EndDisabled()
+	if !can_back do im.EndDisabled()
 	widgets.tooltip("Navigate Back (Alt+Left)")
 
 	im.SameLine(0, 2)
-	if !_nav_can_forward() do im.BeginDisabled()
+	can_fwd := _nav_can_forward()
+	if !can_fwd do im.BeginDisabled()
 	if im.Button(fmt.ctprintf("%s##ide_nav_fwd", icons.ICON_MD_ARROW_RIGHT)) {
 		_nav_step(+1)
 	}
-	if !_nav_can_forward() do im.EndDisabled()
+	if !can_fwd do im.EndDisabled()
 	widgets.tooltip("Navigate Forward (Alt+Right)")
 
 	_toolbar_sameline_if_fits(66.0)
 	if _studio.active_tab >= 0 && _studio.active_tab < len(_studio.tabs) {
 		act_tb := &_studio.tabs[_studio.active_tab]
-		_draw_undo_redo_buttons(&act_tb.undo, act_tb.buf, &_studio.ide, &act_tb.dirty, act_tb.pkg_dir, false, "main")
+		_draw_undo_redo_buttons(&act_tb.undo, &act_tb.buf, &_studio.ide, &act_tb.dirty, act_tb.pkg_dir, false, "main")
 	} else {
 		im.BeginDisabled()
 		im.Button(fmt.ctprintf("%s##cs_undo_none", icons.ICON_MD_UNDO))
@@ -2473,7 +3105,8 @@ draw_micro_studio_window :: proc() {
 		if _studio.active_tab >= 0 && _studio.active_tab < len(_studio.tabs) {
 			t := &_studio.tabs[_studio.active_tab]
 			if t.dirty {
-				_ = os.write_entire_file(t.abs_path, transmute([]u8)_c_buf_string(t.buf))
+				disk_src := format_studio_buffer_for_disk(_c_buf_string(t.buf), t.uses_tabs, context.temp_allocator)
+				_ = os.write_entire_file(t.abs_path, transmute([]u8)disk_src)
 				t.dirty = false
 			}
 		}
@@ -2486,11 +3119,10 @@ draw_micro_studio_window :: proc() {
 	if im.Button(fmt.ctprintf("%s Save (Ctrl+S)", icons.ICON_MD_SAVE)) || (_studio.window_focused && io.KeyCtrl && im.IsKeyPressed(.S, false)) {
 		if _studio.active_tab >= 0 && _studio.active_tab < len(_studio.tabs) {
 			t := &_studio.tabs[_studio.active_tab]
-			if os.write_entire_file(t.abs_path, transmute([]u8)_c_buf_string(t.buf)) == nil {
+			disk_src := format_studio_buffer_for_disk(_c_buf_string(t.buf), t.uses_tabs, context.temp_allocator)
+			if os.write_entire_file(t.abs_path, transmute([]u8)disk_src) == nil {
 				t.dirty = false
-				s_now := _c_buf_string(t.buf)
-				submit_async_check(s_now, false, t.pkg_dir, true)
-				submit_async_autocomplete_index(s_now, false, t.pkg_dir)
+				_notify_buffer_edited(_c_buf_string(t.buf), false, t.pkg_dir, true)
 			}
 		}
 	}
@@ -2508,8 +3140,8 @@ draw_micro_studio_window :: proc() {
 
 	_toolbar_sameline_if_fits(is_bp_script ? 210.0 : 136.0)
 	if is_bp_script {
-		im.PushStyleColorImVec4(.Button, {0.16, 0.56, 0.44, 0.85})
-		im.PushStyleColorImVec4(.Text, {0.96, 1.0, 0.98, 1.0})
+		im.PushStyleColorImVec4(.Button, st.compile_btn_bg)
+		im.PushStyleColorImVec4(.Text, st.compile_btn_fg)
 		if im.Button(fmt.ctprintf("%s Switch to Blueprint Graph (F12)", icons.ICON_MD_ACCOUNT_TREE)) || (_studio.window_focused && im.IsKeyPressed(.F12, false)) {
 			if _studio.switch_to_bp_cb != nil {
 				_studio.switch_to_bp_cb(act_path_bp)
@@ -2520,10 +3152,10 @@ draw_micro_studio_window :: proc() {
 		im.PopStyleColor(2)
 		widgets.tooltip("Switch back to visual node graph view for this `.bodin` Blueprint (`F12`)")
 	} else {
-		if im.Button(fmt.ctprintf("%s Unified Graph", icons.ICON_MD_ACCOUNT_TREE)) {
+		if im.Button(fmt.ctprintf("%s Blueprint Studio", icons.ICON_MD_ACCOUNT_TREE)) {
 			wnd.open("mh_visual_script")
 		}
-		widgets.tooltip("Open Unified Graph Studio (Gameplay BP, Anim & Motion Layer, Particle / GPU VFX, Material Shader)")
+		widgets.tooltip("Open Blueprint Studio (Gameplay BP, Anim & Motion Layer, Particle / GPU VFX, Audio)")
 	}
 
 	if _studio.active_tab >= 0 && _studio.active_tab < len(_studio.tabs) {
@@ -2539,44 +3171,7 @@ draw_micro_studio_window :: proc() {
 		}
 		widgets.tooltip("Fuzzy Jump to Procedure / `@(hot_proc)` / Struct / Enum (`Ctrl + Shift + O`)")
 
-		if im.BeginPopup("##studio_using_spaces_popup") {
-			act := &_studio.tabs[_studio.active_tab]
-			is_hot_script := strings.contains(act.pkg_dir, "hot_scripts")
-			src_cur := _c_buf_string(act.buf)
-
-			im.TextColored(p.accent, icons.ICON_MD_CODE + " Import & Using Spaces")
-			im.SetNextItemWidth(300)
-			im.InputTextWithHint("##st_using_q", "Search engine, input_manager, math, physics3d...", cstring(raw_data(_studio.using_search_buf[:])), len(_studio.using_search_buf))
-			uq := strings.to_lower(_c_buf_string(_studio.using_search_buf[:]), context.temp_allocator)
-			im.Separator()
-
-			for spec in USING_SPACE_CATALOG {
-				if spec.id == "self" do continue
-				if uq != "" && !strings.contains(strings.to_lower(spec.label, context.temp_allocator), uq) && !strings.contains(strings.to_lower(spec.description, context.temp_allocator), uq) {
-					continue
-				}
-				using_line := strings.has_prefix(spec.id, "using_") ? fmt.tprintf("using %s", spec.pkg_alias) : ""
-				already_in := (spec.import_line != "" && strings.contains(src_cur, spec.import_line)) && (using_line == "" || strings.contains(src_cur, using_line))
-				blocked_in_hot := is_hot_script && !spec.hot_safe
-				if blocked_in_hot do im.BeginDisabled()
-				lbl := blocked_in_hot \
-					? fmt.ctprintf("  %s (Plugin/Engine files only)", spec.label) \
-					: fmt.ctprintf("%s %s", already_in ? icons.ICON_MD_CHECK : "+", spec.label)
-				if im.MenuItem(lbl) && !already_in {
-					if new_src, changed := _inject_using_space_into_full_file(src_cur, spec, context.temp_allocator); changed {
-						_copy_to_c_buf(act.buf, new_src)
-						act.dirty = true
-						s_after := _c_buf_string(act.buf)
-						code_undo_record_edit(&act.undo, s_after, _studio.ide.cursor_pos, im.GetTime(), true)
-						submit_async_check(s_after, false, act.pkg_dir)
-						submit_async_autocomplete_index(s_after, false, act.pkg_dir)
-					}
-				}
-				if blocked_in_hot do im.EndDisabled()
-				widgets.tooltip(fmt.ctprintf("%s", spec.description))
-			}
-			im.EndPopup()
-		}
+		_draw_using_spaces_popup("##studio_using_spaces_popup", "##st_using_q", _studio.using_search_buf[:], tab = &_studio.tabs[_studio.active_tab], ide = &_studio.ide)
 	}
 
 	if _studio.open_ide_cb != nil && _studio.active_tab >= 0 && _studio.active_tab < len(_studio.tabs) {
@@ -2590,9 +3185,9 @@ draw_micro_studio_window :: proc() {
 
 	_toolbar_sameline_if_fits(44.0)
 	if im.Button(fmt.ctprintf("%s##ide_defs", icons.ICON_MD_SETTINGS)) {
-		wnd.open("editor_defaults")
+		wnd.open_settings_tab("Code & Script IDE")
 	}
-	widgets.tooltip("Open Editor Defaults (Configure per-pane zoom defaults, tooltip idle delay, Error Lens & Breadcrumbs)")
+	widgets.tooltip("Open Settings -> Code & Script IDE (External IDE preset, problem check idle delay, per-pane zooms, Error Lens & Breadcrumbs)")
 
 	// Per-Segment Independent Zoom Status Pills (Click any segment badge to reset that pane to 100%)
 	_toolbar_sameline_if_fits(235.0)
@@ -2620,7 +3215,7 @@ draw_micro_studio_window :: proc() {
 	// Precompute active tab symbols for Left Structure Outline, Breadcrumbs, and `Ctrl+Shift+O` popup
 	has_active_tab := _studio.active_tab >= 0 && _studio.active_tab < len(_studio.tabs)
 	active_src     := has_active_tab ? _c_buf_string(_studio.tabs[_studio.active_tab].buf) : ""
-	outline_syms   := has_active_tab ? extract_odin_outline_symbols(active_src, context.temp_allocator) : nil
+	outline_syms   := has_active_tab ? _get_cached_outline_symbols(active_src) : nil
 	encl_name, encl_kind, has_encl := enclosing_odin_symbol_at_line(outline_syms, max(_studio.ide.caret_line, 1))
 
 	if open_sym_jump {
@@ -2628,17 +3223,25 @@ draw_micro_studio_window :: proc() {
 	}
 	if im.BeginPopup("##studio_symbol_jump_popup") {
 		im.TextColored(p.accent, icons.ICON_MD_FUNCTIONS + " Jump to Symbol in File (Ctrl+Shift+O)")
-		if im.IsWindowAppearing() {
-			im.SetKeyboardFocusHere()
+		sr := widgets.search_bar(_studio.sym_jump_buf[:], widgets.Search_Bar_Opts{
+			id            = "##sym_jump_q",
+			hint          = "Filter procedures, @(hot_proc), structs...",
+			mode          = .Popup,
+			width         = 320,
+			enter_returns = true,
+		})
+		if sr.escape_close {
+			im.CloseCurrentPopup()
+			im.EndPopup()
+			return
 		}
-		im.SetNextItemWidth(320)
-		enter_sym := im.InputTextWithHint("##sym_jump_q", "Filter procedures, @(hot_proc), structs...", cstring(raw_data(_studio.sym_jump_buf[:])), len(_studio.sym_jump_buf), {.EnterReturnsTrue})
-		sq := strings.to_lower(_c_buf_string(_studio.sym_jump_buf[:]), context.temp_allocator)
+		terms := widgets.search_terms(sr.query)
+		enter_sym := sr.submitted || (sr.active && (im.IsKeyPressed(.Enter) || im.IsKeyPressed(.KeypadEnter)))
 		im.Separator()
 		first_match_ln := 0
 		if im.BeginChild("##sym_jump_list", {340, 240}) {
 			for sym, si in outline_syms {
-				if sq != "" && !strings.contains(strings.to_lower(sym.name, context.temp_allocator), sq) do continue
+				if len(terms) > 0 && !widgets.search_match(sym.name, terms) do continue
 				if first_match_ln == 0 do first_match_ln = sym.line
 				ic, scol := _outline_symbol_visual(sym.kind)
 				im.PushStyleColorImVec4(.Text, scol)
@@ -2738,19 +3341,18 @@ draw_micro_studio_window :: proc() {
 			// 1C. Workspace Odin / Bodin Explorer
 			im.Separator()
 			im.TextColored(p.accent, icons.ICON_MD_FOLDER + " Workspace Odin Files")
-			im.SetNextItemWidth(-32)
-			im.InputTextWithHint("##file_filter", "Filter files...", cstring(raw_data(_studio.search_buf[:])), len(_studio.search_buf))
+			_ = widgets.search_input("##file_filter", _studio.search_buf[:], "Filter files...", max(im.GetContentRegionAvail().x - 34.0, 96.0))
 			im.SameLine()
 			if im.Button(fmt.ctprintf("%s##rescan", icons.ICON_MD_REFRESH)) {
 				_refresh_workspace_odin_files()
 			}
 			widgets.tooltip("Rescan workspace `.odin` and `.bodin` files")
 
-			q := strings.to_lower(_c_buf_string(_studio.search_buf[:]), context.temp_allocator)
+			file_terms := widgets.search_terms(_c_buf_string(_studio.search_buf[:]))
 			if im.BeginChild("##file_list_scroll", {0, 0}, {}, left_flags) {
 				shown := 0
 				for f in _studio.discovered_files {
-					if q != "" && !strings.contains(strings.to_lower(f, context.temp_allocator), q) do continue
+					if len(file_terms) > 0 && !widgets.search_match(f, file_terms) do continue
 					base := filepath.base(f)
 					is_cur := has_active_tab && _studio.tabs[_studio.active_tab].abs_path == f
 					file_ic := strings.has_suffix(base, ".bodin") ? icons.ICON_MD_ACCOUNT_TREE : icons.ICON_MD_DESCRIPTION
@@ -2768,19 +3370,12 @@ draw_micro_studio_window :: proc() {
 	}
 
 	// Vertical Splitter between Left Explorer & Right Editor
-	im.SameLine(0, 2)
-	im.InvisibleButton("##studio_vsplit", {5.0, max(avail.y, 16.0)})
-	if im.IsItemHovered() || im.IsItemActive() {
-		im.SetMouseCursor(.ResizeEW)
-		s_min := im.GetItemRectMin()
-		s_max := im.GetItemRectMax()
-		im.DrawList_AddRectFilled(im.GetWindowDrawList(), s_min, s_max, im.GetColorU32ImVec4(thm.with_alpha(p.accent, 0.55)), 2.0)
+	im.SameLine(0, 0)
+	right_w := max(avail.x - left_w - widgets.SPLITTER_SIZE, 240.0)
+	if widgets.splitter("##studio_vsplit", true, &left_w, &right_w, 175.0, 240.0) {
+		_studio.left_width = clamp(left_w, 175.0, 560.0)
 	}
-	if im.IsItemActive() && io.MouseDelta.x != 0 {
-		_studio.left_width = clamp(_studio.left_width + io.MouseDelta.x, 175.0, 560.0)
-	}
-
-	im.SameLine(0, 2)
+	im.SameLine(0, 0)
 	if im.BeginChild("##studio_right_main", {0, avail.y}) {
 		if len(_studio.tabs) > 0 && im.BeginTabBar("##studio_tabs", {.FittingPolicyScroll}) {
 			remove_idx := -1
@@ -2794,9 +3389,7 @@ draw_micro_studio_window :: proc() {
 					if _studio.active_tab != ti {
 						_studio.active_tab = ti
 						_clear_ide_pending_restore(&_studio.ide)
-						s_tab := _c_buf_string(tab.buf)
-						submit_async_check(s_tab, false, tab.pkg_dir)
-						submit_async_autocomplete_index(s_tab, false, tab.pkg_dir)
+						_notify_buffer_edited(_c_buf_string(tab.buf), false, tab.pkg_dir)
 					}
 					im.EndTabItem()
 				}
@@ -2805,6 +3398,7 @@ draw_micro_studio_window :: proc() {
 			im.EndTabBar()
 
 			if remove_idx >= 0 {
+				prev_alloc := context.allocator
 				context.allocator = runtime.default_allocator()
 				old := _studio.tabs[remove_idx]
 				delete(old.title)
@@ -2814,6 +3408,7 @@ draw_micro_studio_window :: proc() {
 				code_undo_free(&old.undo)
 				_clear_ide_pending_restore(&_studio.ide)
 				ordered_remove(&_studio.tabs, remove_idx)
+				context.allocator = prev_alloc
 				if _studio.active_tab >= len(_studio.tabs) {
 					_studio.active_tab = max(len(_studio.tabs) - 1, 0)
 				}
@@ -2857,33 +3452,42 @@ draw_micro_studio_window :: proc() {
 					_studio.show_error_lens = !_studio.show_error_lens
 				}
 				widgets.tooltip("Toggle Inline Diagnostic Error Lens after source lines")
+
+				if len(_studio.ide.cached_unused_import_lines) > 0 {
+					im.SameLine(0, 6)
+					im.PushStyleColorImVec4(.Button, thm.with_alpha(p.status_warning, 0.24))
+					if im.SmallButton(fmt.ctprintf("Comment Unused Imports (%d)##bc_comment_imp", len(_studio.ide.cached_unused_import_lines))) {
+						if updated, cnt := comment_out_unused_odin_imports(active_src, context.temp_allocator); cnt > 0 {
+							_copy_to_c_buf_grow(&act.buf, updated, STUDIO_MIN_BUF_CAP)
+							act.dirty = true
+							s_after := _c_buf_string(act.buf)
+							code_undo_record_edit(&act.undo, s_after, min(_studio.ide.cursor_pos, len(s_after)), im.GetTime(), true)
+							_notify_buffer_edited(s_after, false, act.pkg_dir)
+						}
+					}
+					im.PopStyleColor()
+					widgets.tooltip("One-click comment out unused Odin imports in this file")
+				}
 			} else {
 				_draw_ide_footer_telemetry(&_studio.ide)
 			}
 
 			// SEGMENT 2: Center Code Surface (`_studio.code_zoom`)
 			prob_h := clamp(_studio.problems_height, 44.0, max(im.GetContentRegionAvail().y * 0.45, 56.0))
-			ed_h   := max(im.GetContentRegionAvail().y - prob_h - 10.0, 120.0)
-			if _draw_syntax_code_surface("##main_studio_code", act.buf, {0, ed_h}, snap.diagnostics, &_studio.ide, nil, false, &act.scroll_line, &act.undo, &act.dirty, act.pkg_dir) {
+			ed_h   := max(im.GetContentRegionAvail().y - prob_h - widgets.SPLITTER_SIZE - 4.0, 120.0)
+			if _draw_syntax_code_surface("##main_studio_code", &act.buf, {0, ed_h}, snap.diagnostics, &_studio.ide, nil, false, &act.scroll_line, &act.undo, &act.dirty, act.pkg_dir) {
 				act.dirty = true
-				s_now := _c_buf_string(act.buf)
-				submit_async_check(s_now, false, act.pkg_dir)
-				submit_async_autocomplete_index(s_now, false, act.pkg_dir)
+				_notify_buffer_edited(_c_buf_string(act.buf), false, act.pkg_dir)
 			}
 			if _studio.ide.req_jump_ident != "" {
 				_jump_to_definition_by_ident(act, _studio.ide.req_jump_ident, outline_syms)
+				// _jump_to_definition_by_ident may open a new tab and reallocate _studio.tabs.
+				act = (_studio.active_tab >= 0 && _studio.active_tab < len(_studio.tabs)) ? &_studio.tabs[_studio.active_tab] : nil
 			}
 
 			// Horizontal Splitter between Code Surface & Problems Dock
-			im.InvisibleButton("##studio_hsplit", {max(im.GetContentRegionAvail().x, 16.0), 5.0})
-			if im.IsItemHovered() || im.IsItemActive() {
-				im.SetMouseCursor(.ResizeNS)
-				s_min := im.GetItemRectMin()
-				s_max := im.GetItemRectMax()
-				im.DrawList_AddRectFilled(im.GetWindowDrawList(), s_min, s_max, im.GetColorU32ImVec4(thm.with_alpha(p.accent, 0.55)), 2.0)
-			}
-			if im.IsItemActive() && io.MouseDelta.y != 0 {
-				_studio.problems_height = clamp(_studio.problems_height - io.MouseDelta.y, 44.0, 360.0)
+			if widgets.splitter("##studio_hsplit", false, &ed_h, &prob_h, 120.0, 44.0) {
+				_studio.problems_height = clamp(prob_h, 44.0, 360.0)
 			}
 
 			// SEGMENT 3: Bottom Compiler Problems & Cartridge Output Dock (`_studio.problems_zoom`)
@@ -2899,25 +3503,12 @@ draw_micro_studio_window :: proc() {
 					}
 
 					_, _, _, _, hot_stderr := engine.hot_cartridge_status()
-					if len(snap.diagnostics) == 0 && hot_stderr == "" {
-						im.TextColored({0.36, 0.90, 0.58, 1.0}, icons.ICON_MD_CHECK + " 0 Compiler Problems — Syntax & Types Clean")
-					} else {
-						for d, di in snap.diagnostics {
-							col := d.is_warning ? im.Vec4{0.98, 0.78, 0.25, 1.0} : im.Vec4{1.0, 0.38, 0.40, 1.0}
-							im.PushStyleColorImVec4(.Text, col)
-							if im.Selectable(fmt.ctprintf("%s:%d:%d — %s##diag_%d", filepath.base(d.file), d.line, d.column, d.message, di), false) {
-								if d.file != "" && os.exists(d.file) && d.file != act.abs_path {
-									open_file_in_studio(d.file, d.line)
-								} else {
-									_jump_to_tab_line(act, d.line)
-								}
-							}
-							im.PopStyleColor()
-							widgets.tooltip("Click to jump directly to this diagnostic line")
-						}
-						if hot_stderr != "" {
-							im.TextColored({1.0, 0.42, 0.42, 1.0}, "%s", fmt.ctprintf("Hot Cartridge Build Output: %s", hot_stderr))
-						}
+					if snap.stage == .Pending_Syntax && hot_stderr == "" {
+						widgets.text_disabledf("Typing... waiting %.2fs idle before checking problems", get_problem_check_delay_sec())
+					} else if len(snap.diagnostics) == 0 && hot_stderr == "" {
+						im.TextColored(p.status_success, icons.ICON_MD_CHECK + " 0 Compiler Problems — Syntax & Types Clean")
+					} else if act != nil {
+						_draw_surface_diagnostics_panel("studio_diag", snap.diagnostics, &_studio.ide, act, hot_stderr, 84.0, true, true)
 					}
 				}
 				im.EndChild()
@@ -3020,11 +3611,10 @@ sync_and_draw_embedded_scoped_editor :: proc(
 				is_output = pin.is_output,
 			})
 		}
-		_copy_to_c_buf(_emb_scoped.buf[:], current_body)
-		s_now := _c_buf_string(_emb_scoped.buf[:])
+		_copy_to_c_buf_grow(&_emb_scoped.buf, current_body, SCOPED_MIN_BUF_CAP)
+		s_now := _c_buf_string(_emb_scoped.buf)
 		code_undo_reset(&_emb_scoped.undo, s_now, 0)
-		submit_async_check(s_now, true, "")
-		submit_async_autocomplete_index(s_now, true, "haati/hot_scripts")
+		_notify_buffer_edited(s_now, true, "")
 	} else if _emb_scoped.signature_banner != signature_banner {
 		context.allocator = runtime.default_allocator()
 		if _emb_scoped.signature_banner != "" do delete(_emb_scoped.signature_banner)
@@ -3043,7 +3633,7 @@ sync_and_draw_embedded_scoped_editor :: proc(
 		widgets.tooltip("Save Odin body, transpile `.bodin`, and Hot-Swap `hot_cartridge` (~240 ms)!")
 
 		im.SameLine()
-		_draw_undo_redo_buttons(&_emb_scoped.undo, _emb_scoped.buf[:], &_emb_scoped.ide, &_emb_scoped.dirty, "haati/hot_scripts", true, "emb_sc")
+		_draw_undo_redo_buttons(&_emb_scoped.undo, &_emb_scoped.buf, &_emb_scoped.ide, &_emb_scoped.dirty, "haati/hot_scripts", true, "emb_sc")
 
 		im.SameLine()
 		if im.Button(fmt.ctprintf("%s Find (Ctrl+F)", icons.ICON_MD_SEARCH)) {
@@ -3056,6 +3646,8 @@ sync_and_draw_embedded_scoped_editor :: proc(
 		_draw_checker_and_hot_pills(snap)
 		im.Separator()
 
+		_draw_scoped_using_chip_bar(&_emb_scoped, "##emb_using_spaces_popup", "##emb_using_q")
+
 		// Locked Signature Header
 		banner_bg := p.is_light ? thm.lerp_col(p.bg_canvas, p.accent, 0.08) : thm.lerp_col(p.bg_canvas, p.accent, 0.14)
 		im.PushStyleColorImVec4(.ChildBg, banner_bg)
@@ -3065,35 +3657,27 @@ sync_and_draw_embedded_scoped_editor :: proc(
 				im.TextDisabled("Pins:")
 				for pin in _emb_scoped.pins {
 					im.SameLine()
-					if pin.is_output {
-						im.TextColored({0.46, 0.94, 0.62, 1.0}, "%s", fmt.ctprintf("-> %s: %s", pin.name, pin.odin_type))
-					} else if pin.pass_mode == .By_Reference {
-						im.TextColored({1.00, 0.50, 0.66, 1.0}, "%s", fmt.ctprintf("%s %s: ^%s", icons.ICON_MD_DIAMOND, pin.name, pin.odin_type))
-					} else {
-						im.TextColored({0.48, 0.82, 1.00, 1.0}, "%s", fmt.ctprintf("%s %s: %s", icons.ICON_MD_CIRCLE, pin.name, pin.odin_type))
-					}
+					_draw_scoped_pin_badge(pin, false)
 				}
 			}
 		}
 		im.EndChild()
 		im.PopStyleColor()
 
-		err_h: f32 = len(snap.diagnostics) > 0 ? 78.0 : 28.0
+		err_h: f32 = len(snap.diagnostics) > 0 ? 110.0 : 28.0
 		code_h := max(im.GetContentRegionAvail().y - err_h - 6.0, 96.0)
-		if _draw_syntax_code_surface("##emb_scoped_code_surf", _emb_scoped.buf[:], {0, code_h}, snap.diagnostics, &_emb_scoped.ide, _emb_scoped.pins[:], true, nil, &_emb_scoped.undo, &_emb_scoped.dirty, "haati/hot_scripts") {
+		if _draw_syntax_code_surface("##emb_scoped_code_surf", &_emb_scoped.buf, {0, code_h}, snap.diagnostics, &_emb_scoped.ide, _emb_scoped.pins[:], true, nil, &_emb_scoped.undo, &_emb_scoped.dirty, "haati/hot_scripts") {
 			body_edited = true
-			s_now := _c_buf_string(_emb_scoped.buf[:])
-			submit_async_check(s_now, true, "")
-			submit_async_autocomplete_index(s_now, true, "haati/hot_scripts")
+			_notify_buffer_edited(_c_buf_string(_emb_scoped.buf), true, "")
 		}
 		im.TextColored(p.accent, "}")
 		im.SameLine(0, 12)
 		_draw_ide_footer_telemetry(&_emb_scoped.ide)
 		if len(snap.diagnostics) > 0 {
-			for d in snap.diagnostics {
-				col := d.is_warning ? im.Vec4{0.98, 0.78, 0.25, 1.0} : im.Vec4{1.0, 0.38, 0.40, 1.0}
-				im.TextColored(col, "%s", fmt.ctprintf("  Line %d:%d — %s", d.line, d.column, d.message))
+			if im.BeginChild("##emb_scoped_diags", {0, 0}, {.Borders}) {
+				_draw_surface_diagnostics_panel("emb_sc_diag", snap.diagnostics, &_emb_scoped.ide)
 			}
+			im.EndChild()
 		}
 	}
 	im.EndChild()
@@ -3108,11 +3692,13 @@ sync_and_draw_embedded_scoped_editor :: proc(
 
 // Forces an already-open tab for `abs_or_rel_path` to reload cleanly from disk (used after Blueprint bake!).
 reload_file_tab_from_disk :: proc(abs_or_rel_path: string) {
-	norm_abs := _canonical_studio_path(abs_or_rel_path, context.temp_allocator)
+	norm_abs := resolve_workspace_path(abs_or_rel_path, context.temp_allocator)
 	for &t in _studio.tabs {
 		if t.abs_path == norm_abs {
 			if raw, err := os.read_entire_file(norm_abs, context.temp_allocator); err == nil {
-				_copy_to_c_buf(t.buf, string(raw))
+				raw_str := string(raw)
+				t.uses_tabs = detect_odin_hard_tabs(raw_str)
+				_copy_to_c_buf_grow(&t.buf, raw_str, STUDIO_MIN_BUF_CAP)
 				t.dirty = false
 				s := _c_buf_string(t.buf)
 				if t.undo.initialized {
@@ -3120,8 +3706,7 @@ reload_file_tab_from_disk :: proc(abs_or_rel_path: string) {
 				} else {
 					code_undo_reset(&t.undo, s, 0)
 				}
-				submit_async_check(s, false, t.pkg_dir)
-				submit_async_autocomplete_index(s, false, t.pkg_dir)
+				_notify_buffer_edited(s, false, t.pkg_dir)
 			}
 			return
 		}
@@ -3135,7 +3720,7 @@ draw_embedded_script_panel :: proc(abs_or_rel_path: string, size: im.Vec2 = {0, 
 
 	if abs_or_rel_path != "" {
 		has_act := _studio.active_tab >= 0 && _studio.active_tab < len(_studio.tabs)
-		norm_abs := _canonical_studio_path(abs_or_rel_path, context.temp_allocator)
+		norm_abs := resolve_workspace_path(abs_or_rel_path, context.temp_allocator)
 		if !has_act || _studio.tabs[_studio.active_tab].abs_path != norm_abs {
 			_ = open_file_in_studio(norm_abs)
 		}
@@ -3148,12 +3733,11 @@ draw_embedded_script_panel :: proc(abs_or_rel_path: string, size: im.Vec2 = {0, 
 		if im.Button(fmt.ctprintf("%s Save File (Ctrl+S)", icons.ICON_MD_SAVE)) || (_studio.emb_full_focused && io.KeyCtrl && im.IsKeyPressed(.S, false)) {
 			if _studio.active_tab >= 0 && _studio.active_tab < len(_studio.tabs) {
 				t := &_studio.tabs[_studio.active_tab]
-				if os.write_entire_file(t.abs_path, transmute([]u8)_c_buf_string(t.buf)) == nil {
+				disk_src := format_studio_buffer_for_disk(_c_buf_string(t.buf), t.uses_tabs, context.temp_allocator)
+				if os.write_entire_file(t.abs_path, transmute([]u8)disk_src) == nil {
 					t.dirty = false
 					req_save = true
-					s_now := _c_buf_string(t.buf)
-					submit_async_check(s_now, false, t.pkg_dir, true)
-					submit_async_autocomplete_index(s_now, false, t.pkg_dir)
+					_notify_buffer_edited(_c_buf_string(t.buf), false, t.pkg_dir, true)
 				}
 			}
 		}
@@ -3162,7 +3746,8 @@ draw_embedded_script_panel :: proc(abs_or_rel_path: string, size: im.Vec2 = {0, 
 		if im.Button(fmt.ctprintf("%s Save & Hot-Swap (F7)", icons.ICON_MD_BOLT)) || (_studio.emb_full_focused && im.IsKeyPressed(.F7, false)) {
 			if _studio.active_tab >= 0 && _studio.active_tab < len(_studio.tabs) {
 				t := &_studio.tabs[_studio.active_tab]
-				_ = os.write_entire_file(t.abs_path, transmute([]u8)_c_buf_string(t.buf))
+				disk_src := format_studio_buffer_for_disk(_c_buf_string(t.buf), t.uses_tabs, context.temp_allocator)
+				_ = os.write_entire_file(t.abs_path, transmute([]u8)disk_src)
 				t.dirty = false
 			}
 			req_save = true
@@ -3173,7 +3758,7 @@ draw_embedded_script_panel :: proc(abs_or_rel_path: string, size: im.Vec2 = {0, 
 		if _studio.active_tab >= 0 && _studio.active_tab < len(_studio.tabs) {
 			act_emb := &_studio.tabs[_studio.active_tab]
 			im.SameLine()
-			_draw_undo_redo_buttons(&act_emb.undo, act_emb.buf, &_studio.ide, &act_emb.dirty, act_emb.pkg_dir, false, "emb_full")
+			_draw_undo_redo_buttons(&act_emb.undo, &act_emb.buf, &_studio.ide, &act_emb.dirty, act_emb.pkg_dir, false, "emb_full")
 		}
 
 		im.SameLine()
@@ -3189,11 +3774,11 @@ draw_embedded_script_panel :: proc(abs_or_rel_path: string, size: im.Vec2 = {0, 
 
 		if _studio.active_tab >= 0 && _studio.active_tab < len(_studio.tabs) {
 			act := &_studio.tabs[_studio.active_tab]
-			outline_syms := extract_odin_outline_symbols(_c_buf_string(act.buf), context.temp_allocator)
+			outline_syms := _get_cached_outline_symbols(_c_buf_string(act.buf))
 			// Compact Symbol Jump strip
 			im.TextColored(p.text_muted, "%s", fmt.ctprintf("%s%s:", act.title, act.dirty ? " *" : ""))
 			im.SameLine()
-			im.TextDisabled("Ln %d, Col %d", max(_studio.ide.caret_line, 1), max(_studio.ide.caret_col, 1))
+			widgets.text_disabledf("Ln %d, Col %d", max(_studio.ide.caret_line, 1), max(_studio.ide.caret_col, 1))
 			if len(outline_syms) > 0 {
 				im.SameLine()
 				im.TextDisabled("| Procs:")
@@ -3207,24 +3792,30 @@ draw_embedded_script_panel :: proc(abs_or_rel_path: string, size: im.Vec2 = {0, 
 				}
 			}
 
-			err_h: f32 = len(snap.diagnostics) > 0 ? 78.0 : 28.0
+			_, _, _, _, hot_stderr := engine.hot_cartridge_status()
+			has_err_area := len(snap.diagnostics) > 0 || hot_stderr != ""
+			err_h: f32 = has_err_area ? 116.0 : 28.0
 			ed_h := max(im.GetContentRegionAvail().y - err_h - 6.0, 120.0)
-			if _draw_syntax_code_surface("##emb_full_code_surf", act.buf, {0, ed_h}, snap.diagnostics, &_studio.ide, nil, false, &act.scroll_line, &act.undo, &act.dirty, act.pkg_dir) {
+			if _draw_syntax_code_surface("##emb_full_code_surf", &act.buf, {0, ed_h}, snap.diagnostics, &_studio.ide, nil, false, &act.scroll_line, &act.undo, &act.dirty, act.pkg_dir) {
 				act.dirty = true
-				s_now := _c_buf_string(act.buf)
-				submit_async_check(s_now, false, act.pkg_dir)
-				submit_async_autocomplete_index(s_now, false, act.pkg_dir)
+				_notify_buffer_edited(_c_buf_string(act.buf), false, act.pkg_dir)
 			}
 			if _studio.ide.req_jump_ident != "" {
 				_jump_to_definition_by_ident(act, _studio.ide.req_jump_ident, outline_syms)
+				// _jump_to_definition_by_ident may open a new tab and reallocate _studio.tabs.
+				act = (_studio.active_tab >= 0 && _studio.active_tab < len(_studio.tabs)) ? &_studio.tabs[_studio.active_tab] : nil
 			}
-			if len(snap.diagnostics) == 0 {
-				im.TextColored({0.36, 0.90, 0.58, 1.0}, icons.ICON_MD_CHECK + " 0 Compiler Problems")
+			if snap.stage == .Pending_Syntax && hot_stderr == "" {
+				widgets.text_disabledf("Typing... waiting %.2fs idle before checking problems", get_problem_check_delay_sec())
+			} else if !has_err_area {
+				im.TextColored(p.status_success, icons.ICON_MD_CHECK + " 0 Compiler Problems")
 			} else {
-				for d in snap.diagnostics {
-					col := d.is_warning ? im.Vec4{0.98, 0.78, 0.25, 1.0} : im.Vec4{1.0, 0.38, 0.40, 1.0}
-					im.TextColored(col, "%s", fmt.ctprintf("Line %d:%d — %s", d.line, d.column, d.message))
+				if im.BeginChild("##emb_full_diags", {0, 0}, {.Borders}) {
+					if act != nil {
+						_draw_surface_diagnostics_panel("emb_full_diag", snap.diagnostics, &_studio.ide, act, hot_stderr, 68.0)
+					}
 				}
+				im.EndChild()
 			}
 		} else {
 			im.TextDisabled("Bake or save this `.bodin` script to open its full Odin source here.")

@@ -18,6 +18,8 @@ test_crash_journal_writes_reason_and_breadcrumb :: proc(t: ^testing.T) {
 	testing.expect(t, path != "", "journal path should be built at init")
 	if path == "" do return
 	defer os.remove(path)
+	lp := crash_journal.last_path()
+	defer if lp != "" do os.remove(lp)
 
 	crash_journal.breadcrumb("unit test breadcrumb")
 	crash_journal.write_test_entry("TEST (synthetic entry)")
@@ -42,6 +44,8 @@ test_crash_journal_breadcrumb_clear_and_overwrite :: proc(t: ^testing.T) {
 	path := crash_journal.path()
 	if path == "" do return
 	defer os.remove(path)
+	lp := crash_journal.last_path()
+	defer if lp != "" do os.remove(lp)
 
 	// The breadcrumb is last-activity, not a trail: a second call replaces
 	// the first rather than appending.
@@ -65,6 +69,8 @@ test_crash_journal_breadcrumb_truncates_long_text :: proc(t: ^testing.T) {
 	path := crash_journal.path()
 	if path == "" do return
 	defer os.remove(path)
+	lp := crash_journal.last_path()
+	defer if lp != "" do os.remove(lp)
 
 	// Fixed storage: an over-long breadcrumb must truncate, never overflow.
 	long := strings.repeat("x", 4096, context.temp_allocator)

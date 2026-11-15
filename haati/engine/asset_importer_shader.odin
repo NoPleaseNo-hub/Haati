@@ -70,38 +70,58 @@ Shader_Artifact_Header :: struct #packed {
 // names are CLONED with `allocator` (callers keep them past the blob).
 // Shared by shader_load and tests.
 _shader_artifact_parse :: proc(blob: []u8, allocator := context.allocator) -> (header: Shader_Artifact_Header, spv: []u8, msl: []u8, properties: []Shader_Property, textures: []Shader_Texture, ok: bool) {
-    if len(blob) < size_of(Shader_Artifact_Header) do return
+    hdr_sz := u64(size_of(Shader_Artifact_Header))
+    if u64(len(blob)) < hdr_sz do return
     header = (^Shader_Artifact_Header)(raw_data(blob))^
     if string(header.magic[:]) != SHADER_ARTIFACT_MAGIC do return
-    if len(blob) < size_of(Shader_Artifact_Header) + int(header.spv_len) + int(header.msl_len) do return
+    payload_start := hdr_sz + u64(header.spv_len) + u64(header.msl_len)
+    if payload_start > u64(len(blob)) do return
 
-    spv = blob[size_of(Shader_Artifact_Header):][:header.spv_len]
-    msl = blob[size_of(Shader_Artifact_Header) + int(header.spv_len):][:header.msl_len]
+    spv = blob[hdr_sz : hdr_sz + u64(header.spv_len)]
+    msl = blob[hdr_sz + u64(header.spv_len) : payload_start]
 
-    props := make([dynamic]Shader_Property, 0, header.property_count, allocator)
-    cursor := size_of(Shader_Artifact_Header) + int(header.spv_len) + int(header.msl_len)
+    props: [dynamic]Shader_Property
+    texs:  [dynamic]Shader_Texture
+    parsed_ok := false
+    defer if !parsed_ok {
+        for p in props do delete(p.name, allocator)
+        delete(props)
+        for t in texs do delete(t.name, allocator)
+        delete(texs)
+    }
+
+    cursor := int(payload_start)
+    rem_props := u64(len(blob) - cursor)
+    if u64(header.property_count) > rem_props / 12 do return
+    props = make([dynamic]Shader_Property, 0, int(header.property_count), allocator)
     for _ in 0 ..< header.property_count {
-        if cursor + 12 > len(blob) do return {}, nil, nil, nil, nil, false
+        if len(blob) - cursor < 12 do return
         offset := (^u32)(raw_data(blob[cursor:]))^
         size := (^u32)(raw_data(blob[cursor + 4:]))^
-        name_len := int((^u32)(raw_data(blob[cursor + 8:]))^)
+        name_len_u32 := (^u32)(raw_data(blob[cursor + 8:]))^
         cursor += 12
-        if cursor + name_len > len(blob) do return {}, nil, nil, nil, nil, false
+        if u64(name_len_u32) > u64(len(blob) - cursor) do return
+        name_len := int(name_len_u32)
         name := strings.clone(string(blob[cursor:][:name_len]), allocator)
         cursor += name_len
         append(&props, Shader_Property{name = name, offset = offset, size = size})
     }
-    texs := make([dynamic]Shader_Texture, 0, header.texture_count, allocator)
+
+    rem_texs := u64(len(blob) - cursor)
+    if u64(header.texture_count) > rem_texs / 8 do return
+    texs = make([dynamic]Shader_Texture, 0, int(header.texture_count), allocator)
     for _ in 0 ..< header.texture_count {
-        if cursor + 8 > len(blob) do return {}, nil, nil, nil, nil, false
+        if len(blob) - cursor < 8 do return
         binding := (^u32)(raw_data(blob[cursor:]))^
-        name_len := int((^u32)(raw_data(blob[cursor + 4:]))^)
+        name_len_u32 := (^u32)(raw_data(blob[cursor + 4:]))^
         cursor += 8
-        if cursor + name_len > len(blob) do return {}, nil, nil, nil, nil, false
+        if u64(name_len_u32) > u64(len(blob) - cursor) do return
+        name_len := int(name_len_u32)
         name := strings.clone(string(blob[cursor:][:name_len]), allocator)
         cursor += name_len
         append(&texs, Shader_Texture{name = name, binding = binding})
     }
-    if cursor != len(blob) do return {}, nil, nil, nil, nil, false
+    if cursor != len(blob) do return
+    parsed_ok = true
     return header, spv, msl, props[:], texs[:], true
 }

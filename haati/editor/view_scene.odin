@@ -12,12 +12,13 @@ import "inspector"
 import "haati:engine/gizmos"
 import "core:strings"
 import "haati:editor/icons"
+import thm "haati:editor/theme"
 import "haati:editor/widgets"
 import "core:fmt"
 import "core:encoding/uuid"
 import "haati:editor/undo"
 import wnd "haati:editor/window"
-import editor_visuals "../packages/editor_visuals"
+import editor_visuals "haati:editor/editor_visuals"
 import "haati:editor/handles"
 import cad_csg_editor "haati:packages/cad_csg/editor"
 
@@ -653,6 +654,7 @@ render_scene_rt :: proc(w, h: i32) {
 	gfx.rt_resize(scene_rt, w, h)
 
 	gfx.pass_begin_target(scene_rt, [4]f32{0.15, 0.15, 0.15, 1})
+	gfx.set_post_fx(gfx.POST_FX_DEFAULT)
 	view := scene_render_view(f32(w), f32(h), unclipped_ortho = false)
 	gfx.set_view_proj(view.view_proj, view.cam_pos)
 
@@ -964,7 +966,11 @@ draw_scene_view :: proc() {
 			render_scene_rt(w, h)
 			tex_id := im.TextureID(uintptr(gfx.rt_imgui_id(scene_rt)))
 			im.SetCursorScreenPos({content_min.x + bar_l, content_min.y + bar_t})
-			im.Image(im.TextureRef{_TexID = tex_id}, avail)
+			if tex_id != 0 {
+				im.Image(im.TextureRef{_TexID = tex_id}, avail)
+			} else {
+				im.Dummy(avail)
+			}
 			_scene_img_min = im.GetItemRectMin()
 			if im.BeginDragDropTarget() {
 				if payload := im.AcceptDragDropPayload("ASSET_PATH", {}); payload != nil && payload.Data != nil && payload.DataSize > 0 {
@@ -1257,7 +1263,7 @@ _draw_scene_context_menu :: proc() {
 	if _ctx_menu_target != {} && engine.pool_valid(&w.transforms, engine.Handle(_ctx_menu_target)) {
 		t := engine.pool_get(&w.transforms, engine.Handle(_ctx_menu_target))
 		if t != nil {
-			im.TextColored({0.4, 0.8, 1.0, 1.0}, fmt.ctprintf("%s  %s", icons.ICON_MD_DEPLOYED_CODE, t.name))
+			widgets.text_coloredf(thm.palette().accent, "%s  %s", icons.ICON_MD_DEPLOYED_CODE, t.name)
 			im.Separator()
 		}
 
@@ -1282,7 +1288,7 @@ _draw_scene_context_menu :: proc() {
 			menu.section("Edit", min_order = menu.EDIT_SECTION_SELECTION_MIN, max_order = menu.EDIT_SECTION_SELECTION_MAX),
 		})
 	} else {
-		im.TextDisabled(fmt.ctprintf("Spawn Position: [%.1f, %.1f, %.1f]", _scene_spawn_pos.x, _scene_spawn_pos.y, _scene_spawn_pos.z))
+		widgets.text_disabledf("Spawn Position: [%.1f, %.1f, %.1f]", _scene_spawn_pos.x, _scene_spawn_pos.y, _scene_spawn_pos.z)
 		im.Separator()
 
 		_scene_draw_create_node_menu_items({}, _scene_spawn_pos)
@@ -2228,7 +2234,6 @@ _draw_cad_ruler_overlay :: proc(dl: ^im.DrawList, img_min, img_max: im.Vec2) {
 	// 4. When Ruler mode is active (or active/pinned measurements exist), show the Ruler Mode / Axis / Angle control bar
 	if !scene_2d_ruler_active && !_ruler_has_measurement && len(_ruler_pinned) == 0 do return
 
-	saved_cursor := im.GetCursorScreenPos()
 	bar_pos := im.Vec2{img_min.x + 12, img_max.y - (scene_2d_mode ? 64.0 : 34.0)}
 	im.SetCursorScreenPos(bar_pos)
 	im.PushStyleColorImVec4(.Button, {0.13, 0.14, 0.18, 0.92})
@@ -2333,7 +2338,6 @@ _draw_cad_ruler_overlay :: proc(dl: ^im.DrawList, img_min, img_max: im.Vec2) {
 
 	im.PopStyleVar(2)
 	im.PopStyleColor(3)
-	im.SetCursorScreenPos(saved_cursor)
 }
 
 // 2D CAD HUD: live Depth Slice readout (Plain Wheel forward/backward through origin/mesh)
@@ -2389,7 +2393,6 @@ _draw_2d_cad_hud :: proc(dl: ^im.DrawList, img_min, img_max: im.Vec2) {
 	bar_px := clamp(bar_world / max(units_per_px, 1e-6), 40.0, 180.0)
 
 	hud_pos := im.Vec2{img_min.x + 12, img_max.y - 34}
-	saved_cursor := im.GetCursorScreenPos()
 	im.SetCursorScreenPos(hud_pos)
 	im.PushStyleColorImVec4(.Button, {0.11, 0.12, 0.15, 0.88})
 	im.PushStyleColorImVec4(.ButtonHovered, {0.22, 0.26, 0.33, 0.95})
@@ -2441,8 +2444,6 @@ _draw_2d_cad_hud :: proc(dl: ^im.DrawList, img_min, img_max: im.Vec2) {
 	scale_txt := bar_world >= 1.0 ? fmt.ctprintf("%.0f m", bar_world) : fmt.ctprintf("%.2g m", bar_world)
 	sts := im.CalcTextSize(scale_txt)
 	im.DrawList_AddText(dl, {(bar_x0 + bar_x1 - sts.x) * 0.5, scale_min.y + 1}, col_bar_fg, scale_txt)
-
-	im.SetCursorScreenPos(saved_cursor)
 }
 
 @(private = "file")

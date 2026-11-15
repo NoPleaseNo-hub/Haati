@@ -38,41 +38,19 @@ import mhgui "haati:packages/mhgui"
 // rebuilds it with those values, not the reset defaults.
 @(private = "file")
 _add_comp :: proc(tH: engine.Transform_Handle, key: engine.TypeKey, init: proc(ptr: rawptr) = nil) {
-	w := engine.ctx_world()
-	t := engine.pool_get(&w.transforms, engine.Handle(tH))
-	if t == nil do return
-	if _, idx := engine.transform_find_comp(t, key); idx >= 0 do return
-	owned, ptr := engine.transform_add_comp(tH, key)
-	if ptr == nil do return
-	if init != nil do init(ptr)
-	undo.record_add_component(tH, owned.handle, len(t.components) - 1)
+	_ = undo.record_ensure_component(tH, key, init)
 }
 
 // The canvas node `tH` sits in (itself included), or _NONE.
 @(private = "file")
 _canvas_of :: proc(start: engine.Transform_Handle) -> engine.Transform_Handle {
-	w := engine.ctx_world()
-	tH := start
-	for tH != _NONE {
-		if _, c := engine.transform_get_comp(tH, engine.Canvas); c != nil do return tH
-		t := engine.pool_get(&w.transforms, engine.Handle(tH))
-		if t == nil do return _NONE
-		tH = engine.Transform_Handle(t.parent.handle)
-	}
-	return _NONE
+	return engine.canvas_of(start)
 }
 
 // A new Canvas node at the scene root.
 @(private = "file")
 _create_canvas :: proc() -> engine.Transform_Handle {
-	scene := engine.sm_scene_get_active()
-	if scene == nil do return _NONE
-	tH := undo.record_create_child("Canvas", engine.Transform_Handle(scene.root.handle))
-	if tH != _NONE {
-		_add_comp(tH, .Canvas)
-		_add_comp(tH, .GraphicRaycaster)
-	}
-	return tH
+	return undo.record_create_ui_canvas()
 }
 
 @(menu_item={path="GameObject/UI/Canvas", order=50})

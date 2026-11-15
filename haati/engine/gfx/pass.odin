@@ -6,12 +6,19 @@ package gfx
 
 import "base:runtime"
 import "core:math"
+import "core:slice"
 import sdl "vendor:sdl3"
 
 Render_Target :: struct {
 	color, depth:  ^sdl.GPUTexture,
+	hdr_color:     ^sdl.GPUTexture,
+	bloom_mips:    [BLOOM_MIP_COUNT]^sdl.GPUTexture,
+	bloom_mip_w:   [BLOOM_MIP_COUNT]u32,
+	bloom_mip_h:   [BLOOM_MIP_COUNT]u32,
 	width, height: i32,
 }
+
+MAX_RT_DIM :: i32(8192)
 
 _Draw :: struct {
 	kind:         _Pipeline_Kind,
@@ -27,8 +34,10 @@ _Draw :: struct {
 	color:        [4]f32,
 	shader:       string, // "" = DEFAULT_SHADER (meshes and batched quads)
 	material:     []u8,   // fragment UBO slot 1 bytes (shader property block); nil = none
-	extra_tex:    []^Texture, // fragment sampler bindings 1..N (multi-texture shaders); nil entries = white
-	no_shadow:    bool,   // when true, skip drawing this mesh into shadow maps
+	extra_tex:     []^Texture, // fragment sampler bindings 1..N (multi-texture shaders); nil entries = white
+	no_shadow:     bool,   // when true, skip drawing this mesh into shadow maps
+	bounds_center: [3]f32, // conservative world-space bounding sphere center (for shadow culling)
+	bounds_radius: f32,    // >0 enables shadow frustum/range culling
 }
 
 // Fragment sampler slots a single draw can bind (mirrors the importer's
@@ -115,10 +124,15 @@ _View :: struct {
 
 _pass: struct {
 	active:       bool,
+	target_rt:    ^Render_Target,
 	target_color: ^sdl.GPUTexture,
 	target_depth: ^sdl.GPUTexture, // nil = depth-less pass (imgui-only)
+	resolve_dst:  ^sdl.GPUTexture,
+	resolve_w:    u32,
+	resolve_h:    u32,
 	clear:        Maybe([4]f32),
 	light:        Maybe(_Light_Uniform), // nil = _LIGHT_DEFAULT; reset each pass_end
+	post_fx:      Post_FX_Config,
 	vps:          [dynamic]_View,
 	vtx:          [dynamic]Vertex,
 	draws:        [dynamic]_Draw,
@@ -126,6 +140,8 @@ _pass: struct {
 	vbuf:          ^sdl.GPUBuffer,
 	transfer:      ^sdl.GPUTransferBuffer,
 	vbuf_capacity: u32, // in vertices
+} = {
+	post_fx = POST_FX_DEFAULT,
 }
 
 _pass_shutdown :: proc() {
@@ -134,31 +150,107 @@ _pass_shutdown :: proc() {
 	delete(_pass.vps)
 	delete(_pass.vtx)
 	delete(_pass.draws)
-	_pass = {}
+	_pass = {post_fx = POST_FX_DEFAULT}
 }
 
-rt_create :: proc(width, height: i32) -> ^Render_Target {
-	rt := new(Render_Target, runtime.default_allocator())
-	rt.width = width
-	rt.height = height
-	rt.color = sdl.CreateGPUTexture(_gfx.device, sdl.GPUTextureCreateInfo{
+@(private = "file")
+_rt_release_textures :: proc(rt: ^Render_Target) {
+	if rt == nil || _gfx.device == nil do return
+	if rt.color != nil do sdl.ReleaseGPUTexture(_gfx.device, rt.color)
+	if rt.hdr_color != nil do sdl.ReleaseGPUTexture(_gfx.device, rt.hdr_color)
+	if rt.depth != nil do sdl.ReleaseGPUTexture(_gfx.device, rt.depth)
+	for i in 0 ..< BLOOM_MIP_COUNT {
+		if rt.bloom_mips[i] != nil do sdl.ReleaseGPUTexture(_gfx.device, rt.bloom_mips[i])
+	}
+	rt.color = nil
+	rt.hdr_color = nil
+	rt.depth = nil
+	rt.bloom_mips = {}
+	rt.bloom_mip_w = {}
+	rt.bloom_mip_h = {}
+}
+
+@(private = "file")
+_rt_populate :: proc(rt: ^Render_Target, width, height: i32, with_color: bool) -> bool {
+	if _gfx.device == nil || rt == nil do return false
+	w := clamp(width, 1, MAX_RT_DIM)
+	h := clamp(height, 1, MAX_RT_DIM)
+
+	color: ^sdl.GPUTexture
+	if with_color {
+		color = sdl.CreateGPUTexture(_gfx.device, sdl.GPUTextureCreateInfo{
+			type                 = .D2,
+			format               = _gfx.swapchain_format,
+			usage                = {.COLOR_TARGET, .SAMPLER},
+			width                = u32(w),
+			height               = u32(h),
+			layer_count_or_depth = 1,
+			num_levels           = 1,
+		})
+	}
+	hdr_color := sdl.CreateGPUTexture(_gfx.device, sdl.GPUTextureCreateInfo{
 		type                 = .D2,
-		format               = _gfx.swapchain_format,
+		format               = _gfx.hdr_format,
 		usage                = {.COLOR_TARGET, .SAMPLER},
-		width                = u32(width),
-		height               = u32(height),
+		width                = u32(w),
+		height               = u32(h),
 		layer_count_or_depth = 1,
 		num_levels           = 1,
 	})
-	rt.depth = sdl.CreateGPUTexture(_gfx.device, sdl.GPUTextureCreateInfo{
+	depth := sdl.CreateGPUTexture(_gfx.device, sdl.GPUTextureCreateInfo{
 		type                 = .D2,
 		format               = _depth_format(),
 		usage                = {.DEPTH_STENCIL_TARGET},
-		width                = u32(width),
-		height               = u32(height),
+		width                = u32(w),
+		height               = u32(h),
 		layer_count_or_depth = 1,
 		num_levels           = 1,
 	})
+	if hdr_color == nil || depth == nil || (with_color && color == nil) {
+		if color != nil do sdl.ReleaseGPUTexture(_gfx.device, color)
+		if hdr_color != nil do sdl.ReleaseGPUTexture(_gfx.device, hdr_color)
+		if depth != nil do sdl.ReleaseGPUTexture(_gfx.device, depth)
+		return false
+	}
+
+	rt.width = w
+	rt.height = h
+	rt.color = color
+	rt.hdr_color = hdr_color
+	rt.depth = depth
+
+	mw := u32(w)
+	mh := u32(h)
+	for i in 0 ..< BLOOM_MIP_COUNT {
+		mw = max(mw / 2, 1)
+		mh = max(mh / 2, 1)
+		mip := sdl.CreateGPUTexture(_gfx.device, sdl.GPUTextureCreateInfo{
+			type                 = .D2,
+			format               = _gfx.hdr_format,
+			usage                = {.COLOR_TARGET, .SAMPLER},
+			width                = mw,
+			height               = mh,
+			layer_count_or_depth = 1,
+			num_levels           = 1,
+		})
+		if mip == nil {
+			_rt_release_textures(rt)
+			return false
+		}
+		rt.bloom_mips[i] = mip
+		rt.bloom_mip_w[i] = mw
+		rt.bloom_mip_h[i] = mh
+	}
+	return true
+}
+
+rt_create :: proc(width, height: i32) -> ^Render_Target {
+	if _gfx.device == nil do return nil
+	rt := new(Render_Target, runtime.default_allocator())
+	if !_rt_populate(rt, width, height, true) {
+		free(rt, runtime.default_allocator())
+		return nil
+	}
 	return rt
 }
 
@@ -166,26 +258,52 @@ rt_create :: proc(width, height: i32) -> ^Render_Target {
 // a resize (the color texture is recreated) — fetching it every frame is the
 // normal pattern.
 rt_resize :: proc(rt: ^Render_Target, width, height: i32) {
-	if rt.width == width && rt.height == height do return
-	sdl.ReleaseGPUTexture(_gfx.device, rt.color)
-	sdl.ReleaseGPUTexture(_gfx.device, rt.depth)
-	tmp := rt_create(width, height)
-	rt.color = tmp.color
-	rt.depth = tmp.depth
-	rt.width = width
-	rt.height = height
-	free(tmp, runtime.default_allocator())
+	if rt == nil do return
+	w := clamp(width, 1, MAX_RT_DIM)
+	h := clamp(height, 1, MAX_RT_DIM)
+	need_color := rt.color != nil || rt.hdr_color == nil
+	if rt.width == w && rt.height == h && (!need_color || rt.color != nil) && rt.hdr_color != nil && rt.depth != nil do return
+	tmp: Render_Target
+	if !_rt_populate(&tmp, w, h, need_color) do return
+	_rt_release_textures(rt)
+	rt^ = tmp
 }
 
 rt_destroy :: proc(rt: ^Render_Target) {
 	if rt == nil do return
-	if rt.color != nil do sdl.ReleaseGPUTexture(_gfx.device, rt.color)
-	if rt.depth != nil do sdl.ReleaseGPUTexture(_gfx.device, rt.depth)
+	_rt_release_textures(rt)
+	rt^ = {}
 	free(rt, runtime.default_allocator())
+}
+
+@(private = "file")
+_window_hdr_rt_ensure :: proc(width, height: i32) -> ^Render_Target {
+	if _gfx.device == nil do return nil
+	w := clamp(width, 1, MAX_RT_DIM)
+	h := clamp(height, 1, MAX_RT_DIM)
+	if _gfx.window_hdr_rt == nil {
+		rt := new(Render_Target, runtime.default_allocator())
+		if !_rt_populate(rt, w, h, false) {
+			free(rt, runtime.default_allocator())
+			return nil
+		}
+		_gfx.window_hdr_rt = rt
+		return rt
+	}
+	rt := _gfx.window_hdr_rt
+	if rt.width == w && rt.height == h && rt.hdr_color != nil && rt.depth != nil {
+		return rt
+	}
+	tmp: Render_Target
+	if !_rt_populate(&tmp, w, h, false) do return nil
+	_rt_release_textures(rt)
+	rt^ = tmp
+	return rt
 }
 
 // imgui 1.92.2+ SDLGPU3 convention: ImTextureID = raw ^sdl.GPUTexture.
 rt_imgui_id :: proc(rt: ^Render_Target) -> rawptr {
+	if rt == nil do return nil
 	return rt.color
 }
 
@@ -195,7 +313,7 @@ rt_imgui_id :: proc(rt: ^Render_Target) -> rawptr {
 // the frame makes the copy valid for any later sampling, imgui included.
 rt_snapshot :: proc(rt: ^Render_Target) -> ^Texture {
 	assert(!_pass.active, "rt_snapshot must run between passes")
-	if _gfx.cmd == nil do return nil
+	if _gfx.cmd == nil || _gfx.device == nil || rt == nil || rt.color == nil || rt.width < 1 || rt.height < 1 do return nil
 	gpu_tex := sdl.CreateGPUTexture(_gfx.device, sdl.GPUTextureCreateInfo{
 		type                 = .D2,
 		format               = _gfx.swapchain_format,
@@ -224,6 +342,7 @@ rt_snapshot :: proc(rt: ^Render_Target) -> ^Texture {
 // The contents must come from an already SUBMITTED frame — calling this at
 // the top of a frame reads what the previous frame drew.
 rt_download_begin :: proc(rt: ^Render_Target) -> ^Texture_Download {
+	if rt == nil || rt.color == nil || rt.width < 1 || rt.height < 1 do return nil
 	tex := Texture{gpu = rt.color, width = rt.width, height = rt.height, format = _gfx.swapchain_format}
 	return texture_download_begin(&tex)
 }
@@ -260,7 +379,7 @@ _swapchain_this_frame: struct {
 // Call while the frame's command buffer is open and after the UI pass has ended.
 // Returns nil when there is no swapchain image this frame.
 swapchain_capture_begin :: proc() -> ^Texture_Download {
-	if _swapchain_this_frame.tex == nil do return nil
+	if _gfx.device == nil || _swapchain_this_frame.tex == nil do return nil
 	if _gfx.cmd == nil do return nil
 	w := _swapchain_this_frame.w
 	h := _swapchain_this_frame.h
@@ -321,8 +440,21 @@ _swapchain_pending_download: ^Texture_Download
 pass_begin_target :: proc(rt: ^Render_Target, clear: Maybe([4]f32)) {
 	assert(!_pass.active, "gfx pass already active")
 	_pass.active = true
-	_pass.target_color = rt.color
-	_pass.target_depth = rt.depth
+	if rt != nil {
+		_pass.target_rt = rt
+		_pass.target_color = rt.hdr_color != nil ? rt.hdr_color : rt.color
+		_pass.target_depth = rt.depth
+		_pass.resolve_dst = rt.hdr_color != nil ? rt.color : nil
+		_pass.resolve_w = u32(max(rt.width, 0))
+		_pass.resolve_h = u32(max(rt.height, 0))
+	} else {
+		_pass.target_rt = nil
+		_pass.target_color = nil
+		_pass.target_depth = nil
+		_pass.resolve_dst = nil
+		_pass.resolve_w = 0
+		_pass.resolve_h = 0
+	}
 	_pass.clear = clear
 }
 
@@ -331,6 +463,19 @@ pass_begin_target :: proc(rt: ^Render_Target, clear: Maybe([4]f32)) {
 // is busy; this keeps dragged secondary OS windows moving at full 120-240 Hz without VSYNC serialization spikes!
 skip_swapchain_wait_on_drag := false
 
+// When `true` (any secondary OS viewport window exists), `pass_begin_swapchain`
+// yields cleanly if the main swapchain has no free image instead of blocking on
+// `WaitAndAcquireGPUSwapchainTexture`, preventing a maximized or covering secondary
+// window from freezing the event loop on an occluded FIFO swapchain.
+skip_swapchain_wait_secondary := false
+
+// When `true` (a secondary OS viewport completely covers the main window),
+// skip acquiring the main swapchain altogether this frame.
+skip_main_swapchain := false
+
+// True on frames where `WaitAndAcquireGPUSwapchainTexture` already waited on VSYNC.
+swapchain_waited_this_frame := false
+
 // Acquires the swapchain image; false when the window is minimized (skip
 // drawing this frame). The window depth buffer is lazily (re)sized.
 // depth=false makes a depth-less pass — REQUIRED when only external
@@ -338,63 +483,61 @@ skip_swapchain_wait_on_drag := false
 // our own gfx pipelines must NOT draw in such a pass (they declare D32).
 pass_begin_swapchain :: proc(clear: Maybe([4]f32), depth := true) -> bool {
 	assert(!_pass.active, "gfx pass already active")
+	swapchain_waited_this_frame = false
+	if _gfx.cmd == nil || _gfx.device == nil || _platform.window == nil do return false
 	swap_tex: ^sdl.GPUTexture
 	w, h: u32
 
 	flags := sdl.GetWindowFlags(_platform.window)
-	if .MINIMIZED in flags || .HIDDEN in flags {
+	if skip_main_swapchain || .MINIMIZED in flags || .HIDDEN in flags || .OCCLUDED in flags {
 		return false
 	}
 
 	// Try acquiring swapchain texture without blocking indefinitely.
 	// If unacquired (e.g. display standby, lock screen, or background occlusion),
-	// only block-wait if the app currently has user focus; otherwise yield
-	// so the caller's idle keep-alive loop can continuously pump OS events.
-	// App focus, not this window's: with an editor panel popped out into its
-	// own OS window and focused, the main window must keep drawing every
-	// frame instead of skipping (the caller then sleeps 16 ms per skip).
+	// only block-wait if the app currently has user focus and no secondary
+	// OS windows/drags are active; otherwise yield so secondary viewports
+	// and the frame pacer keep pumping smoothly.
 	if !sdl.AcquireGPUSwapchainTexture(_gfx.cmd, _platform.window, &swap_tex, &w, &h) {
 		return false
 	}
 	if swap_tex == nil {
-		if skip_swapchain_wait_on_drag {
+		app_unfocused := sdl.GetKeyboardFocus() == nil && sdl.GetMouseFocus() == nil
+		if skip_swapchain_wait_on_drag || skip_swapchain_wait_secondary || app_unfocused {
 			return false
 		}
+		swapchain_waited_this_frame = true
 		if !sdl.WaitAndAcquireGPUSwapchainTexture(_gfx.cmd, _platform.window, &swap_tex, &w, &h) {
 			return false
 		}
 	}
-	if swap_tex == nil do return false
+	if swap_tex == nil || w == 0 || h == 0 do return false
 
 	// Remembered for an on-demand capture later this frame (swapchain_capture).
 	_swapchain_this_frame = {tex = swap_tex, w = w, h = h}
 
 	if !depth {
 		_pass.active = true
+		_pass.target_rt = nil
 		_pass.target_color = swap_tex
 		_pass.target_depth = nil
+		_pass.resolve_dst = nil
+		_pass.resolve_w = 0
+		_pass.resolve_h = 0
 		_pass.clear = clear
 		return true
 	}
 
-	if _gfx.window_depth == nil || _gfx.window_depth_w != w || _gfx.window_depth_h != h {
-		if _gfx.window_depth != nil do sdl.ReleaseGPUTexture(_gfx.device, _gfx.window_depth)
-		_gfx.window_depth = sdl.CreateGPUTexture(_gfx.device, sdl.GPUTextureCreateInfo{
-			type                 = .D2,
-			format               = _depth_format(),
-			usage                = {.DEPTH_STENCIL_TARGET},
-			width                = w,
-			height               = h,
-			layer_count_or_depth = 1,
-			num_levels           = 1,
-		})
-		_gfx.window_depth_w = w
-		_gfx.window_depth_h = h
-	}
+	hdr_rt := _window_hdr_rt_ensure(i32(w), i32(h))
+	if hdr_rt == nil do return false
 
 	_pass.active = true
-	_pass.target_color = swap_tex
-	_pass.target_depth = _gfx.window_depth
+	_pass.target_rt = hdr_rt
+	_pass.target_color = hdr_rt.hdr_color
+	_pass.target_depth = hdr_rt.depth
+	_pass.resolve_dst = swap_tex
+	_pass.resolve_w = w
+	_pass.resolve_h = h
 	_pass.clear = clear
 	return true
 }
@@ -507,25 +650,33 @@ draw_line :: proc(a, b: [3]f32, color: [4]f32, depth_test := true, depth_write :
 // `material` (property-block UBO bytes for fragment slot 1) may be
 // temp-allocated — it's read at pass_end within the same frame.
 // index_count=0 draws the whole mesh; a submesh passes its index range.
-draw_mesh :: proc(mesh: Mesh, tex: ^Texture, model: matrix[4, 4]f32, color: [4]f32, shader := "", first_index: u32 = 0, index_count: u32 = 0, material: []u8 = nil, extra_tex: []^Texture = nil, no_shadow: bool = false) {
+draw_mesh :: proc(mesh: Mesh, tex: ^Texture, model: matrix[4, 4]f32, color: [4]f32, shader := "", first_index: u32 = 0, index_count: u32 = 0, material: []u8 = nil, extra_tex: []^Texture = nil, no_shadow: bool = false, bounds_center: [3]f32 = {}, bounds_radius: f32 = 0, double_sided: bool = false) {
 	if mesh.index_count == 0 do return
 	count := index_count == 0 ? mesh.index_count : index_count
 	if first_index >= mesh.index_count do return
 	count = min(count, mesh.index_count - first_index)
+	kind: _Pipeline_Kind = .Tris_Depth
+	if double_sided {
+		kind = .Tris_Depth_TwoSided
+	} else if model_has_negative_scale(model) {
+		kind = .Tris_Depth_Front
+	}
 	append(&_pass.draws, _Draw{
-		kind       = .Tris_Depth,
-		is_mesh    = true,
-		texture    = tex,
-		vp_index   = _current_vp(),
-		mesh       = mesh,
-		mesh_first = first_index,
-		mesh_count = count,
-		model      = model,
-		color      = color,
-		shader     = shader,
-		material   = material,
-		extra_tex  = extra_tex,
-		no_shadow  = no_shadow,
+		kind          = kind,
+		is_mesh       = true,
+		texture       = tex,
+		vp_index      = _current_vp(),
+		mesh          = mesh,
+		mesh_first    = first_index,
+		mesh_count    = count,
+		model         = model,
+		color         = color,
+		shader        = shader,
+		material      = material,
+		extra_tex     = extra_tex,
+		no_shadow     = no_shadow,
+		bounds_center = bounds_center,
+		bounds_radius = bounds_radius,
 	})
 }
 
@@ -584,11 +735,31 @@ _batch_append :: proc(kind: _Pipeline_Kind, tex: ^Texture, first: u32, count: u3
 	})
 }
 
+@(private = "file")
+_pass_finish_reset :: proc() {
+	clear(&_pass.vtx)
+	clear(&_pass.draws)
+	clear(&_pass.vps)
+	_pass.active = false
+	_pass.target_rt = nil
+	_pass.target_color = nil
+	_pass.target_depth = nil
+	_pass.resolve_dst = nil
+	_pass.resolve_w = 0
+	_pass.resolve_h = 0
+	_pass.light = nil
+	_pass.post_fx = POST_FX_DEFAULT
+}
+
 // Encodes the pass: batch upload (copy pass), then the render pass replaying
 // draws. before_end runs inside the render pass (the editor renders imgui
 // draw data there).
 pass_end :: proc(before_end: proc(cmd: ^sdl.GPUCommandBuffer, rp: ^sdl.GPURenderPass) = nil) {
 	assert(_pass.active, "gfx pass not active")
+	if _gfx.cmd == nil || _gfx.device == nil || _pass.target_color == nil {
+		_pass_finish_reset()
+		return
+	}
 	_flush_pending_skinning(_gfx.cmd)
 	_upload_batch()
 
@@ -599,7 +770,16 @@ pass_end :: proc(before_end: proc(cmd: ^sdl.GPUCommandBuffer, rp: ^sdl.GPURender
 	}
 	if clear, ok := _pass.clear.?; ok {
 		color_info.load_op = .CLEAR
-		color_info.clear_color = {clear.r, clear.g, clear.b, clear.a}
+		if _pass.target_rt != nil && _gfx.hdr_format != _gfx.swapchain_format {
+			color_info.clear_color = {
+				math.pow(max(clear.r, f32(0)), f32(2.2)),
+				math.pow(max(clear.g, f32(0)), f32(2.2)),
+				math.pow(max(clear.b, f32(0)), f32(2.2)),
+				clear.a,
+			}
+		} else {
+			color_info.clear_color = {clear.r, clear.g, clear.b, clear.a}
+		}
 	}
 	// If draws were recorded in a pass started with depth = false (STUB-11),
 	// bind the shared scratch depth buffer so standard pipelines remain valid.
@@ -636,6 +816,10 @@ pass_end :: proc(before_end: proc(cmd: ^sdl.GPUCommandBuffer, rp: ^sdl.GPURender
 	} else {
 		rp = sdl.BeginGPURenderPass(_gfx.cmd, &color_info, 1, nil)
 	}
+	if rp == nil {
+		_pass_finish_reset()
+		return
+	}
 
 	// Light + camera uniforms (fragment slot 0) are re-pushed on view switch —
 	// cam_pos is per-view (multi-camera passes). Only pipelines that declare
@@ -644,9 +828,15 @@ pass_end :: proc(before_end: proc(cmd: ^sdl.GPUCommandBuffer, rp: ^sdl.GPURender
 
 	bound: ^sdl.GPUGraphicsPipeline
 	batch_bound := false
+	bound_vbuf: ^sdl.GPUBuffer
+	bound_ibuf: ^sdl.GPUBuffer
+	bound_samplers: [MAX_FRAGMENT_SAMPLERS]sdl.GPUTextureSamplerBinding
+	bound_num_samplers: u32
 	pushed_vp := i32(-1)
 	pushed_light_vp := i32(-1)
 	pushed_mesh := false
+	pushed_mat: []u8
+	pushed_mat_is_zero := false
 	for &d in _pass.draws {
 		if pushed_light_vp != d.vp_index {
 			light.cam_pos.xyz = _pass.vps[d.vp_index].cam_pos
@@ -661,6 +851,9 @@ pass_end :: proc(before_end: proc(cmd: ^sdl.GPUCommandBuffer, rp: ^sdl.GPURender
 			sdl.BindGPUGraphicsPipeline(rp, pipeline)
 			bound = pipeline
 			batch_bound = false // vertex buffer binding survives, but re-bind cheaply per pipeline switch
+			bound_num_samplers = 0
+			pushed_mat = nil
+			pushed_mat_is_zero = false
 		}
 		tex := d.texture != nil ? d.texture : _gfx.white_tex
 		// Select sampler from the texture's configured filter/wrap modes (`REV-08`),
@@ -703,21 +896,55 @@ pass_end :: proc(before_end: proc(cmd: ^sdl.GPUCommandBuffer, rp: ^sdl.GPURender
 			bindings[SHADOW_SAMPLER_SLOT] = {texture = shadow_tex, sampler = shadow_smp}
 		}
 		num_bindings := max(req_samplers, min(u32(1 + len(d.extra_tex)), MAX_FRAGMENT_SAMPLERS))
-		sdl.BindGPUFragmentSamplers(rp, 0, &bindings[0], num_bindings)
+		samplers_changed := num_bindings != bound_num_samplers
+		if !samplers_changed {
+			for si in u32(0) ..< num_bindings {
+				if bindings[si] != bound_samplers[si] {
+					samplers_changed = true
+					break
+				}
+			}
+		}
+		if samplers_changed {
+			sdl.BindGPUFragmentSamplers(rp, 0, &bindings[0], num_bindings)
+			for si in u32(0) ..< num_bindings {
+				bound_samplers[si] = bindings[si]
+			}
+			bound_num_samplers = num_bindings
+		}
+
+		req_ubos := _gfx.shader_ubos[shader_name]
+		if len(d.material) > 0 {
+			if pushed_mat_is_zero || !slice.equal(pushed_mat, d.material) {
+				// Shader property block (custom shaders' MaterialUBO / LitMaterialUBO, slot 1).
+				sdl.PushGPUFragmentUniformData(_gfx.cmd, 1, raw_data(d.material), u32(len(d.material)))
+				pushed_mat = d.material
+				pushed_mat_is_zero = false
+			}
+		} else if req_ubos > 1 {
+			if !pushed_mat_is_zero {
+				zero_ubo: [4]f32
+				sdl.PushGPUFragmentUniformData(_gfx.cmd, 1, &zero_ubo, size_of([4]f32))
+				pushed_mat = nil
+				pushed_mat_is_zero = true
+			}
+		}
 
 		if d.is_mesh {
 			u := _Uniform{view_proj = _pass.vps[d.vp_index].vp, model = d.model, tint = d.color}
 			sdl.PushGPUVertexUniformData(_gfx.cmd, 0, &u, size_of(_Uniform))
-			if len(d.material) > 0 {
-				// Shader property block (custom shaders' MaterialUBO, slot 1).
-				sdl.PushGPUFragmentUniformData(_gfx.cmd, 1, raw_data(d.material), u32(len(d.material)))
-			}
 			pushed_vp = -1
 			pushed_mesh = true
 
-			vb := sdl.GPUBufferBinding{buffer = d.mesh.vbuf}
-			sdl.BindGPUVertexBuffers(rp, 0, &vb, 1)
-			sdl.BindGPUIndexBuffer(rp, {buffer = d.mesh.ibuf}, ._32BIT)
+			if d.mesh.vbuf != bound_vbuf {
+				vb := sdl.GPUBufferBinding{buffer = d.mesh.vbuf}
+				sdl.BindGPUVertexBuffers(rp, 0, &vb, 1)
+				bound_vbuf = d.mesh.vbuf
+			}
+			if d.mesh.ibuf != bound_ibuf {
+				sdl.BindGPUIndexBuffer(rp, {buffer = d.mesh.ibuf}, ._32BIT)
+				bound_ibuf = d.mesh.ibuf
+			}
 			sdl.DrawGPUIndexedPrimitives(rp, d.mesh_count, 1, d.mesh_first, 0, 0)
 			batch_bound = false
 		} else {
@@ -727,13 +954,12 @@ pass_end :: proc(before_end: proc(cmd: ^sdl.GPUCommandBuffer, rp: ^sdl.GPURender
 				pushed_vp = d.vp_index
 				pushed_mesh = false
 			}
-			if len(d.material) > 0 {
-				// Sprite-material property block (fragment slot 1).
-				sdl.PushGPUFragmentUniformData(_gfx.cmd, 1, raw_data(d.material), u32(len(d.material)))
-			}
 			if !batch_bound {
-				vb := sdl.GPUBufferBinding{buffer = _pass.vbuf}
-				sdl.BindGPUVertexBuffers(rp, 0, &vb, 1)
+				if bound_vbuf != _pass.vbuf {
+					vb := sdl.GPUBufferBinding{buffer = _pass.vbuf}
+					sdl.BindGPUVertexBuffers(rp, 0, &vb, 1)
+					bound_vbuf = _pass.vbuf
+				}
 				batch_bound = true
 			}
 			sdl.DrawGPUPrimitives(rp, d.vertex_count, 1, d.first_vertex, 0)
@@ -743,13 +969,10 @@ pass_end :: proc(before_end: proc(cmd: ^sdl.GPUCommandBuffer, rp: ^sdl.GPURender
 	if before_end != nil do before_end(_gfx.cmd, rp)
 	sdl.EndGPURenderPass(rp)
 
-	clear(&_pass.vtx)
-	clear(&_pass.draws)
-	clear(&_pass.vps)
-	_pass.active = false
-	_pass.target_color = nil
-	_pass.target_depth = nil
-	_pass.light = nil
+	if _pass.target_rt != nil && _pass.resolve_dst != nil {
+		_post_fx_resolve(_gfx.cmd, _pass.target_rt, _pass.resolve_dst, _pass.resolve_w, _pass.resolve_h, _pass.post_fx)
+	}
+	_pass_finish_reset()
 }
 
 // One copy pass uploading this pass's vertices. cycle=true keeps earlier
@@ -763,18 +986,31 @@ _upload_batch :: proc() {
 		for new_cap < count do new_cap *= 2
 		if _pass.vbuf != nil do sdl.ReleaseGPUBuffer(_gfx.device, _pass.vbuf)
 		if _pass.transfer != nil do sdl.ReleaseGPUTransferBuffer(_gfx.device, _pass.transfer)
+		_pass.vbuf = nil
+		_pass.transfer = nil
+		_pass.vbuf_capacity = 0
 		size := new_cap * size_of(Vertex)
-		_pass.vbuf = sdl.CreateGPUBuffer(_gfx.device, {usage = {.VERTEX}, size = size})
-		_pass.transfer = sdl.CreateGPUTransferBuffer(_gfx.device, {usage = .UPLOAD, size = size})
+		vbuf := sdl.CreateGPUBuffer(_gfx.device, {usage = {.VERTEX}, size = size})
+		transfer := sdl.CreateGPUTransferBuffer(_gfx.device, {usage = .UPLOAD, size = size})
+		if vbuf == nil || transfer == nil {
+			if vbuf != nil do sdl.ReleaseGPUBuffer(_gfx.device, vbuf)
+			if transfer != nil do sdl.ReleaseGPUTransferBuffer(_gfx.device, transfer)
+			return
+		}
+		_pass.vbuf = vbuf
+		_pass.transfer = transfer
 		_pass.vbuf_capacity = new_cap
 	}
+	if _pass.vbuf == nil || _pass.transfer == nil do return
 
 	byte_count := int(count) * size_of(Vertex)
 	mapped := sdl.MapGPUTransferBuffer(_gfx.device, _pass.transfer, true)
+	if mapped == nil do return
 	runtime.mem_copy_non_overlapping(mapped, raw_data(_pass.vtx), byte_count)
 	sdl.UnmapGPUTransferBuffer(_gfx.device, _pass.transfer)
 
 	copy_pass := sdl.BeginGPUCopyPass(_gfx.cmd)
+	if copy_pass == nil do return
 	sdl.UploadToGPUBuffer(copy_pass, {transfer_buffer = _pass.transfer},
 		{buffer = _pass.vbuf, size = u32(byte_count)}, true)
 	sdl.EndGPUCopyPass(copy_pass)

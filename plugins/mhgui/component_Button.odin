@@ -9,7 +9,9 @@ package mhgui
 // game code polls button_clicked. The node needs a graphic with
 // raycast_target on (Image or Text) to be hit at all.
 
+import "base:runtime"
 import "haati:engine"
+import input "haati:engine/input"
 
 Selectable_Transition :: enum u8 {
 	None,
@@ -62,6 +64,51 @@ reset_Button :: proc(b: ^Button) {
 	}
 }
 
+Button_Click_Proc :: #type proc(b: ^Button)
+
+@(private = "file")
+_button_click_callbacks: map[engine.Transform_Handle]Button_Click_Proc
+
+button_set_on_click :: proc(b: ^Button, cb: Button_Click_Proc) {
+	if b == nil || b.owner == {} do return
+	context.allocator = runtime.default_allocator()
+	if cb == nil {
+		delete_key(&_button_click_callbacks, b.owner)
+	} else {
+		_button_click_callbacks[b.owner] = cb
+	}
+}
+
+button_clear_callbacks :: proc(free_map := false) {
+	context.allocator = runtime.default_allocator()
+	clear(&_button_click_callbacks)
+	if free_map {
+		delete(_button_click_callbacks)
+		_button_click_callbacks = nil
+	}
+}
+
+@(private = "file")
+_button_clear_owner_callback :: proc(b: ^Button) {
+	if b == nil || b.owner == {} do return
+	context.allocator = runtime.default_allocator()
+	delete_key(&_button_click_callbacks, b.owner)
+}
+
+cleanup_Button :: proc(b: ^Button) {
+	_button_clear_owner_callback(b)
+	engine.comp_zero(b)
+}
+
+on_destroy_Button :: proc(b: ^Button) {
+	_button_clear_owner_callback(b)
+}
+
+@(phase={key=ExitingPlayMode})
+_mhgui_buttons_exiting_play_mode :: proc() {
+	button_clear_callbacks(true)
+}
+
 // True on the frame the button was clicked. Read after ui_tick (any
 // @(update) at order 0 or later).
 button_clicked :: proc(b: ^Button) -> bool {
@@ -73,8 +120,45 @@ button_clicked :: proc(b: ^Button) -> bool {
 @(update={order=-100})
 ui_tick :: proc(dt: f32) {
 	engine.canvas_pointer_update()
-	pointer := engine.ui_pointer()
 	w := engine.ctx_world()
+	if w == nil do return
+
+	if !input.is_mouse_relative() {
+		nav := engine.ui_nav_move_pressed()
+		step := int(nav.y) if nav.y != 0 else int(nav.x)
+		if step != 0 {
+			focusable := make([dynamic]engine.Transform_Handle, 0, 8, context.temp_allocator)
+			it_nav := engine.pool_iterator(buttons(w))
+			for b, _ in engine.pool_next(&it_nav) {
+				if !b.enabled || !b.interactable || !engine.transform_active_in_hierarchy(b.owner) do continue
+				append(&focusable, b.owner)
+			}
+			if len(focusable) > 0 {
+				cur := engine.ui_pointer().selected
+				cur_idx := -1
+				for h, idx in focusable {
+					if h == cur {
+						cur_idx = idx
+						break
+					}
+				}
+				next_idx := 0
+				if cur_idx < 0 {
+					next_idx = 0 if step > 0 else len(focusable) - 1
+				} else {
+					n := len(focusable)
+					delta := 1 if step > 0 else -1
+					next_idx = ((cur_idx + delta) % n + n) % n
+				}
+				engine.ui_set_selected(focusable[next_idx])
+			}
+		}
+	}
+
+	pointer := engine.ui_pointer()
+	submit := !input.is_mouse_relative() && engine.ui_submit_pressed()
+	fired := make([dynamic]engine.Transform_Handle, 0, 4, context.temp_allocator)
+
 	it := engine.pool_iterator(buttons(w))
 	for b, _ in engine.pool_next(&it) {
 		if !b.enabled || !engine.transform_active_in_hierarchy(b.owner) {
@@ -82,7 +166,10 @@ ui_tick :: proc(dt: f32) {
 			continue
 		}
 		node := b.owner
-		b.clicked = b.interactable && pointer.clicked == node
+		b.clicked = b.interactable && (pointer.clicked == node || (submit && pointer.selected == node))
+		if b.clicked {
+			append(&fired, node)
+		}
 		switch {
 		case !b.interactable:          b.state = .Disabled
 		case pointer.pressed == node:  b.state = .Pressed
@@ -91,6 +178,16 @@ ui_tick :: proc(dt: f32) {
 		case:                          b.state = .Normal
 		}
 		if b.transition == .Color_Tint do _button_tint(b, dt)
+	}
+
+	for node in fired {
+		if !engine.pool_valid(&w.transforms, engine.Handle(node)) do continue
+		if !engine.transform_active_in_hierarchy(node) do continue
+		_, live_btn := engine.transform_get_comp(node, Button)
+		if live_btn == nil || !live_btn.enabled || !live_btn.interactable do continue
+		if cb, ok := _button_click_callbacks[node]; ok && cb != nil {
+			cb(live_btn)
+		}
 	}
 }
 

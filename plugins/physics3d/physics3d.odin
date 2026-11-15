@@ -128,6 +128,11 @@ _state: struct {
 	contact_listener:       ^jolt.ContactListener,
 	occlusion_bp_filter:    ^jolt.BroadPhaseLayerFilter,
 	occlusion_layer_filter: ^jolt.ObjectLayerFilter,
+	char_vs_char:           ^jolt.CharacterVsCharacterCollision,
+	char_body_filter:       ^jolt.BodyFilter,
+	char_inner_bodies:      map[jolt.BodyID]engine.Transform_Handle,
+	char_prev_pos:          map[engine.Transform_Handle][3]f32,
+	char_curr_pos:          map[engine.Transform_Handle][3]f32,
 	world_ready:      bool,
 	current_world:    ^engine.World,
 	current_world_id: u64,
@@ -311,9 +316,14 @@ _is_transform_or_descendant_raw :: proc(w: ^engine.World, candidate, ancestor: e
 	return false
 }
 
+_CHAR_INNER_BODY_FILTER_TAG :: uintptr(0x10000002)
+
 @(private = "file")
 _ray_body_ignore_should_collide :: proc "c" (userData: rawptr, bodyID: jolt.BodyID) -> bool {
 	context = runtime.default_context()
+	if uintptr(userData) == _CHAR_INNER_BODY_FILTER_TAG {
+		return bodyID not_in _state.char_inner_bodies
+	}
 	if userData == nil || !is_body_valid(bodyID) do return true
 	ctx := cast(^_Ray_Body_Ignore_Ctx)userData
 	if _state.body_interface_no_lock == nil do return true
@@ -335,6 +345,10 @@ _ray_body_ignore_should_collide :: proc "c" (userData: rawptr, bodyID: jolt.Body
 @(private = "file")
 _ray_body_ignore_should_collide_locked :: proc "c" (userData: rawptr, body: ^jolt.Body) -> bool {
 	context = runtime.default_context()
+	if uintptr(userData) == _CHAR_INNER_BODY_FILTER_TAG {
+		if body == nil do return true
+		return jolt.Body_GetID(body) not_in _state.char_inner_bodies
+	}
 	if userData == nil || body == nil do return true
 	ctx := cast(^_Ray_Body_Ignore_Ctx)userData
 	u_data := jolt.Body_GetUserData(body)
@@ -623,12 +637,29 @@ physics_shutdown :: proc() {
 		jolt.ObjectLayerFilter_Destroy(_state.occlusion_layer_filter)
 		_state.occlusion_layer_filter = nil
 	}
+	if _state.char_body_filter != nil {
+		jolt.BodyFilter_Destroy(_state.char_body_filter)
+		_state.char_body_filter = nil
+	}
+	if _state.char_vs_char != nil {
+		jolt.CharacterVsCharacterCollision_Destroy(_state.char_vs_char)
+		_state.char_vs_char = nil
+	}
+	prev_alloc := context.allocator
+	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev_alloc
 	delete(_state.shape_owner)
+	delete(_state.char_inner_bodies)
+	delete(_state.char_prev_pos)
+	delete(_state.char_curr_pos)
 	delete(_state.contact_begin)
 	delete(_state.contact_end)
 	delete(_state.sensor_begin)
 	delete(_state.sensor_end)
 	_state.shape_owner = nil
+	_state.char_inner_bodies = nil
+	_state.char_prev_pos = nil
+	_state.char_curr_pos = nil
 	_state.contact_begin = nil
 	_state.contact_end = nil
 	_state.sensor_begin = nil
@@ -647,6 +678,145 @@ physics3d_exiting_play_mode :: proc() {
 @(phase={key=Shutdown})
 physics3d_shutdown :: proc() {
 	physics_shutdown()
+}
+
+@(phase={key=Init})
+physics3d_nav_init :: proc() {
+	engine.nav_register_geometry_provider(_physics3d_nav_geometry_provider)
+}
+
+@(private = "file")
+_emit_nav_obb_tris :: proc(center, half: [3]f32, rot: jolt.Quat, qmin, qmax: [3]f32, emit: engine.Nav_Geometry_Emit_Proc, emit_user: rawptr) {
+	rx := linalg.quaternion128_mul_vector3(rot, [3]f32{half.x, 0, 0})
+	ry := linalg.quaternion128_mul_vector3(rot, [3]f32{0, half.y, 0})
+	rz := linalg.quaternion128_mul_vector3(rot, [3]f32{0, 0, half.z})
+	ext := [3]f32{
+		abs(rx.x) + abs(ry.x) + abs(rz.x),
+		abs(rx.y) + abs(ry.y) + abs(rz.y),
+		abs(rx.z) + abs(ry.z) + abs(rz.z),
+	}
+	if center.x + ext.x < qmin.x || center.x - ext.x > qmax.x ||
+	   center.z + ext.z < qmin.z || center.z - ext.z > qmax.z {
+		return
+	}
+	// Corners in OBB local space
+	v := [8][3]f32{
+		center - rx - ry - rz, // 0: ---
+		center + rx - ry - rz, // 1: +--
+		center + rx + ry - rz, // 2: ++-
+		center - rx + ry - rz, // 3: -+-
+		center - rx - ry + rz, // 4: --+
+		center + rx - ry + rz, // 5: +-+
+		center + rx + ry + rz, // 6: +++
+		center - rx + ry + rz, // 7: -++
+	}
+	// Top (+Y): normal +ry (cross(v7-v3, v6-v3) -> +ry)
+	emit(emit_user, v[3], v[7], v[6])
+	emit(emit_user, v[3], v[6], v[2])
+	// Bottom (-Y)
+	emit(emit_user, v[0], v[1], v[5])
+	emit(emit_user, v[0], v[5], v[4])
+	// Sides
+	emit(emit_user, v[4], v[5], v[6]); emit(emit_user, v[4], v[6], v[7])
+	emit(emit_user, v[1], v[0], v[3]); emit(emit_user, v[1], v[3], v[2])
+	emit(emit_user, v[0], v[4], v[7]); emit(emit_user, v[0], v[7], v[3])
+	emit(emit_user, v[5], v[1], v[2]); emit(emit_user, v[5], v[2], v[6])
+}
+
+@(private = "file")
+_collider_is_dynamic_rb :: proc(w: ^engine.World, owner: engine.Transform_Handle) -> bool {
+	body_owner, is_rb := _ancestor_body_owner(w, owner)
+	if !is_rb do return false
+	rb_pool := rigidbodies(w)
+	if rb_pool == nil do return false
+	if _, rb := engine.transform_get_comp(body_owner, Rigidbody); rb != nil {
+		return !rb.is_kinematic
+	}
+	return false
+}
+
+@(private = "file")
+_physics3d_nav_geometry_provider :: proc(
+	w:         ^engine.World,
+	aabb_min:  [3]f32,
+	aabb_max:  [3]f32,
+	emit:      engine.Nav_Geometry_Emit_Proc,
+	emit_user: rawptr,
+) {
+	if w == nil || emit == nil do return
+	if bp := box_colliders(w); bp != nil {
+		it := engine.pool_iterator(bp)
+		for c, _ in engine.pool_next(&it) {
+			if !c.enabled || c.is_trigger do continue
+			if !engine.transform_active_in_hierarchy(c.owner) do continue
+			if _collider_is_dynamic_rb(w, c.owner) do continue
+			s := collider_scale(c.owner)
+			sz, ctr := box_scaled(c, s)
+			tw := engine.transform_world(c.owner)
+			cw_q := _world_quat(tw.rotation)
+			wc := tw.position + linalg.quaternion128_mul_vector3(cw_q, ctr)
+			wq := linalg.normalize(cw_q * _world_quat(c.rotation))
+			_emit_nav_obb_tris(wc, sz * 0.5, wq, aabb_min, aabb_max, emit, emit_user)
+		}
+	}
+	if sp := sphere_colliders(w); sp != nil {
+		it := engine.pool_iterator(sp)
+		for c, _ in engine.pool_next(&it) {
+			if !c.enabled || c.is_trigger do continue
+			if !engine.transform_active_in_hierarchy(c.owner) do continue
+			if _collider_is_dynamic_rb(w, c.owner) do continue
+			s := collider_scale(c.owner)
+			r, ctr := sphere_scaled(c, s)
+			tw := engine.transform_world(c.owner)
+			cw_q := _world_quat(tw.rotation)
+			wc := tw.position + linalg.quaternion128_mul_vector3(cw_q, ctr)
+			_emit_nav_obb_tris(wc, {r, r, r}, cw_q, aabb_min, aabb_max, emit, emit_user)
+		}
+	}
+	if cp := capsule_colliders(w); cp != nil {
+		it := engine.pool_iterator(cp)
+		for c, _ in engine.pool_next(&it) {
+			if !c.enabled || c.is_trigger do continue
+			if !engine.transform_active_in_hierarchy(c.owner) do continue
+			if _collider_is_dynamic_rb(w, c.owner) do continue
+			s := collider_scale(c.owner)
+			r, h, ctr := capsule_scaled(c, s)
+			tw := engine.transform_world(c.owner)
+			cw_q := _world_quat(tw.rotation)
+			wc := tw.position + linalg.quaternion128_mul_vector3(cw_q, ctr)
+			wq := linalg.normalize(cw_q * _world_quat(c.rotation) * _capsule_rot(c.direction))
+			_emit_nav_obb_tris(wc, {r, max(h * 0.5, r), r}, wq, aabb_min, aabb_max, emit, emit_user)
+		}
+	}
+	if mp := mesh_colliders(w); mp != nil {
+		it := engine.pool_iterator(mp)
+		for c, _ in engine.pool_next(&it) {
+			if !c.enabled || c.is_trigger do continue
+			if !engine.transform_active_in_hierarchy(c.owner) do continue
+			if _collider_is_dynamic_rb(w, c.owner) do continue
+			pptr, ok := resolve_mesh_collider_pptr(w, c)
+			if !ok do continue
+			tmp_mf := engine.MeshFilter{mesh = pptr}
+			verts, inds, g_ok := engine.mesh_read_cpu_geometry(&tmp_mf, context.temp_allocator)
+			if !g_ok || len(verts) < 3 || len(inds) < 3 do continue
+			s := collider_scale(c.owner)
+			tw := engine.transform_world(c.owner)
+			cw_q := _world_quat(tw.rotation)
+			wc := tw.position + linalg.quaternion128_mul_vector3(cw_q, c.center * s)
+			wq := linalg.normalize(cw_q * _world_quat(c.rotation))
+			tri_count := len(inds) / 3
+			for ti in 0 ..< tri_count {
+				i0 := int(inds[ti * 3 + 0])
+				i1 := int(inds[ti * 3 + 1])
+				i2 := int(inds[ti * 3 + 2])
+				if i0 >= len(verts) || i1 >= len(verts) || i2 >= len(verts) do continue
+				p0 := wc + linalg.quaternion128_mul_vector3(wq, verts[i0].position * s)
+				p1 := wc + linalg.quaternion128_mul_vector3(wq, verts[i1].position * s)
+				p2 := wc + linalg.quaternion128_mul_vector3(wq, verts[i2].position * s)
+				emit(emit_user, p0, p1, p2)
+			}
+		}
+	}
 }
 
 _ensure_world :: proc(w: ^engine.World) {
@@ -729,16 +899,25 @@ _ensure_world :: proc(w: ^engine.World) {
 	_state.contact_listener = jolt.ContactListener_Create(nil)
 	jolt.PhysicsSystem_SetContactListener(_state.system, _state.contact_listener)
 
-	_state.shape_owner = make(map[uintptr]engine.Transform_Handle)
-	_state.contact_begin = make([dynamic]Contact)
-	_state.contact_end = make([dynamic]Contact)
-	_state.sensor_begin = make([dynamic]Contact)
-	_state.sensor_end = make([dynamic]Contact)
+	prev_alloc := context.allocator
+	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev_alloc
+	_state.shape_owner = make(map[uintptr]engine.Transform_Handle, runtime.default_allocator())
+	_state.char_inner_bodies = make(map[jolt.BodyID]engine.Transform_Handle, runtime.default_allocator())
+	_state.char_prev_pos = make(map[engine.Transform_Handle][3]f32, runtime.default_allocator())
+	_state.char_curr_pos = make(map[engine.Transform_Handle][3]f32, runtime.default_allocator())
+	_state.contact_begin = make([dynamic]Contact, runtime.default_allocator())
+	_state.contact_end = make([dynamic]Contact, runtime.default_allocator())
+	_state.sensor_begin = make([dynamic]Contact, runtime.default_allocator())
+	_state.sensor_end = make([dynamic]Contact, runtime.default_allocator())
 
 	jolt.BroadPhaseLayerFilter_SetProcs(&_ray_bp_solid_only_procs)
 	_state.occlusion_bp_filter = jolt.BroadPhaseLayerFilter_Create(nil)
 	jolt.ObjectLayerFilter_SetProcs(&_ray_layer_filter_procs)
 	_state.occlusion_layer_filter = jolt.ObjectLayerFilter_Create(rawptr(_AUDIO_OCCLUSION_FILTER_TAG))
+	_state.char_vs_char = jolt.CharacterVsCharacterCollision_CreateSimple()
+	jolt.BodyFilter_SetProcs(&_ray_body_ignore_procs)
+	_state.char_body_filter = jolt.BodyFilter_Create(rawptr(_CHAR_INNER_BODY_FILTER_TAG))
 
 	_state.current_world = w
 	_state.current_world_id = world_id
@@ -1543,25 +1722,44 @@ physics_interpolate_update :: proc(dt: f32) {
 	if engine.time_scale() <= 1e-5 do return
 
 	alpha := engine.fixed_interpolation_alpha()
-	pool := rigidbodies(w)
-	if pool == nil do return
-	it := engine.pool_iterator(pool)
-	for rb, _ in engine.pool_next(&it) {
-		if !rb.interpolate || !rb.has_prev_pose || !rb.has_synced_transform do continue
-		if rb.is_kinematic || !rb.enabled || rb.frozen_by_time_scale || !is_body_valid(rb.body) do continue
-		if !engine.pool_valid(&w.transforms, engine.Handle(rb.owner)) do continue
+	if pool := rigidbodies(w); pool != nil {
+		it := engine.pool_iterator(pool)
+		for rb, _ in engine.pool_next(&it) {
+			if !rb.interpolate || !rb.has_prev_pose || !rb.has_synced_transform do continue
+			if rb.is_kinematic || !rb.enabled || rb.frozen_by_time_scale || !is_body_valid(rb.body) do continue
+			if !engine.pool_valid(&w.transforms, engine.Handle(rb.owner)) do continue
 
-		tw := engine.transform_world(rb.owner)
-		if linalg.length2(tw.position - rb.last_synced_pos) > 1e-5 ||
-		   linalg.length2(tw.rotation - rb.last_synced_rot) > 1e-4 {
-			continue // Script moved transform manually this frame; keep it untouched
+			tw := engine.transform_world(rb.owner)
+			if linalg.length2(tw.position - rb.last_synced_pos) > 1e-5 ||
+			   linalg.length2(tw.rotation - rb.last_synced_rot) > 1e-4 {
+				continue // Script moved transform manually this frame; keep it untouched
+			}
+
+			pos, rot := physics_interpolate_pose(rb, alpha)
+			engine.transform_set_world_position(rb.owner, pos)
+			engine.transform_set_world_rotation(rb.owner, rot)
+			rb.last_synced_pos = pos
+			rb.last_synced_rot = rot
 		}
+	}
 
-		pos, rot := physics_interpolate_pose(rb, alpha)
-		engine.transform_set_world_position(rb.owner, pos)
-		engine.transform_set_world_rotation(rb.owner, rot)
-		rb.last_synced_pos = pos
-		rb.last_synced_rot = rot
+	if cpool := character_controller3_ds(w); cpool != nil {
+		cit := engine.pool_iterator(cpool)
+		for cc, _ in engine.pool_next(&cit) {
+			if !cc.enabled || cc.character == nil || !cc.has_synced do continue
+			if !engine.pool_valid(&w.transforms, engine.Handle(cc.owner)) do continue
+
+			tw := engine.transform_world(cc.owner)
+			if linalg.length2(tw.position - cc.last_synced_pos) > 1e-5 do continue
+
+			prev, has_prev := _state.char_prev_pos[cc.owner]
+			curr, has_curr := _state.char_curr_pos[cc.owner]
+			if !has_prev || !has_curr || linalg.length2(curr - prev) > 25.0 do continue
+
+			pos := linalg.lerp(prev, curr, clamp(alpha, f32(0.0), f32(1.0)))
+			engine.transform_set_world_position(cc.owner, pos)
+			cc.last_synced_pos = pos
+		}
 	}
 }
 

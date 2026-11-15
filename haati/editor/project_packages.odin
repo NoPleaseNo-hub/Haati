@@ -12,18 +12,24 @@ import "core:strings"
 import "../engine"
 import "haati:editor/inspector"
 
-_PROJECT_PACKAGES_PATH :: "packages"
+project_packages_path :: proc(allocator := context.temp_allocator) -> string {
+	dir := engine.engine_packages_dir(allocator)
+	if dir == "" do return "packages"
+	norm, _ := strings.replace_all(dir, "\\", "/", allocator)
+	return norm
+}
 
 Project_Package :: struct {
 	name:        string, // temp
-	assets_path: string, // temp; "packages/<name>/assets"
+	assets_path: string, // temp; "<packages>/<name>/assets"
 	is_link:     bool,   // packages/<name> is a symlink (a plugin link or a linked sample)
 }
 
 // Installed packages via the dir cache (500ms TTL — same freshness as the
 // rest of the project view). Temp-allocated.
 project_packages_list :: proc() -> []Project_Package {
-	entries, ok := project_dir_listing(_PROJECT_PACKAGES_PATH)
+	pkgs_root := project_packages_path()
+	entries, ok := project_dir_listing(pkgs_root)
 	if !ok do return nil
 	out := make([dynamic]Project_Package, context.temp_allocator)
 	for entry in entries {
@@ -31,34 +37,42 @@ project_packages_list :: proc() -> []Project_Package {
 		if strings.has_prefix(entry.name, ".") do continue
 		append(&out, Project_Package{
 			name        = strings.clone(entry.name, context.temp_allocator),
-			assets_path = fmt.tprintf("%s/%s/assets", _PROJECT_PACKAGES_PATH, entry.name),
+			assets_path = fmt.tprintf("%s/%s/assets", pkgs_root, entry.name),
 			is_link     = entry.is_link,
 		})
 	}
 	return out[:]
 }
 
-// "packages/<name>/assets" with exactly one segment for <name>.
+// "<packages>/<name>/assets" with exactly one segment for <name>.
 project_path_is_package_root :: proc(path: string) -> bool {
-	prefix :: _PROJECT_PACKAGES_PATH + "/"
-	if !strings.has_prefix(path, prefix) do return false
-	rest := path[len(prefix):]
-	i := strings.index(rest, "/")
-	if i <= 0 do return false
-	return rest[i + 1:] == "assets"
+	for prefix in ([?]string{fmt.tprintf("%s/", project_packages_path()), "packages/", "haati/packages/"}) {
+		if !strings.has_prefix(path, prefix) do continue
+		rest := path[len(prefix):]
+		i := strings.index(rest, "/")
+		if i > 0 && rest[i + 1:] == "assets" do return true
+	}
+	return false
 }
 
-// "packages/<name>/assets" -> "<name>".
+// "<packages>/<name>/assets" -> "<name>".
 project_package_root_name :: proc(path: string) -> string {
-	rest := path[len(_PROJECT_PACKAGES_PATH) + 1:]
-	return rest[:strings.index(rest, "/")]
+	for prefix in ([?]string{fmt.tprintf("%s/", project_packages_path()), "packages/", "haati/packages/"}) {
+		if strings.has_prefix(path, prefix) {
+			rest := path[len(prefix):]
+			return rest[:strings.index(rest, "/")]
+		}
+	}
+	return path
 }
 
 // Roots (Assets, Packages, each package) are structural: no rename, no file
 // ops on the row itself. Mirrors the existing Assets-root guard.
 project_path_is_protected :: proc(path: string) -> bool {
 	return path == projectViewData.rootPath ||
-	       path == _PROJECT_PACKAGES_PATH ||
+	       path == project_packages_path() ||
+	       path == "packages" ||
+	       path == "haati/packages" ||
 	       project_path_is_package_root(path)
 }
 
@@ -66,8 +80,9 @@ project_path_is_protected :: proc(path: string) -> bool {
 // parent is the Packages node (never the raw package folder, which would
 // expose code to the file list), and the Packages node is a top.
 _project_parent_dir :: proc(path: string) -> (parent: string, ok: bool) {
-	if path == projectViewData.rootPath || path == _PROJECT_PACKAGES_PATH do return "", false
-	if project_path_is_package_root(path) do return _PROJECT_PACKAGES_PATH, true
+	pkgs_root := project_packages_path()
+	if path == projectViewData.rootPath || path == pkgs_root || path == "packages" || path == "haati/packages" do return "", false
+	if project_path_is_package_root(path) do return pkgs_root, true
 	if i := strings.last_index(path, "/"); i > 0 {
 		return path[:i], true
 	}
@@ -122,7 +137,7 @@ _project_package_asset_count :: proc(assets_path: string) -> int {
 // The package inspector's dependency rows: a click pings the package's row
 // under the Packages node, a double click selects it (which inspects it).
 package_reveal :: proc(pkg: string, select: bool) {
-	_project_reveal_path(strings.join({_PROJECT_PACKAGES_PATH, pkg, "assets"}, "/", context.temp_allocator), select)
+	_project_reveal_path(strings.join({project_packages_path(), pkg, "assets"}, "/", context.temp_allocator), select)
 }
 
 // The inspector package can't import the editor root (cycle), so the editor

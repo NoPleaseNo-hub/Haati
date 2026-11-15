@@ -25,10 +25,9 @@ _track_cooked_lpf_cb :: proc "c" (userdata: rawptr, track: ^mix.Track, spec: ^sd
 	_ = track
 	if userdata == nil || pcm == nil || samples <= 0 do return
 	src := cast(^AudioSource)userdata
-	if !src.lpf_active do return
 	buf := ([^]f32)(pcm)[:int(samples)]
 	ch := spec != nil ? int(spec.channels) : 2
-	audio_biquad_process_interleaved(buf, ch, src.lpf_coeffs, &src.lpf_z1, &src.lpf_z2)
+	audio_biquad_process(&src.lpf, buf, ch)
 }
 
 @(private = "file")
@@ -73,17 +72,18 @@ audio_step_multicore_occlusion :: proc(w: ^engine.World, listener_pos: [3]f32, d
 	it := engine.pool_iterator(pool)
 	for src, _ in engine.pool_next(&it) {
 		if !src.enabled || !engine.pool_valid(&w.transforms, engine.Handle(src.owner)) do continue
-		if !src.enable_occlusion || !_listener.ok || src.spatial_blend <= 0 {
+		if !_listener.ok || src.spatial_blend <= 0 || src.track == nil || !bool(mix.TrackPlaying(src.track)) {
 			src.occlusion_factor = 0
-			src.lpf_active       = false
-			continue
-		}
-		if src.track == nil || !bool(mix.TrackPlaying(src.track)) {
-			src.occlusion_factor = 0
-			src.lpf_active       = false
+			audio_biquad_publish(&src.lpf, false, {})
 			continue
 		}
 		sw := engine.transform_world(src.owner)
+		if !src.enable_occlusion {
+			src.occlusion_factor = 0
+			hrtf_hz := spatial_hrtf_lowpass_hz(_listener.pos, _listener.rot, sw.position, src.spatial_blend)
+			audio_biquad_publish(&src.lpf, hrtf_hz < 21500.0, audio_biquad_lowpass_coeffs(hrtf_hz, 48000.0))
+			continue
+		}
 		append(&jobs, _Audio_Occlusion_Job{src = src, src_pos = sw.position})
 	}
 
@@ -99,10 +99,10 @@ audio_step_multicore_occlusion :: proc(w: ^engine.World, listener_pos: [3]f32, d
 	for j in jobs {
 		target: f32 = j.blocked ? 1.0 : 0.0
 		j.src.occlusion_factor = j.src.occlusion_factor + (target - j.src.occlusion_factor) * clamp(alpha, 0.0, 1.0)
-		_, cutoff := audio_compute_occlusion_gain_and_cutoff(j.src.occlusion_factor, j.src.occlusion_lowpass_hz)
-		j.src.lpf_active = j.src.occlusion_factor > 0.02
-		if j.src.lpf_active {
-			j.src.lpf_coeffs = audio_biquad_lowpass_coeffs(cutoff, 48000.0)
-		}
+		_, raw_occ_hz := audio_compute_occlusion_gain_and_cutoff(j.src.occlusion_factor, j.src.occlusion_lowpass_hz)
+		occ_hz := j.src.occlusion_factor > 0.02 ? raw_occ_hz : f32(22000.0)
+		hrtf_hz := spatial_hrtf_lowpass_hz(_listener.pos, _listener.rot, j.src_pos, j.src.spatial_blend)
+		cutoff := min(occ_hz, hrtf_hz)
+		audio_biquad_publish(&j.src.lpf, cutoff < 21500.0, audio_biquad_lowpass_coeffs(cutoff, 48000.0))
 	}
 }

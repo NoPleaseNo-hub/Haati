@@ -16,6 +16,7 @@ package animation_editor
 //      plays (layer mixer root, one mixer per authored layer, clip leaves) —
 //      rebuilt into temp memory each frame; weights are structural, not live.
 
+import "base:runtime"
 import "core:fmt"
 import im "haati:external/odin-imgui"
 import "haati:editor/menu"
@@ -48,6 +49,9 @@ _pg: struct {
 }
 
 shutdown_playable_graph_view :: proc() {
+	prev := context.allocator
+	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev
 	delete(_pg.pos)
 	_pg.pos = nil
 }
@@ -72,7 +76,7 @@ draw_playable_graph_view :: proc() {
 	// preview all answer through the same call.
 	owner, src, found := _pg_selected_source()
 	_pg_pad()
-	if im.SmallButton(fmt.ctprintf("%s Author Anim & Motion Layer in Unified Graph Studio (.bodin)", icons.ICON_MD_ACCOUNT_TREE)) {
+	if im.SmallButton(fmt.ctprintf("%s Author Anim & Motion Layer in Blueprint Studio (.bodin)", icons.ICON_MD_ACCOUNT_TREE)) {
 		vs.open_unified_graph_domain(.Anim_Motion)
 	}
 	widgets.tooltip("Author Character Motion, Layered Pose Blends, Spring Dampers & IK directly on the unified .bodin Odin VM (0.00 ms VM overhead — no separate AnimBP VM needed!)")
@@ -86,7 +90,7 @@ draw_playable_graph_view :: proc() {
 	g, live := src.graph, src.live
 
 	_pg_pad()
-	im.TextDisabled("Source: %s", fmt.ctprint(src.label))
+	widgets.text_disabledf("Source: %s", src.label)
 	if g == nil || anim.graph_output(g) == nil || anim.playable_node(g, anim.graph_output(g).root) == nil {
 		_pg_pad()
 		im.TextDisabled("The graph is empty (nothing to play).")
@@ -176,7 +180,7 @@ _pg_layout :: proc(g: ^anim.Playable_Graph, salt: u64) {
 		if g.nodes[i].alive && depth[i] < 0 do depth[i] = max_depth + 1
 	}
 
-	if _pg.pos == nil do _pg.pos = make(map[int]im.Vec2)
+	if _pg.pos == nil do _pg.pos = make(map[int]im.Vec2, 0, runtime.default_allocator())
 	clear(&_pg.pos)
 	// A y cursor per rank rather than a fixed row pitch: node height follows
 	// its input count now, so a six-input mixer would sit under its neighbour.

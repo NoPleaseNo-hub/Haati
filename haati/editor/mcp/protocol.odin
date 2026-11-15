@@ -15,6 +15,7 @@ package mcp
 // Responses: {"id":N, "status":"ok",    "result":{...}}
 //            {"id":N, "status":"error", "error":{"code","message","retry_after_ms"?}}
 
+import "base:runtime"
 import "core:encoding/json"
 import "core:net"
 
@@ -84,6 +85,9 @@ frame_buffer_destroy :: proc(fb: ^Frame_Buffer) {
 }
 
 frame_buffer_push :: proc(fb: ^Frame_Buffer, bytes: []u8) {
+	if fb.data == nil {
+		fb.data = make([dynamic]u8, 0, len(bytes), runtime.default_allocator())
+	}
 	append(&fb.data, ..bytes)
 }
 

@@ -29,7 +29,7 @@ _audio_settings_extras :: proc(ctx: ^inspector.Asset_Ctx) {
 	inspector.draw(ctx) // Apply + the reflected AudioSettings
 	if wf, ok := _wave_cache[ctx.guid]; ok && wf.rate > 0 {
 		im.Separator()
-		im.Text("%d Hz, %.2f s", wf.rate, f64(wf.frames) / f64(wf.rate))
+		im.TextUnformatted(fmt.ctprintf("%d Hz, %.2f s", wf.rate, f64(wf.frames) / f64(wf.rate)))
 	}
 }
 
@@ -112,10 +112,10 @@ _draw_audio_preview :: proc(path: string) {
 
 	im.SameLine()
 	pos_s := playing ? f64(audio.preview_position()) / f64(wf.rate) : 0
-	im.Text(fmt.ctprintf("%.2f / %.2f s", pos_s, f64(wf.frames) / f64(wf.rate)))
+	im.TextUnformatted(fmt.ctprintf("%.2f / %.2f s", pos_s, f64(wf.frames) / f64(wf.rate)))
 
 	avail := im.GetContentRegionAvail()
-	if avail.y < 16 do return
+	if avail.x < 16 || avail.y < 16 do return
 	im.InvisibleButton("##waveform", avail)
 	r_min := im.GetItemRectMin()
 	r_max := im.GetItemRectMax()

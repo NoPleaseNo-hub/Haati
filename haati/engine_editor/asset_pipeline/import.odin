@@ -14,6 +14,7 @@ package asset_pipeline
 import "core:fmt"
 import "core:os"
 import "core:path/filepath"
+import "core:slice"
 import "core:strings"
 import "core:encoding/json"
 import "core:encoding/uuid"
@@ -78,9 +79,43 @@ asset_pipeline_init :: proc() {
 
 asset_pipeline_import_all :: proc() {
 	engine._artifact_index_batch_set(true) // one index write for the whole pass
-	_import_directory(engine.asset_db.root_path)
-	for root in engine.asset_db_package_roots() {
-		_import_directory(root.assets_path)
+	if len(engine.asset_db.file_state) > 0 {
+		paths := make([dynamic]string, 0, len(engine.asset_db.file_state), context.temp_allocator)
+		for path in engine.asset_db.file_state {
+			append(&paths, path)
+		}
+		slice.sort(paths[:])
+		for path in paths {
+			stamp := engine.asset_db.file_state[path]
+			if stamp.mtime == {} && stamp.size == 0 do continue // folder entry
+			ext := strings.to_lower(filepath.ext(path), context.temp_allocator)
+			if !is_importable_extension(ext) do continue
+			progress.report(path)
+
+			// Zero-IO warm-boot fast path: if scan timestamps for BOTH the source file
+			// AND its .meta match the persisted artifact index (with importer/format
+			// versions intact and the artifact file on disk), skip stat & .meta JSON IO.
+			imp_name := importer_for_extension(ext)
+			expected_ver := fmt.tprintf("|v%d|f%d", _importer_version(imp_name), _ARTIFACT_FORMAT_VERSION)
+			if guid, gok := engine.asset_db.path_to_guid[path]; gok {
+				if e, has := engine._artifact_index_lookup(guid); has &&
+				   e.mtime == stamp.mtime._nsec &&
+				   e.size == stamp.size &&
+				   e.meta_mtime != 0 &&
+				   e.meta_mtime == stamp.meta_mtime._nsec &&
+				   e.meta_size == stamp.meta_size &&
+				   strings.has_suffix(e.settings, expected_ver) &&
+				   os.exists(engine._artifact_key_path(e.artifact, context.temp_allocator)) {
+					continue
+				}
+			}
+			asset_pipeline_import_asset(path)
+		}
+	} else {
+		_import_directory(engine.asset_db.root_path)
+		for root in engine.asset_db_package_roots() {
+			_import_directory(root.assets_path)
+		}
 	}
 	engine._artifact_index_batch_set(false)
 	engine._artifact_index_prune()
@@ -111,7 +146,7 @@ _import_asset :: proc(source_path: string, force: bool) -> bool {
 		fmt.eprintf("[Pipeline] import of %s refused: the catalog pipeline has no importers\n", source_path)
 		return false
 	}
-	ext := filepath.ext(source_path)
+	ext := strings.to_lower(filepath.ext(source_path), context.temp_allocator)
 	if !is_importable_extension(ext) do return false
 
 	meta_path := strings.concatenate({source_path, ".meta"}, context.temp_allocator)
@@ -127,6 +162,12 @@ _import_asset :: proc(source_path: string, force: bool) -> bool {
 	mtime := info.modification_time._nsec
 	size := info.size
 
+	meta_mtime, meta_size: i64
+	if minfo, merr := os.stat(meta_path, context.temp_allocator); merr == nil {
+		meta_mtime = minfo.modification_time._nsec
+		meta_size = minfo.size
+	}
+
 	// The freshness stamp, not the bare settings hash: it also carries the
 	// importer's version, so bumping a version reimports every asset of that
 	// kind even when source and settings are unchanged. The fast path below
@@ -137,6 +178,10 @@ _import_asset :: proc(source_path: string, force: bool) -> bool {
 		if e, has := engine._artifact_index_lookup(guid); has &&
 		   e.mtime == mtime && e.size == size && e.settings == settings_hex {
 			if os.exists(engine._artifact_key_path(e.artifact, context.temp_allocator)) {
+				if e.meta_mtime != meta_mtime || e.meta_size != meta_size {
+					engine._artifact_index_set(guid, e.artifact, mtime, size, settings_hex, meta_mtime, meta_size)
+					engine._artifact_index_save()
+				}
 				return false
 			}
 		}
@@ -158,6 +203,10 @@ _import_asset :: proc(source_path: string, force: bool) -> bool {
 		// a fresh entry instead of importing a second time.
 		if refined_hex := _freshness_hex(import_meta.settings, importer_for_extension(ext)); refined_hex != settings_hex {
 			_write_import_meta(meta_path, import_meta)
+			if minfo, merr := os.stat(meta_path, context.temp_allocator); merr == nil {
+				meta_mtime = minfo.modification_time._nsec
+				meta_size = minfo.size
+			}
 			refined_key := _artifact_key(data, import_meta.settings, importer_for_extension(ext))
 			refined_path := engine._artifact_key_path(refined_key, context.temp_allocator)
 			// The refined key fans out under its own two-char prefix, which
@@ -186,7 +235,7 @@ _import_asset :: proc(source_path: string, force: bool) -> bool {
 		}
 	}
 
-	engine._artifact_index_set(guid, key, mtime, size, settings_hex)
+	engine._artifact_index_set(guid, key, mtime, size, settings_hex, meta_mtime, meta_size)
 	engine._artifact_index_save()
 	// The settings may now list clips that did not exist before this import.
 	engine.asset_db_register_model_subs(source_path)

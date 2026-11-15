@@ -49,10 +49,6 @@ Breadcrumb :: struct {
     scene_instance:     Local_ID,  // local_id of NestedScene record this breadcrumb is anchored to
 }
 
-pptr_guid_is_empty :: proc(g: Asset_GUID) -> bool {
-    return g == Asset_GUID{}
-}
-
 pptr_equals :: proc(a, b: PPtr) -> bool {
 	return a.local_id == b.local_id && a.guid == b.guid
 }
@@ -651,13 +647,13 @@ _json_values_equal :: proc(a, b: json.Value) -> bool {
     case json.Integer:
         #partial switch bv in b {
         case json.Integer: return av == bv
-        case json.Float:   return f64(av) == bv
+        case json.Float:   return abs(f64(av) - bv) <= 1e-6
         }
         return false
     case json.Float:
         #partial switch bv in b {
-        case json.Float:   return av == bv
-        case json.Integer: return av == f64(bv)
+        case json.Float:   return abs(av - bv) <= 1e-6
+        case json.Integer: return abs(av - f64(bv)) <= 1e-6
         }
         return false
     case json.String:
@@ -787,18 +783,22 @@ nested_scene_diff_overrides :: proc(base_raw: []byte, work_raw: []byte, prefab_g
         base_arr := get_array(base_root, section_key)
         work_arr := get_array(work_root, section_key)
         if len(work_arr) == 0 do continue
+        base_by_id := make(map[Local_ID]json.Object, len(base_arr), context.temp_allocator)
+        for base_item in base_arr {
+            bo, bok := base_item.(json.Object)
+            if !bok do continue
+            bid, bid_ok := _json_local_id_of(bo)
+            if bid_ok && !(bid in base_by_id) {
+                base_by_id[bid] = bo
+            }
+        }
         for work_item in work_arr {
             wo, ok := work_item.(json.Object)
             if !ok do continue
             tid, tid_ok := _json_local_id_of(wo)
             if !tid_ok do continue
-            for base_item in base_arr {
-                bo, bok := base_item.(json.Object)
-                if !bok do continue
-                bid, bid_ok := _json_local_id_of(bo)
-                if !bid_ok || bid != tid do continue
+            if bo, has := base_by_id[tid]; has {
                 _json_diff_objects(bo, wo, "", PPtr{guid = prefab_guid, local_id = tid}, &out)
-                break
             }
         }
     }
@@ -1153,7 +1153,7 @@ _nested_scene_scan_hosts_for_lid :: proc(s: ^Scene, ns: ^NestedScene, lid: Local
 	if ns.host_breadcrumb_id != 0 {
 		bc, ok := breadcrumb_get(s, ns.host_breadcrumb_id)
 		if !ok || bc.scene_instance != ns.local_id do return {}, 0
-		if !pptr_guid_is_empty(bc.scene_source.guid) do return {}, 0
+		if !asset_guid_is_empty(bc.scene_source.guid) do return {}, 0
 		if bc.scene_source.local_id != lid do return {}, 0
 	}
 	w := ctx_world()
@@ -1204,7 +1204,7 @@ nested_scene_hosts_transform :: proc(s: ^Scene, ns: ^NestedScene, host_tH: Trans
 	if ns.host_breadcrumb_id != 0 {
 		bc, ok := breadcrumb_get(s, ns.host_breadcrumb_id)
 		if !ok || bc.scene_instance != ns.local_id do return false
-		if !pptr_guid_is_empty(bc.scene_source.guid) do return false
+		if !asset_guid_is_empty(bc.scene_source.guid) do return false
 		lid := bc.scene_source.local_id
 
 		if !t.nested_owned {
@@ -1274,7 +1274,7 @@ nested_scene_resolve_host_handle :: proc(s: ^Scene, ns: ^NestedScene) -> Transfo
 	if ns.host_breadcrumb_id != 0 {
 		bc, ok := breadcrumb_get(s, ns.host_breadcrumb_id)
 		if !ok || bc.scene_instance != ns.local_id do return {}
-		if !pptr_guid_is_empty(bc.scene_source.guid) do return {}
+		if !asset_guid_is_empty(bc.scene_source.guid) do return {}
 		lid = bc.scene_source.local_id
 	}
 
@@ -2460,7 +2460,7 @@ nested_scene_find_revert_target :: proc(
     if s == nil || ns == nil do return nil, nil, {}, false
     leaf_ns := ns
     leaf_lid := target.local_id
-    if !pptr_guid_is_empty(target.guid) && target.guid != ns.source_prefab {
+    if !asset_guid_is_empty(target.guid) && target.guid != ns.source_prefab {
         host := nested_scene_resolve_host_handle(s, ns)
         if _, lns, lid := _nested_walk_override_target(s, host, target); lns != nil {
             leaf_ns = lns
@@ -2563,7 +2563,7 @@ _nested_walk_override_target :: proc(
     target: PPtr,
 ) -> (Transform_Handle, ^NestedScene, Local_ID) {
     if s == nil do return {}, nil, 0
-    if pptr_guid_is_empty(target.guid) do return {}, nil, 0
+    if asset_guid_is_empty(target.guid) do return {}, nil, 0
 
     // Single-level: target lives directly inside native_host's expansion.
     // No projection chain — the lid is already in target.guid's namespace.
@@ -2661,7 +2661,7 @@ nested_resolve_breadcrumb_to_handle :: proc(s: ^Scene, bc: Breadcrumb) -> Handle
     leaf_host: Transform_Handle
     leaf_ns: ^NestedScene
     leaf_lid: Local_ID
-    if pptr_guid_is_empty(bc.scene_source.guid) || bc.scene_source.guid == native_ns.source_prefab {
+    if asset_guid_is_empty(bc.scene_source.guid) || bc.scene_source.guid == native_ns.source_prefab {
         leaf_host = native_host
         leaf_ns = native_ns
         leaf_lid = bc.scene_source.local_id
@@ -2781,7 +2781,7 @@ _nested_scene_apply_deep_overrides_live :: proc(host_tH: Transform_Handle, ns: ^
     if s == nil do return
 
     for &ov in ns.overrides {
-        if pptr_guid_is_empty(ov.target.guid) do continue
+        if asset_guid_is_empty(ov.target.guid) do continue
         if ov.target.guid == ns.source_prefab do continue
 
         // Deep: descend from native_host, un-projecting through each inner NS
@@ -2807,7 +2807,7 @@ _nested_apply_deep_added_objects_live :: proc(s: ^Scene, host_tH: Transform_Hand
         // Shallow records (parent in this instance's own prefab) were already
         // grafted into the bytes — re-adding them here would duplicate.
         if ao.parent.guid == ns.source_prefab do continue
-        if pptr_guid_is_empty(ao.parent.guid) do continue
+        if asset_guid_is_empty(ao.parent.guid) do continue
 
         _, leaf_ns, leaf_lid := _nested_walk_override_target(s, host_tH, ao.parent)
         if leaf_ns == nil do continue
@@ -2890,7 +2890,7 @@ nested_scene_revert_override :: proc(
     leaf_target := target.local_id
     leaf_ns := ns
 
-    is_deep := !pptr_guid_is_empty(target.guid) && target.guid != ns.source_prefab
+    is_deep := !asset_guid_is_empty(target.guid) && target.guid != ns.source_prefab
     if is_deep {
         lh, lns, lid := _nested_walk_override_target(s, native_host_tH, target)
         if lh != {} && lns != nil {
@@ -2971,7 +2971,7 @@ _nested_bind_source_refs_in_value :: proc(ptr: rawptr, ti: ^runtime.Type_Info, s
         if tid == typeid_of(PPtr) do return
         if tid == typeid_of(Ref) {
             ref := cast(^Ref)ptr
-            if pptr_guid_is_empty(ref.pptr.guid) do bind(s, ns, &ref.pptr.local_id, &ref.handle)
+            if asset_guid_is_empty(ref.pptr.guid) do bind(s, ns, &ref.pptr.local_id, &ref.handle)
             return
         }
         if tid == typeid_of(Ref_Local) || tid == typeid_of(Owned) {
@@ -3050,7 +3050,7 @@ _apply_chain_for_subject :: proc(s: ^Scene, ns: ^NestedScene, subject: PPtr) -> 
 
     nesting_owner := ns.source_prefab
     owner_lid := subject.local_id
-    is_deep := !pptr_guid_is_empty(subject.guid) && subject.guid != ns.source_prefab
+    is_deep := !asset_guid_is_empty(subject.guid) && subject.guid != ns.source_prefab
     if is_deep {
         native_host := nested_scene_resolve_host_handle(s, ns)
         if native_host == {} do return nil, false
@@ -3266,7 +3266,7 @@ _apply_resolve_parent :: proc(
       rec_child_guid: Asset_GUID, tgt_guid: Asset_GUID, rec_ns_lid: Local_ID, ok: bool) {
     if levels_up < 1 do return {}, false, 0, {}, {}, 0, false
 
-    is_deep := !pptr_guid_is_empty(target.guid) && target.guid != ns.source_prefab
+    is_deep := !asset_guid_is_empty(target.guid) && target.guid != ns.source_prefab
     if !is_deep {
         // Shallow: only level 1 (bake into ns.source_prefab's own row).
         if levels_up != 1 do return {}, false, 0, {}, {}, 0, false
@@ -3951,7 +3951,7 @@ breadcrumb_create :: proc(s: ^Scene, scene_instance: Local_ID, src: PPtr) -> (Lo
 
 breadcrumb_materialize_target :: proc(s: ^Scene, scene_instance: Local_ID, target: PPtr) -> (PPtr, bool) {
     if s == nil || scene_instance == 0 do return {}, false
-    if pptr_guid_is_empty(target.guid) {
+    if asset_guid_is_empty(target.guid) {
         return target, true
     }
     peg, ok := breadcrumb_create(s, scene_instance, target)

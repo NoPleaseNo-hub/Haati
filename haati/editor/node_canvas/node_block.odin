@@ -347,7 +347,7 @@ canvas_node_text :: proc(b: ^Node_Block_Ctx, text: cstring, col: im.Vec4) {
 	if b == nil || text == nil do return
 	tsz := im.CalcTextSize(text)
 	b.intrinsic_body_w = max(b.intrinsic_body_w, tsz.x + 8.0 * b.zm)
-	im.TextColored(col, "%s", text)
+	im.TextColoredUnformatted(col, text)
 }
 
 // Finalizes auto-sizing measurement, renders the UE5 Node module chrome on Channel 0,
@@ -637,7 +637,7 @@ canvas_node_param :: proc(b: ^Node_Block_Ctx, label: cstring) -> f32 {
 	b.intrinsic_body_w = max(b.intrinsic_body_w, lbl_w + b.ctrl_col_w_screen)
 
 	im.AlignTextToFramePadding()
-	im.TextColored(p.text_secondary, "%s", label)
+	im.TextColoredUnformatted(p.text_secondary, label)
 	im.SameLine()
 	im.SetCursorScreenPos({cur.x + lbl_w, cur.y})
 	im.SetNextItemWidth(ctl_w)

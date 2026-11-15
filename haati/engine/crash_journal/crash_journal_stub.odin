@@ -2,250 +2,189 @@
 #+build !linux
 package crash_journal
 
-// Windows Crash Journal (STUB-02 Remediation):
-// Allocation-free crash journal for Windows with Win32 Vectored Exception Handling
-// (`AddVectoredExceptionHandler`), `RtlCaptureStackBackTrace`, UTC timestamping,
-// breadcrumb tracking, and full parity with POSIX `crash_journal.odin`.
+// Windows Crash Journal: `SetUnhandledExceptionFilter` (+ stack-overflow VEH),
+// SIGABRT, `RtlCaptureStackBackTrace` + `DbgHelp` symbolication (`SymFromAddrW`
+// / `SymGetLineFromAddrW64`), and zero-heap Win32 `WriteFile` flushing to both
+// `logs/crash_<pid>.log` and `logs/crash_last.log`.
 
-import "base:intrinsics"
-import "base:runtime"
 import "core:c"
 import "core:c/libc"
-import "core:os"
-import "core:time"
 import win32 "core:sys/windows"
 
-CRASH_MAX_FRAMES     :: 64
-CRASH_BREADCRUMB_MAX :: 256
-CRASH_DIR            :: "logs"
-
 foreign import kernel32 "system:Kernel32.lib"
+foreign import dbghelp "system:Dbghelp.lib"
+
+SYMOPT_UNDNAME :: win32.DWORD(0x00000002)
 
 @(default_calling_convention = "system")
 foreign kernel32 {
 	RtlCaptureStackBackTrace :: proc(
-		FramesToSkip:      win32.DWORD,
-		FramesToCapture:   win32.DWORD,
-		BackTrace:         [^]rawptr,
-		BackTraceHash:     ^win32.DWORD,
+		FramesToSkip:    win32.DWORD,
+		FramesToCapture: win32.DWORD,
+		BackTrace:       [^]rawptr,
+		BackTraceHash:   ^win32.DWORD,
 	) -> win32.WORD ---
 }
 
+@(default_calling_convention = "system")
+foreign dbghelp {
+	SymRefreshModuleList :: proc(hProcess: win32.HANDLE) -> win32.BOOL ---
+}
+
 @(private = "file")
-_crash: struct {
-	installed:      bool,
-	in_handler:     bool,
-	veh_handle:     rawptr,
-	frames:         [CRASH_MAX_FRAMES]rawptr,
-	breadcrumb:     [CRASH_BREADCRUMB_MAX]byte,
-	breadcrumb_len: int,
-	path:           [256]byte, // logs/crash_<pid>.log
-	path_len:       int,
-	version:        [64]byte,
-	version_len:    int,
-	out_buf:        [8192]byte,
-	out_len:        int,
+_win_veh_handle: rawptr
+@(private = "file")
+_syms_ready: bool
+@(private = "file")
+_in_stack_overflow: bool
+@(private = "file")
+_win_path_w: [260]u16
+@(private = "file")
+_win_last_path_w: [260]u16
+@(private = "file")
+_sym_buf: [size_of(win32.SYMBOL_INFOW) + 256 * size_of(u16)]byte
+@(private = "file")
+_line_info: win32.IMAGEHLP_LINE64
+
+@(private = "file")
+_copy_ascii_w :: proc(dst: []u16, src: []byte) {
+	if len(dst) == 0 do return
+	n := min(len(src), len(dst) - 1)
+	for i in 0 ..< n {
+		dst[i] = u16(src[i])
+	}
+	dst[n] = 0
 }
 
 init :: proc(version := "") {
-	v := version
-	for len(v) > 0 && (v[len(v) - 1] == '\n' || v[len(v) - 1] == '\r' || v[len(v) - 1] == ' ') {
-		v = v[:len(v) - 1]
-	}
-	n := min(len(v), len(_crash.version))
-	copy(_crash.version[:n], v[:n])
-	_crash.version_len = n
-
-	if _crash.installed do return
-	_crash.installed = true
-
-	_ = os.make_directory(CRASH_DIR)
-	_crash_build_path()
+	if _crash_common_init(version) do return
 
 	when ODIN_OS == .Windows {
-		_crash.veh_handle = win32.AddVectoredExceptionHandler(0, _win_veh_handler)
+		if _crash.path_len > 0 {
+			_copy_ascii_w(_win_path_w[:], _crash.path[:_crash.path_len])
+		}
+		if _crash.last_path_len > 0 {
+			_copy_ascii_w(_win_last_path_w[:], _crash.last_path[:_crash.last_path_len])
+		}
+		win32.SymSetOptions(win32.SYMOPT_LOAD_LINES | win32.SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME)
+		_syms_ready = bool(win32.SymInitialize(win32.GetCurrentProcess(), nil, win32.TRUE))
+		// Primary fatal handler: UnhandledExceptionFilter avoids first-chance
+		// exceptions caught intentionally by drivers or OS libraries.
+		win32.SetUnhandledExceptionFilter(_win_unhandled_filter)
+		// Stack overflow cannot unwind to the top-level filter, so keep a
+		// narrow VEH strictly for EXCEPTION_STACK_OVERFLOW.
+		_win_veh_handle = win32.AddVectoredExceptionHandler(1, _win_veh_handler)
 	}
 	libc.signal(libc.SIGABRT, _c_sigabrt_handler)
+}
+
+refresh_symbols :: proc() {
+	when ODIN_OS == .Windows {
+		if _syms_ready {
+			_ = SymRefreshModuleList(win32.GetCurrentProcess())
+		}
+	}
 }
 
 @(private = "file")
 _c_sigabrt_handler :: proc "c" (_sig: c.int) {
 	if !_crash.in_handler {
 		_crash.in_handler = true
-		context = runtime.default_context()
 		_crash_write("SIGABRT (C/C++ abort or assertion failure)", nil, nil)
 	}
 }
 
-breadcrumb :: proc(text: string) {
-	n := min(len(text), CRASH_BREADCRUMB_MAX)
-	copy(_crash.breadcrumb[:n], text[:n])
-	_crash.breadcrumb_len = n
-}
-
-breadcrumb_clear :: proc() {
-	_crash.breadcrumb_len = 0
-}
-
-assertion_failure :: proc(prefix, message: string, loc: runtime.Source_Code_Location) -> ! {
-	if !_crash.in_handler {
-		_crash.in_handler = true
-		_crash_write_assert(prefix, message, loc)
-	}
-	runtime.default_assertion_failure_proc(prefix, message, loc)
-}
-
 when ODIN_OS == .Windows {
 	@(private = "file")
-	_win_veh_handler :: proc "system" (ep: ^win32.EXCEPTION_POINTERS) -> win32.LONG {
+	_fatal_exception_reason :: proc "contextless" (code: win32.DWORD) -> (reason: string, fatal: bool) {
+		switch code {
+		case win32.EXCEPTION_ACCESS_VIOLATION:      return "EXCEPTION_ACCESS_VIOLATION (invalid memory reference)", true
+		case win32.EXCEPTION_IN_PAGE_ERROR:         return "EXCEPTION_IN_PAGE_ERROR (bad memory access)", true
+		case win32.EXCEPTION_ILLEGAL_INSTRUCTION:   return "EXCEPTION_ILLEGAL_INSTRUCTION (illegal instruction)", true
+		case win32.EXCEPTION_INT_DIVIDE_BY_ZERO:    return "EXCEPTION_INT_DIVIDE_BY_ZERO (integer divide by zero)", true
+		case win32.EXCEPTION_FLT_DIVIDE_BY_ZERO:    return "EXCEPTION_FLT_DIVIDE_BY_ZERO (float divide by zero)", true
+		case win32.EXCEPTION_STACK_OVERFLOW:        return "EXCEPTION_STACK_OVERFLOW (stack overflow)", true
+		case win32.EXCEPTION_ARRAY_BOUNDS_EXCEEDED: return "EXCEPTION_ARRAY_BOUNDS_EXCEEDED", true
+		case win32.EXCEPTION_DATATYPE_MISALIGNMENT: return "EXCEPTION_DATATYPE_MISALIGNMENT", true
+		}
+		return "", false
+	}
+
+	@(private = "file")
+	_win_unhandled_filter :: proc "system" (ep: ^win32.EXCEPTION_POINTERS) -> win32.LONG {
 		if ep == nil || ep.ExceptionRecord == nil {
 			return win32.EXCEPTION_CONTINUE_SEARCH
 		}
-		code := ep.ExceptionRecord.ExceptionCode
-		reason: string
-		switch code {
-		case win32.EXCEPTION_ACCESS_VIOLATION:     reason = "EXCEPTION_ACCESS_VIOLATION (invalid memory reference)"
-		case win32.EXCEPTION_IN_PAGE_ERROR:        reason = "EXCEPTION_IN_PAGE_ERROR (bad memory access)"
-		case win32.EXCEPTION_ILLEGAL_INSTRUCTION:  reason = "EXCEPTION_ILLEGAL_INSTRUCTION (illegal instruction)"
-		case win32.EXCEPTION_INT_DIVIDE_BY_ZERO:   reason = "EXCEPTION_INT_DIVIDE_BY_ZERO (integer divide by zero)"
-		case win32.EXCEPTION_FLT_DIVIDE_BY_ZERO:   reason = "EXCEPTION_FLT_DIVIDE_BY_ZERO (float divide by zero)"
-		case win32.EXCEPTION_STACK_OVERFLOW:       reason = "EXCEPTION_STACK_OVERFLOW (stack overflow)"
-		case win32.EXCEPTION_ARRAY_BOUNDS_EXCEEDED:reason = "EXCEPTION_ARRAY_BOUNDS_EXCEEDED"
-		case win32.EXCEPTION_DATATYPE_MISALIGNMENT:reason = "EXCEPTION_DATATYPE_MISALIGNMENT"
-		case:
-			// Ignore non-fatal exceptions (e.g. OutputDebugString, C++ exceptions, thread naming)
+		reason, fatal := _fatal_exception_reason(ep.ExceptionRecord.ExceptionCode)
+		if !fatal {
 			return win32.EXCEPTION_CONTINUE_SEARCH
 		}
-
 		if !_crash.in_handler {
 			_crash.in_handler = true
-			context = runtime.default_context()
 			addr := ep.ExceptionRecord.ExceptionAddress
 			_crash_write(reason, addr, addr)
 		}
 		return win32.EXCEPTION_CONTINUE_SEARCH
 	}
-}
 
-@(private = "file")
-_buf_reset :: proc "contextless" () {
-	_crash.out_len = 0
-}
-
-@(private = "file")
-_w :: proc "contextless" (s: string) {
-	if len(s) == 0 do return
-	rem := len(_crash.out_buf) - _crash.out_len
-	if rem <= 0 do return
-	n := min(len(s), rem)
-	copy(_crash.out_buf[_crash.out_len:_crash.out_len + n], s[:n])
-	_crash.out_len += n
-}
-
-@(private = "file")
-_w_hex :: proc "contextless" (v: u64) {
-	digits := "0123456789abcdef"
-	buf: [16]byte
-	i := len(buf)
-	val := v
-	if val == 0 {
-		i -= 1
-		buf[i] = '0'
+	@(private = "file")
+	_win_veh_handler :: proc "system" (ep: ^win32.EXCEPTION_POINTERS) -> win32.LONG {
+		if ep == nil || ep.ExceptionRecord == nil {
+			return win32.EXCEPTION_CONTINUE_SEARCH
+		}
+		if ep.ExceptionRecord.ExceptionCode != win32.EXCEPTION_STACK_OVERFLOW {
+			return win32.EXCEPTION_CONTINUE_SEARCH
+		}
+		if !_crash.in_handler {
+			_crash.in_handler = true
+			_in_stack_overflow = true
+			addr := ep.ExceptionRecord.ExceptionAddress
+			_crash_write("EXCEPTION_STACK_OVERFLOW (stack overflow)", addr, addr)
+			_in_stack_overflow = false
+		}
+		return win32.EXCEPTION_CONTINUE_SEARCH
 	}
-	for val > 0 {
-		i -= 1
-		buf[i] = digits[val & 0xF]
-		val >>= 4
+
+	@(private = "file")
+	_win_write_file :: proc "contextless" (path_w: win32.wstring, data: []byte) {
+		if path_w == nil || ([^]u16)(path_w)[0] == 0 || len(data) <= 0 do return
+		h := win32.CreateFileW(
+			path_w,
+			win32.GENERIC_WRITE,
+			win32.FILE_SHARE_READ | win32.FILE_SHARE_WRITE | win32.FILE_SHARE_DELETE,
+			nil,
+			win32.CREATE_ALWAYS,
+			win32.FILE_ATTRIBUTE_NORMAL,
+			nil,
+		)
+		if h == win32.INVALID_HANDLE_VALUE do return
+		defer win32.CloseHandle(h)
+		written_total := 0
+		for written_total < len(data) {
+			chunk := min(len(data) - written_total, 65536)
+			written: win32.DWORD = 0
+			if win32.WriteFile(h, &data[written_total], win32.DWORD(chunk), &written, nil) == win32.FALSE || written == 0 {
+				break
+			}
+			written_total += int(written)
+		}
 	}
-	_w(string(buf[i:]))
 }
 
-@(private = "file")
-_w_int :: proc "contextless" (v: int) {
-	buf: [20]byte
-	i := len(buf)
-	val := v
-	if val < 0 {
-		_w("-")
-		val = -val
+@(private = "package")
+_os_epoch_sec :: proc "contextless" () -> (i64, bool) {
+	when ODIN_OS == .Windows {
+		ft: win32.FILETIME
+		win32.GetSystemTimeAsFileTime(&ft)
+		epoch_sec := win32.FILETIME_as_unix_nanoseconds(ft) / 1_000_000_000
+		if epoch_sec <= 0 do return 0, false
+		return epoch_sec, true
 	}
-	if val == 0 {
-		i -= 1
-		buf[i] = '0'
-	}
-	for val > 0 {
-		i -= 1
-		buf[i] = byte('0' + val % 10)
-		val /= 10
-	}
-	_w(string(buf[i:]))
+	return 0, false
 }
 
-@(private = "file")
-_w_2d :: proc "contextless" (v: int) {
-	buf := [2]byte{byte('0' + v / 10 % 10), byte('0' + v % 10)}
-	_w(string(buf[:]))
-}
-
-// YYYY-MM-DD HH:MM:SS from unix seconds (Hinnant's civil_from_days).
-@(private = "file")
-_w_utc :: proc "contextless" (epoch: i64) {
-	days := epoch / 86400
-	secs := epoch % 86400
-	if secs < 0 {
-		secs += 86400
-		days -= 1
-	}
-	z := days + 719468
-	era := (z >= 0 ? z : z - 146096) / 146097
-	doe := z - era * 146097
-	yoe := (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
-	y := yoe + era * 400
-	doy := doe - (365 * yoe + yoe / 4 - yoe / 100)
-	mp := (5 * doy + 2) / 153
-	d := doy - (153 * mp + 2) / 5 + 1
-	m := mp + 3 if mp < 10 else mp - 9
-	if m <= 2 do y += 1
-
-	_w_int(int(y))
-	_w("-")
-	_w_2d(int(m))
-	_w("-")
-	_w_2d(int(d))
-	_w(" ")
-	_w_2d(int(secs / 3600))
-	_w(":")
-	_w_2d(int(secs / 60 % 60))
-	_w(":")
-	_w_2d(int(secs % 60))
-}
-
-@(private = "file")
-_crash_write_header :: proc() {
-	_w("=== MoonHug crash ===\n")
-	if _crash.version_len > 0 {
-		_w("version: ")
-		_w(string(_crash.version[:_crash.version_len]))
-		_w("\n")
-	}
-	now_ns := time.now()._nsec
-	epoch_sec := now_ns / 1_000_000_000
-	if epoch_sec <= 0 do epoch_sec = 1794240000
-	_w("time: ")
-	_w_utc(epoch_sec)
-	_w(" UTC\n")
-}
-
-@(private = "file")
-_crash_write_breadcrumb :: proc "contextless" () {
-	if _crash.breadcrumb_len <= 0 do return
-	_w("doing: ")
-	_w(string(_crash.breadcrumb[:_crash.breadcrumb_len]))
-	_w("\n")
-}
-
-@(private = "file")
-_crash_write_stack :: proc(fault_pc: rawptr) {
+@(private = "package")
+_os_flush_and_stack :: proc "contextless" (fault_pc: rawptr, _fault_lr: rawptr) {
 	_w("stack:\n")
 	n := 0
 	if fault_pc != nil {
@@ -254,7 +193,7 @@ _crash_write_stack :: proc(fault_pc: rawptr) {
 	}
 	when ODIN_OS == .Windows {
 		scratch: [CRASH_MAX_FRAMES]rawptr
-		captured := int(RtlCaptureStackBackTrace(2, CRASH_MAX_FRAMES, raw_data(scratch[:]), nil))
+		captured := int(RtlCaptureStackBackTrace(3, CRASH_MAX_FRAMES, raw_data(scratch[:]), nil))
 		for i in 0 ..< captured {
 			if n >= CRASH_MAX_FRAMES do break
 			f := scratch[i]
@@ -265,108 +204,51 @@ _crash_write_stack :: proc(fault_pc: rawptr) {
 	}
 	if n <= 0 {
 		_w("  <unavailable; see 'at:' above>\n")
-		return
+	} else {
+		when ODIN_OS == .Windows {
+			proc_h := win32.GetCurrentProcess()
+		}
+		for i in 0 ..< n {
+			addr := u64(uintptr(_crash.frames[i]))
+			_w("  #")
+			_w_int(i)
+			_w(" 0x")
+			_w_hex(addr)
+			when ODIN_OS == .Windows {
+				if _syms_ready && !_in_stack_overflow {
+					_sym_buf = {}
+					sym := (^win32.SYMBOL_INFOW)(raw_data(_sym_buf[:]))
+					sym.SizeOfStruct = size_of(win32.SYMBOL_INFOW)
+					sym.MaxNameLen = 255
+					disp64: win32.DWORD64 = 0
+					if win32.SymFromAddrW(proc_h, win32.DWORD64(addr), &disp64, sym) != win32.FALSE {
+						_w(" ")
+						_w_utf16(&sym.Name[0], int(sym.NameLen), 255)
+						if disp64 > 0 {
+							_w("+0x")
+							_w_hex(u64(disp64))
+						}
+					}
+					_line_info = {}
+					_line_info.SizeOfStruct = size_of(win32.IMAGEHLP_LINE64)
+					disp32: win32.DWORD = 0
+					if win32.SymGetLineFromAddrW64(proc_h, win32.DWORD64(addr), &disp32, &_line_info) != win32.FALSE && _line_info.FileName != nil {
+						_w(" (")
+						_w_utf16(([^]u16)(_line_info.FileName), -1, 512)
+						_w(":")
+						_w_int(int(_line_info.LineNumber))
+						_w(")")
+					}
+				}
+			}
+			_w("\n")
+		}
 	}
-	for i in 0 ..< n {
-		_w("  #")
-		_w_int(i)
-		_w(" 0x")
-		_w_hex(u64(uintptr(_crash.frames[i])))
-		_w("\n")
-	}
-}
 
-@(private = "file")
-_crash_flush_file :: proc() {
-	if _crash.path_len <= 0 || _crash.out_len <= 0 do return
-	p := string(_crash.path[:_crash.path_len])
-	_ = os.write_entire_file(p, _crash.out_buf[:_crash.out_len])
-}
-
-@(private = "file")
-_crash_write :: proc(reason: string, addr: rawptr, fault_pc: rawptr = nil) {
-	_buf_reset()
-	_crash_write_header()
-	_w("reason: ")
-	_w(reason)
-	_w("\n")
-	if addr != nil {
-		_w("fault address: 0x")
-		_w_hex(u64(uintptr(addr)))
-		_w("\n")
+	if _crash.out_len <= 0 do return
+	when ODIN_OS == .Windows {
+		payload := _crash.out_buf[:_crash.out_len]
+		_win_write_file(win32.wstring(&_win_path_w[0]), payload)
+		_win_write_file(win32.wstring(&_win_last_path_w[0]), payload)
 	}
-	_crash_write_breadcrumb()
-	_crash_write_stack(fault_pc)
-	_crash_flush_file()
-}
-
-@(private = "file")
-_crash_write_assert :: proc(prefix, message: string, loc: runtime.Source_Code_Location) {
-	_buf_reset()
-	_crash_write_header()
-	_w("reason: ")
-	_w(prefix)
-	if message != "" {
-		_w(": ")
-		_w(message)
-	}
-	_w("\n")
-	_w("at: ")
-	_w(loc.file_path)
-	_w(":")
-	_w_int(int(loc.line))
-	if loc.procedure != "" {
-		_w(" in ")
-		_w(loc.procedure)
-	}
-	_w("\n")
-	_crash_write_breadcrumb()
-	_crash_write_stack(nil)
-	_crash_flush_file()
-}
-
-@(private = "file")
-_crash_build_path :: proc() {
-	prefix := CRASH_DIR + "/crash_"
-	n := copy(_crash.path[:], prefix)
-	pid := os.get_pid()
-	digits: [20]byte
-	d := len(digits)
-	v := pid if pid > 0 else 0
-	if v == 0 {
-		d -= 1
-		digits[d] = '0'
-	}
-	for v > 0 {
-		d -= 1
-		digits[d] = byte('0' + v % 10)
-		v /= 10
-	}
-	n += copy(_crash.path[n:], digits[d:])
-	n += copy(_crash.path[n:], ".log")
-	_crash.path[n] = 0
-	_crash.path_len = n
-}
-
-write_test_entry :: proc(reason: string) {
-	if !_crash.installed {
-		init()
-	}
-	was := _crash.in_handler
-	_crash.in_handler = true
-	defer _crash.in_handler = was
-	_crash_write(reason, nil, nil)
-}
-
-path :: proc() -> string {
-	if _crash.path_len <= 0 do return ""
-	return string(_crash.path[:_crash.path_len])
-}
-
-@(optimization_mode = "none")
-test_crash :: proc() {
-	breadcrumb("test_crash (deliberate)")
-	addr: uintptr = 0x8
-	p := (^int)(intrinsics.volatile_load(&addr))
-	intrinsics.volatile_store(p, 1)
 }

@@ -1,10 +1,12 @@
 package editor
 
 import gfx "../engine/gfx"
+import "base:runtime"
 import "core:encoding/json"
 import "core:encoding/uuid"
 import "core:os"
 import "core:strings"
+import sdl "vendor:sdl3"
 import "menu"
 import thm "haati:editor/theme"
 import wnd "window"
@@ -50,14 +52,10 @@ EditorSettings :: struct {
     open_window_ids:          [dynamic]string,          // plugin editor windows open last session (window/window.odin)
     popped_window_ids:        [dynamic]string,          // panels popped out into their own OS window (window/viewports.odin)
     play_mode:                Play_Mode,                // what the Play button does (simulate_view.odin)
-    show_inspector:           bool,
-    show_project_inspector:   bool,
-    show_project:             bool,
     show_console:             bool,
     show_scene:               bool,
     show_game:                bool,
     show_output:              bool,
-    show_hierarchy:           bool,
     show_history:             bool,
     show_animation:           bool,
     show_playable_graph:      bool,
@@ -109,10 +107,58 @@ SceneCameraView :: struct {
     angle_2d: Scene_2D_Angle,
 }
 
+NO_SAVED_WINDOW_POS :: i32(-32000)
+
+// Pure bounds check factored out so dual-monitor and minimized-window cases can be unit-tested without SDL displays.
+window_rect_visible_in_bounds :: proc(x, y, w, h: i32, usable_bounds: []sdl.Rect) -> bool {
+    if x == NO_SAVED_WINDOW_POS || y == NO_SAVED_WINDOW_POS do return false
+    if w < 100 || h < 100 do return false
+    for bounds in usable_bounds {
+        ix0 := max(x, bounds.x)
+        iy0 := max(y, bounds.y)
+        ix1 := min(x + w, bounds.x + bounds.w)
+        iy1 := min(y + h, bounds.y + bounds.h)
+        if ix1 - ix0 >= 64 && iy1 - iy0 >= 64 {
+            return true
+        }
+    }
+    return false
+}
+
+window_rect_visible_on_any_display :: proc(x, y, w, h: i32) -> bool {
+    if x == NO_SAVED_WINDOW_POS || y == NO_SAVED_WINDOW_POS || w < 100 || h < 100 {
+        return false
+    }
+    count: i32
+    displays := sdl.GetDisplays(&count)
+    if displays == nil || count <= 0 do return false
+    defer sdl.free(displays)
+    bounds_buf: [16]sdl.Rect
+    bounds_count := 0
+    for i in 0 ..< count {
+        if bounds_count >= len(bounds_buf) do break
+        bounds: sdl.Rect
+        if !sdl.GetDisplayUsableBounds(displays[i], &bounds) do continue
+        bounds_buf[bounds_count] = bounds
+        bounds_count += 1
+    }
+    return window_rect_visible_in_bounds(x, y, w, h, bounds_buf[:bounds_count])
+}
+
 editor_settings: EditorSettings
 
 load_editor_settings :: proc() -> (w, h, x, y: i32) {
+    context.allocator = runtime.default_allocator()
+    editor_settings.x = NO_SAVED_WINDOW_POS
+    editor_settings.y = NO_SAVED_WINDOW_POS
     data, read_err := os.read_entire_file(EDITOR_SETTINGS_FILE, context.temp_allocator)
+    if read_err != nil && engine.has_active_project() && !os.exists("haati.project") {
+        eng_path := strings.concatenate({engine.engine_haati_dir(context.temp_allocator), "/", EDITOR_SETTINGS_FILE}, context.temp_allocator)
+        data, read_err = os.read_entire_file(eng_path, context.temp_allocator)
+        if read_err == nil {
+            log.infof("[startup] adopting %q into %q", eng_path, EDITOR_SETTINGS_FILE)
+        }
+    }
     if read_err != nil {
         // Pre-split checkout: adopt the committed file's values once. The next
         // save writes UserSettings/ and this branch stops being taken.
@@ -163,8 +209,6 @@ load_editor_settings :: proc() -> (w, h, x, y: i32) {
             }
             if editor_settings.scene_2d do _scene_2d_pending = true
             if editor_settings.has_view_state {
-                menu.show_inspector         = editor_settings.show_inspector
-                menu.show_project_inspector = editor_settings.show_project_inspector
                 menu.show_console           = editor_settings.show_console
                 menu.show_scene             = editor_settings.show_scene
                 menu.show_game              = editor_settings.show_game
@@ -185,6 +229,7 @@ load_editor_settings :: proc() -> (w, h, x, y: i32) {
                     if strings.has_suffix(k, ".scene") {
                         clean_views[strings.clone(k)] = v
                     }
+                    delete(k)
                 }
                 delete(editor_settings.scene_views)
                 editor_settings.scene_views = clean_views
@@ -197,7 +242,7 @@ load_editor_settings :: proc() -> (w, h, x, y: i32) {
             }
         }
     }
-    return 0, 0, -1, -1
+    return 0, 0, NO_SAVED_WINDOW_POS, NO_SAVED_WINDOW_POS
 }
 
 apply_editor_theme :: proc() {
@@ -219,13 +264,18 @@ apply_default_window_size :: proc() {
 }
 
 save_editor_settings :: proc() {
+    context.allocator = runtime.default_allocator()
     os.make_directory(USER_SETTINGS_DIR)
-    pos := gfx.window_position()
-    size := gfx.window_size()
-    editor_settings.width  = size.x
-    editor_settings.height = size.y
-    editor_settings.x      = pos.x
-    editor_settings.y      = pos.y
+    if w := gfx.window(); w != nil && .MINIMIZED not_in sdl.GetWindowFlags(w) {
+        pos := gfx.window_position()
+        size := gfx.window_size()
+        if size.x > 0 && size.y > 0 {
+            editor_settings.width  = size.x
+            editor_settings.height = size.y
+            editor_settings.x      = pos.x
+            editor_settings.y      = pos.y
+        }
+    }
     editor_settings.theme  = thm.active()
     if len(editor_settings.theme_id) > 0 do delete(editor_settings.theme_id)
     editor_settings.theme_id = strings.clone(thm.to_key(thm.active()))
@@ -233,9 +283,6 @@ save_editor_settings :: proc() {
     editor_settings.has_ui_density = true
     editor_settings.corner_style   = thm.corners()
     editor_settings.use_custom_accent, editor_settings.custom_accent = thm.custom_accent_state()
-
-    editor_settings.show_inspector         = menu.show_inspector
-    editor_settings.show_project_inspector = menu.show_project_inspector
     editor_settings.show_console           = menu.show_console
     editor_settings.show_scene             = menu.show_scene
     editor_settings.show_game              = menu.show_game
@@ -293,7 +340,9 @@ save_editor_settings :: proc() {
     editor_settings.game_gizmos = game_gizmos
     editor_settings.scene_gizmos_off = !scene_gizmos
     editor_settings.gizmo_icon_px = handles.icon_px
+    for s in editor_settings.gizmo_hidden_icons do delete(s)
     delete(editor_settings.gizmo_hidden_icons)
+    for s in editor_settings.gizmo_hidden_gizmos do delete(s)
     delete(editor_settings.gizmo_hidden_gizmos)
     editor_settings.gizmo_hidden_icons = gizmo_types_hiding(.Icon)
     editor_settings.gizmo_hidden_gizmos = gizmo_types_hiding(.Gizmo)
@@ -370,4 +419,36 @@ save_editor_settings :: proc() {
         }
         _ = os.write_entire_file(EDITOR_SETTINGS_FILE, data)
     }
+}
+
+editor_settings_shutdown :: proc() {
+    context.allocator = runtime.default_allocator()
+    if editor_settings.theme_id != "" do delete(editor_settings.theme_id)
+    if editor_settings.run_config != "" do delete(editor_settings.run_config)
+    if editor_settings.sim_host != "" do delete(editor_settings.sim_host)
+    if editor_settings.project_settings_tab != "" do delete(editor_settings.project_settings_tab)
+
+    for s in editor_settings.open_scene_guids do delete(s)
+    delete(editor_settings.open_scene_guids)
+    for s in editor_settings.open_scene_paths do delete(s)
+    delete(editor_settings.open_scene_paths)
+    for s in editor_settings.recent_scene_guids do delete(s)
+    delete(editor_settings.recent_scene_guids)
+    for s in editor_settings.open_window_ids do delete(s)
+    delete(editor_settings.open_window_ids)
+    for s in editor_settings.popped_window_ids do delete(s)
+    delete(editor_settings.popped_window_ids)
+    for s in editor_settings.scene_overlays do delete(s.id)
+    delete(editor_settings.scene_overlays)
+    for s in editor_settings.gizmo_hidden_icons do delete(s)
+    delete(editor_settings.gizmo_hidden_icons)
+    for s in editor_settings.gizmo_hidden_gizmos do delete(s)
+    delete(editor_settings.gizmo_hidden_gizmos)
+
+    for k in editor_settings.window_scales do delete(k)
+    delete(editor_settings.window_scales)
+    for k in editor_settings.scene_views do delete(k)
+    delete(editor_settings.scene_views)
+
+    editor_settings = {}
 }

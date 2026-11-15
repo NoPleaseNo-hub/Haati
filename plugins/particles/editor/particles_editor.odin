@@ -423,7 +423,7 @@ particles_effect_overlay :: proc(vertical: bool) {
 		_ep_systems(ps, &list)
 		for e in list do count += len(e.particles)
 	}
-	im.Text("%7.2fs %5d", ps.time, i32(count))
+	widgets.textf("%7.2fs %5d", ps.time, i32(count))
 	im.EndGroup()
 }
 
@@ -450,11 +450,11 @@ _particle_system_inspector :: proc(ctx: ^inspector.Component_Ctx) {
 		}
 	}
 
-	// Unified Graph Studio bridge: author VFX Emitter & On-GPU SIMD VFX math alongside BP Events!
-	if im.Button(fmt.ctprintf("%s Open Particle / GPU VFX in Unified Graph Studio", icons.ICON_MD_AUTO_AWESOME), {-1, 0}) {
+	// Blueprint Studio bridge: author VFX Emitter & On-GPU SIMD VFX math alongside BP Events!
+	if im.Button(fmt.ctprintf("%s Open Particle / GPU VFX in Blueprint Studio", icons.ICON_MD_AUTO_AWESOME), {-1, 0}) {
 		vs.open_unified_graph_domain(.Particle_VFX)
 	}
-	widgets.tooltip("Author VFX Particle Emitter stages & On-GPU SIMD Curl/Drag Force math inside Unified Graph Studio (.bodin)")
+	widgets.tooltip("Author VFX Particle Emitter stages & On-GPU SIMD Curl/Drag Force math inside Blueprint Studio (.bodin)")
 	im.Separator()
 
 	// Main module (Unity: always visible, no header).

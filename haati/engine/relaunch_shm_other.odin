@@ -35,7 +35,7 @@ relaunch_shm_create :: proc(shm_name: string, snap: Relaunch_SHM_Snapshot) -> (R
 	return nil, false
 }
 
-relaunch_shm_wait_bridged :: proc(h: Relaunch_SHM_Handle, timeout_ms: int = 300) -> bool {
+relaunch_shm_wait_bridged :: proc(h: Relaunch_SHM_Handle, timeout_ms: int = 3000) -> bool {
 	return false
 }
 

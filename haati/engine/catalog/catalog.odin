@@ -91,7 +91,7 @@ save :: proc(cf: ^File, path: string) -> bool {
 //   library/artifacts, an exported catalog sits beside its artifacts/.
 // - `boot_scene` is an entry path resolved to its guid; "" skips the stamp
 //   and a path not in the catalog fails the export.
-export_from :: proc(src_catalog: string, data_dir: string, boot_scene := "", root := "") -> bool {
+export_from :: proc(src_catalog: string, data_dir: string, boot_scene := "", root := "", fallback_root := "", fallback_artifact_dir := "") -> bool {
 	data, read_err := os.read_entire_file(src_catalog, context.temp_allocator)
 	if read_err != nil {
 		fmt.eprintfln("[Catalog] export: cannot read %s", src_catalog)
@@ -115,14 +115,23 @@ export_from :: proc(src_catalog: string, data_dir: string, boot_scene := "", roo
 
 	boot_guid: string
 	if boot_scene != "" {
-		for guid_str, entry in src.assets do if entry.path == boot_scene do boot_guid = guid_str
+		norm_boot, _ := strings.replace_all(boot_scene, "\\", "/", context.temp_allocator)
+		for strings.has_prefix(norm_boot, "./") do norm_boot = norm_boot[2:]
+		norm_boot = strings.trim_left(norm_boot, "/")
+		for guid_str, entry in src.assets {
+			_, rel_p := _resolve_entry_src(root, fallback_root, entry.path)
+			if entry.path == boot_scene || rel_p == norm_boot {
+				boot_guid = guid_str
+				break
+			}
+		}
 		if boot_guid == "" {
 			fmt.eprintfln("[Catalog] export: boot scene %s is not in the catalog", boot_scene)
 			return false
 		}
 	}
 
-	ship, cok := _closure(&src, boot_guid, root)
+	ship, cok := _closure(&src, boot_guid, root, fallback_root)
 	if !cok do return false
 
 	// Stage into an EMPTY dir, so the export is exactly the closure and not
@@ -147,13 +156,15 @@ export_from :: proc(src_catalog: string, data_dir: string, boot_scene := "", roo
 	copied := 0
 	for guid_str in ship {
 		entry := src.assets[guid_str]
+		src_path, rel_path := _resolve_entry_src(root, fallback_root, entry.path)
 		if entry.sub != 0 {
 			// Identity only. _closure put the owner in `ship` as well.
-			out.assets[guid_str] = entry
+			out_entry := entry
+			out_entry.path = rel_path
+			out.assets[guid_str] = out_entry
 			continue
 		}
-		src_path := _rooted(root, entry.path)
-		dst := strings.concatenate({data_dir, "/", entry.path}, context.temp_allocator)
+		dst := strings.concatenate({data_dir, "/", rel_path}, context.temp_allocator)
 		if os.is_dir(src_path) {
 			// Folders are guid-addressable assets too (they carry metas) —
 			// mirror the directory, nothing to copy.
@@ -170,8 +181,18 @@ export_from :: proc(src_catalog: string, data_dir: string, boot_scene := "", roo
 		// naming asset_importer_mesh.odin owns). A missing artifact fails the
 		// export instead of shipping a hole.
 		if entry.artifact != "" {
+			if len(entry.artifact) < 2 {
+				fmt.eprintfln("[Catalog] export: corrupt artifact key %q for %s", entry.artifact, entry.path)
+				return false
+			}
 			rel := strings.concatenate({"artifacts/", entry.artifact[:2], "/", entry.artifact, ".bin"}, context.temp_allocator)
 			asrc := strings.concatenate({src_dir, "/", rel}, context.temp_allocator)
+			if !os.exists(asrc) && fallback_artifact_dir != "" {
+				fb_asrc := strings.concatenate({fallback_artifact_dir, "/", entry.artifact[:2], "/", entry.artifact, ".bin"}, context.temp_allocator)
+				if os.exists(fb_asrc) {
+					asrc = fb_asrc
+				}
+			}
 			adst := strings.concatenate({data_dir, "/", rel}, context.temp_allocator)
 			if !_copy_file(asrc, adst) {
 				fmt.eprintfln("[Catalog] export: missing artifact for %s — run an import pass first", entry.path)
@@ -192,7 +213,9 @@ export_from :: proc(src_catalog: string, data_dir: string, boot_scene := "", roo
 			}
 		}
 
-		out.assets[guid_str] = entry
+		out_entry := entry
+		out_entry.path = rel_path
+		out.assets[guid_str] = out_entry
 	}
 
 	catalog_path := strings.concatenate({data_dir, "/catalog.json"}, context.temp_allocator)
@@ -224,7 +247,7 @@ RESOURCES_DIR :: "resources"
 //
 // `boot_guid == ""` means no root, and the whole catalog ships.
 @(private = "file")
-_closure :: proc(src: ^File, boot_guid: string, root: string) -> (ship: [dynamic]string, ok: bool) {
+_closure :: proc(src: ^File, boot_guid: string, root: string, fallback_root := "") -> (ship: [dynamic]string, ok: bool) {
 	ship = make([dynamic]string, context.temp_allocator)
 	if boot_guid == "" {
 		for guid_str in src.assets do append(&ship, guid_str)
@@ -254,7 +277,7 @@ _closure :: proc(src: ^File, boot_guid: string, root: string) -> (ship: [dynamic
 			if g, has := path_to_guid[entry.path]; has do push(&ship, &seen, g)
 			continue
 		}
-		src_path := _rooted(root, entry.path)
+		src_path, _ := _resolve_entry_src(root, fallback_root, entry.path)
 		if !os.is_dir(src_path) {
 			data, read_err := os.read_entire_file(src_path, context.temp_allocator)
 			if read_err != nil {
@@ -335,6 +358,35 @@ ensure_parent_dirs :: proc(path: string) {
 _rooted :: proc(root, path: string) -> string {
 	if root == "" do return path
 	return strings.concatenate({root, "/", path}, context.temp_allocator)
+}
+
+@(private = "file")
+_resolve_entry_src :: proc(root, fallback_root, entry_path: string) -> (disk_path, rel_path: string) {
+	norm, _ := strings.replace_all(entry_path, "\\", "/", context.temp_allocator)
+	for strings.has_prefix(norm, "./") do norm = norm[2:]
+	norm = strings.trim_left(norm, "/")
+
+	if idx := strings.index(norm, "/haati/packages/"); idx >= 0 {
+		rel_path = norm[idx + len("/haati/"):]
+		if os.exists(entry_path) || os.is_dir(entry_path) {
+			disk_path = entry_path
+		} else if fb := _rooted(fallback_root, rel_path); fallback_root != "" && (os.exists(fb) || os.is_dir(fb)) {
+			disk_path = fb
+		} else {
+			disk_path = _rooted(root, rel_path)
+		}
+		return
+	}
+
+	rel_path = norm
+	primary := _rooted(root, rel_path)
+	if fallback_root != "" && !os.exists(primary) && !os.is_dir(primary) {
+		fb := _rooted(fallback_root, rel_path)
+		if os.exists(fb) || os.is_dir(fb) {
+			return fb, rel_path
+		}
+	}
+	return primary, rel_path
 }
 
 // os.remove takes an empty dir, so the tree is walked bottom-up.

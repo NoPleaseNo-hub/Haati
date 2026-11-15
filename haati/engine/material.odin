@@ -9,8 +9,10 @@ package engine
 // Unity's default material, lit, and its sprite default, unlit).
 
 import gfx "gfx"
+import "base:runtime"
 import "core:encoding/json"
 import "core:encoding/uuid"
+import "core:math"
 import "core:os"
 import "core:strings"
 
@@ -34,17 +36,21 @@ Material_Property :: struct {
 // by name; an empty guid binds white.
 Material_Texture :: struct {
 	name:    string,
-	texture: Asset_GUID `ext:"png,jpg,jpeg,bmp"`,
+	texture: Asset_GUID `ext:"png,jpg,jpeg,bmp,dds"`,
 }
 
 @(typ_guid={guid = "4d201ba5-2097-48bb-abd3-1a79e4f6f6f4", menu_assets_create = {menu_name = "Material", file_name = "New Material.mat", order = -6}})
 Material :: struct {
-	shader:        Material_Shader,
-	custom_shader: Asset_GUID `ext:"glsl"`, // user .glsl asset; overrides `shader` when set
-	texture:       Asset_GUID `ext:"png,jpg,jpeg,bmp"`,
-	color:         [4]f32 `decor:color()`,
-	properties:    [dynamic]Material_Property, // custom-shader property block values
-	textures:      [dynamic]Material_Texture,  // custom-shader extra sampler assignments
+	shader:             Material_Shader,
+	custom_shader:      Asset_GUID `ext:"glsl"`, // user .glsl asset; overrides `shader` when set
+	texture:            Asset_GUID `ext:"png,jpg,jpeg,bmp,dds"`,
+	color:              [4]f32 `decor:color()`,
+	double_sided:       bool,
+	emission_color:     [3]f32 `decor:color()`,
+	emission_intensity: f32 `decor:range(0, 64)`,
+	properties:         [dynamic]Material_Property, // custom-shader property block values
+	textures:           [dynamic]Material_Texture,  // custom-shader extra sampler assignments
+	lit_ubo_bytes:      [16]u8 `json:"-" inspect:"-"`,
 }
 
 // A new material is Lit, like Unity's. `shader` is stored as a number and
@@ -53,6 +59,26 @@ reset_Material :: proc(m: ^Material) {
 	cleanup_Material(m)
 	m.shader = .Lit
 	m.color = {1, 1, 1, 1}
+	m.double_sided = false
+	m.emission_color = {1, 1, 1}
+	m.emission_intensity = 0
+}
+
+on_validate_Material :: proc(m: ^Material) {
+	if m.emission_intensity < 0 {
+		m.emission_intensity = 0
+	}
+}
+
+// Converts sRGB emission tint into pre-multiplied linear HDR vec4 for LitMaterialUBO (set=3 binding=1).
+material_pack_lit_emission :: proc(emission_color: [3]f32, emission_intensity: f32) -> [4]f32 {
+	i := max(emission_intensity, f32(0.0))
+	return {
+		math.pow(max(emission_color.x, f32(0.0)), f32(2.2)) * i,
+		math.pow(max(emission_color.y, f32(0.0)), f32(2.2)) * i,
+		math.pow(max(emission_color.z, f32(0.0)), f32(2.2)) * i,
+		i,
+	}
 }
 
 // gfx shader-set name for draw_mesh. Returned strings are literals — safe to
@@ -78,16 +104,28 @@ material_shader_name :: proc(shader: Material_Shader) -> string {
 // one gfx.draw_quad call needs. The returned slices are cached by the material
 // system — do not free.
 material_resolve_draw :: proc(guid: Asset_GUID) -> (shader: string, tex: ^gfx.Texture, color: [4]f32, material_data: []u8, extra_textures: []^gfx.Texture) {
-	return _resolve_material(guid)
+	s, t, c, d, e, _ := _resolve_material_ex(guid)
+	return s, t, c, d, e
+}
+
+material_resolve_draw_ex :: proc(guid: Asset_GUID) -> (shader: string, tex: ^gfx.Texture, color: [4]f32, material_data: []u8, extra_textures: []^gfx.Texture, double_sided: bool) {
+	return _resolve_material_ex(guid)
 }
 
 _resolve_material :: proc(guid: Asset_GUID, fallback := Material_Shader.Unlit) -> (shader: string, tex: ^gfx.Texture, color: [4]f32, material_data: []u8, extra_textures: []^gfx.Texture) {
+	s, t, c, d, e, _ := _resolve_material_ex(guid, fallback)
+	return s, t, c, d, e
+}
+
+_resolve_material_ex :: proc(guid: Asset_GUID, fallback := Material_Shader.Unlit) -> (shader: string, tex: ^gfx.Texture, color: [4]f32, material_data: []u8, extra_textures: []^gfx.Texture, double_sided: bool) {
 	shader = material_shader_name(fallback)
 	color = {1, 1, 1, 1}
 	if guid == {} do return
 	mat, ok := material_load(guid)
 	if !ok do return
 	shader = material_shader_name(mat.shader)
+	double_sided = mat.double_sided
+	used_custom := false
 	if mat.custom_shader != {} {
 		// Unresolvable custom shader (missing toolchain, compile error) keeps
 		// the built-in fallback instead of dropping the draw.
@@ -95,7 +133,13 @@ _resolve_material :: proc(guid: Asset_GUID, fallback := Material_Shader.Unlit) -
 			shader = sr.name
 			material_data = _material_pack_properties(mat, sr)
 			extra_textures = _material_resolve_textures(mat, sr)
+			used_custom = true
 		}
+	}
+	if !used_custom && shader == "lit" {
+		em := material_pack_lit_emission(mat.emission_color, mat.emission_intensity)
+		runtime.mem_copy_non_overlapping(raw_data(mat.lit_ubo_bytes[:]), &em, size_of([4]f32))
+		material_data = mat.lit_ubo_bytes[:]
 	}
 	color = mat.color
 	if mat.texture != {} {
@@ -113,7 +157,7 @@ _material_resolve_textures :: proc(mat: ^Material, sr: ^Shader_Runtime) -> []^gf
 	if sr.num_samplers <= 1 do return nil
 	extra := make([]^gfx.Texture, sr.num_samplers - 1, context.temp_allocator)
 	for st in sr.textures {
-		if st.binding == 0 do continue
+		if st.binding == 0 || int(st.binding - 1) >= len(extra) do continue
 		for &mt in mat.textures {
 			if mt.name != st.name || mt.texture == {} do continue
 			if t, t_ok := texture_load(mt.texture); t_ok {
@@ -135,7 +179,10 @@ _material_pack_properties :: proc(mat: ^Material, sr: ^Shader_Runtime) -> []u8 {
 			if mp.name != sp.name do continue
 			value := mp.value
 			value_bytes := (^[16]u8)(&value)
-			copy(data[sp.offset:], value_bytes[:min(sp.size, 16)])
+			copy_sz := min(u64(sp.size), 16)
+			if u64(sp.offset) <= u64(len(data)) && copy_sz <= u64(len(data)) - u64(sp.offset) {
+				copy(data[sp.offset:], value_bytes[:copy_sz])
+			}
 			break
 		}
 	}
@@ -231,13 +278,14 @@ material_cache: map[Asset_GUID]Material
 _material_cache_ready: bool
 
 material_cache_init :: proc() {
-	material_cache = make(map[Asset_GUID]Material)
+	material_cache = make(map[Asset_GUID]Material, runtime.default_allocator())
 	_material_cache_ready = true
 }
 
 material_cache_shutdown :: proc() {
+	alloc := material_cache.allocator if material_cache.allocator.procedure != nil else runtime.default_allocator()
 	for _, &mat in material_cache {
-		cleanup_Material(&mat)
+		_material_destroy_with(&mat, alloc)
 	}
 	delete(material_cache)
 	material_cache = nil
@@ -254,10 +302,11 @@ material_load :: proc(guid: Asset_GUID) -> (^Material, bool) {
 
 	path, path_ok := asset_db_get_path(uuid.Identifier(guid))
 	if !path_ok do return nil, false
-	data, read_err := os.read_entire_file(path, context.temp_allocator)
+	data, read_err := vfs_read_entire_file(path, context.temp_allocator)
 	if read_err != nil do return nil, false
 
-	mat, parse_ok := _material_parse(data)
+	alloc := material_cache.allocator if material_cache.allocator.procedure != nil else runtime.default_allocator()
+	mat, parse_ok := _material_parse(data, alloc)
 	if !parse_ok do return nil, false
 	material_cache[guid] = mat
 	return &material_cache[guid], true
@@ -265,7 +314,8 @@ material_load :: proc(guid: Asset_GUID) -> (^Material, bool) {
 
 material_unload :: proc(guid: Asset_GUID) {
 	if mat, ok := &material_cache[guid]; ok {
-		cleanup_Material(mat)
+		alloc := material_cache.allocator if material_cache.allocator.procedure != nil else runtime.default_allocator()
+		_material_destroy_with(mat, alloc)
 		delete_key(&material_cache, guid)
 	}
 }
@@ -275,11 +325,12 @@ material_unload :: proc(guid: Asset_GUID) {
 // and may free it; skipped when the cache already matches (per-frame call).
 material_preview :: proc(guid: Asset_GUID, mat: Material) {
 	if !_material_cache_ready do return
+	alloc := material_cache.allocator if material_cache.allocator.procedure != nil else runtime.default_allocator()
 	if existing, ok := &material_cache[guid]; ok {
 		if _material_equal(existing^, mat) do return
-		cleanup_Material(existing)
+		_material_destroy_with(existing, alloc)
 	}
-	material_cache[guid] = _material_clone(mat)
+	material_cache[guid] = _material_clone(mat, alloc)
 }
 
 // Cache invalidation for external file changes, called from asset_db_refresh
@@ -291,35 +342,40 @@ material_path_changed :: proc(path: string) {
 	}
 }
 
-// Frees what a material owns and leaves it zeroed (docs/Components.md,
-// "Lifecycle procs").
-cleanup_Material :: proc(mat: ^Material) {
+_material_destroy_with :: proc(mat: ^Material, alloc := context.allocator) {
 	for &prop in mat.properties {
-		delete(prop.name)
+		delete(prop.name, alloc)
 	}
 	delete(mat.properties)
 	for &tex in mat.textures {
-		delete(tex.name)
+		delete(tex.name, alloc)
 	}
 	delete(mat.textures)
 	mat^ = {}
 }
 
-_material_clone :: proc(mat: Material) -> Material {
+// Frees what a material owns and leaves it zeroed (docs/Components.md,
+// "Lifecycle procs").
+cleanup_Material :: proc(mat: ^Material) {
+	_material_destroy_with(mat, context.allocator)
+}
+
+_material_clone :: proc(mat: Material, alloc := context.allocator) -> Material {
 	cloned := mat
-	cloned.properties = make([dynamic]Material_Property, 0, len(mat.properties))
+	cloned.properties = make([dynamic]Material_Property, 0, len(mat.properties), alloc)
 	for prop in mat.properties {
-		append(&cloned.properties, Material_Property{name = strings.clone(prop.name), value = prop.value})
+		append(&cloned.properties, Material_Property{name = strings.clone(prop.name, alloc), value = prop.value})
 	}
-	cloned.textures = make([dynamic]Material_Texture, 0, len(mat.textures))
+	cloned.textures = make([dynamic]Material_Texture, 0, len(mat.textures), alloc)
 	for tex in mat.textures {
-		append(&cloned.textures, Material_Texture{name = strings.clone(tex.name), texture = tex.texture})
+		append(&cloned.textures, Material_Texture{name = strings.clone(tex.name, alloc), texture = tex.texture})
 	}
 	return cloned
 }
 
 _material_equal :: proc(a, b: Material) -> bool {
 	if a.shader != b.shader || a.custom_shader != b.custom_shader || a.texture != b.texture || a.color != b.color do return false
+	if a.double_sided != b.double_sided || a.emission_color != b.emission_color || a.emission_intensity != b.emission_intensity do return false
 	if len(a.properties) != len(b.properties) do return false
 	for prop, i in a.properties {
 		if prop.name != b.properties[i].name || prop.value != b.properties[i].value do return false
@@ -358,25 +414,45 @@ material_save_to_file :: proc(filepath: string, mat: Material) -> bool {
 		spaces     = 2,
 	}
 	raw_bytes, err := json.marshal(mat, opts, context.temp_allocator)
-	if err != nil || len(raw_bytes) < 4 do return false
+	if err != nil || len(raw_bytes) < 2 do return false
+	data_bytes := json_canonicalize_floats(raw_bytes, context.temp_allocator)
 	b := strings.builder_make(context.temp_allocator)
-	strings.write_string(&b, "{\n  \"__type_guid\": \"4d201ba5-2097-48bb-abd3-1a79e4f6f6f4\",\n  ")
-	strings.write_bytes(&b, raw_bytes[4:])
+	strings.write_string(&b, "{\n  \"__type_guid\": \"4d201ba5-2097-48bb-abd3-1a79e4f6f6f4\"")
+	brace_idx := -1
+	for bi := 0; bi < len(data_bytes); bi += 1 {
+		if data_bytes[bi] == '{' {
+			brace_idx = bi
+			break
+		}
+	}
+	tail := ""
+	if brace_idx >= 0 {
+		after_brace := strings.trim_left_space(string(data_bytes[brace_idx + 1:]))
+		if len(after_brace) > 0 && after_brace != "}" {
+			tail = after_brace
+		}
+	}
+	if tail != "" {
+		strings.write_string(&b, ",\n  ")
+		strings.write_string(&b, tail)
+	} else {
+		strings.write_string(&b, "\n}")
+	}
 	full_str := strings.to_string(b)
 	return os.write_entire_file(filepath, transmute([]byte)full_str) == nil
 }
 
 // The serializer writes {"__type_guid": ..., fields...}; unmarshal ignores
 // the unknown key. Fields absent from the file keep the defaults set here.
-// Allocates with context.allocator (properties live in the cache).
-_material_parse :: proc(data: []byte) -> (Material, bool) {
+_material_parse :: proc(data: []byte, alloc := context.allocator) -> (Material, bool) {
 	// The same defaults as reset_Material, for a hand-written file that
 	// leaves a field out.
-	mat := Material{shader = .Lit, color = {1, 1, 1, 1}}
+	mat := Material{shader = .Lit, color = {1, 1, 1, 1}, emission_color = {1, 1, 1}}
 	use_data, _ := material_sanitize_legacy_json(data, context.temp_allocator)
-	if json.unmarshal(use_data, &mat, .JSON, context.allocator) != nil {
-		cleanup_Material(&mat)
+	if json.unmarshal(use_data, &mat, .JSON, alloc) != nil {
+		_material_destroy_with(&mat, alloc)
 		return {}, false
 	}
+	on_validate_Material(&mat)
 	return mat, true
 }

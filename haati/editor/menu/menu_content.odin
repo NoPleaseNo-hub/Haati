@@ -37,8 +37,6 @@ quit_requested := false
 show_scene := true
 show_scene_2d := true
 show_game := true
-show_inspector := false
-show_project_inspector := false
 show_console := true
 show_output := true
 show_history := false
@@ -59,8 +57,6 @@ view_show_flag :: proc(title: cstring) -> ^bool {
 	case icons.TITLE_SCENE, icons.ICON_MD_LANDSCAPE + " Scene3D *###Scene": return &show_scene
 	case icons.TITLE_SCENE_2D:          return &show_scene_2d
 	case icons.TITLE_GAME:              return &show_game
-	case icons.TITLE_INSPECTOR:         return &show_inspector
-	case icons.TITLE_PROJECT_INSPECTOR: return &show_project_inspector
 	case icons.TITLE_CONSOLE:           return &show_console
 	case icons.TITLE_OUTPUT:            return &show_output
 	case icons.TITLE_HISTORY:           return &show_history
@@ -88,9 +84,6 @@ window_menu_hierarchy :: proc() { wnd.open("void_hierarchy") }
 
 @(menu_item={path="Window/General/Project", order=5, shortcut="Ctrl+5"})
 window_menu_project :: proc() { wnd.open("void_file_explorer") }
-
-@(menu_item={path="Window/General/Project Inspector", order=6, shortcut="Ctrl+Alt+5"})
-window_menu_project_inspector :: proc() { _open_window(&show_project_inspector, icons.TITLE_PROJECT_INSPECTOR) }
 
 @(menu_item={path="Window/General/Console", order=7, shortcut="Ctrl+Shift+C"})
 window_menu_console :: proc() { _open_window(&show_console, icons.TITLE_CONSOLE) }

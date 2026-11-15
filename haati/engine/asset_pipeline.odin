@@ -96,10 +96,12 @@ _catalog_settings_set :: proc(guid: uuid.Identifier, blob: string) {
 // --- Artifact index (library/artifact_db.json) --------------------------------
 
 _Artifact_Entry :: struct {
-    artifact: string, // 32-hex content key (owned)
-    mtime:    i64,    // source stamp at import
-    size:     i64,
-    settings: string, // 16-hex settings hash (owned)
+    artifact:   string, // 32-hex content key (owned)
+    mtime:      i64,    // source stamp at import
+    size:       i64,
+    meta_mtime: i64,    // .meta stamp at import (zero-IO warm-boot fast path)
+    meta_size:  i64,
+    settings:   string, // 16-hex settings hash (owned)
 }
 
 @(private = "file") _artifact_index: map[uuid.Identifier]_Artifact_Entry
@@ -121,12 +123,14 @@ _artifact_index_ensure :: proc() {
     if json.unmarshal(data, &raw, allocator = context.temp_allocator) != nil do return
     for guid_str, e in raw {
         guid, perr := uuid.read(guid_str)
-        if perr != nil do continue
+        if perr != nil || len(e.artifact) < 2 do continue
         _artifact_index[guid] = _Artifact_Entry{
-            artifact = strings.clone(e.artifact),
-            mtime    = e.mtime,
-            size     = e.size,
-            settings = strings.clone(e.settings),
+            artifact   = strings.clone(e.artifact),
+            mtime      = e.mtime,
+            size       = e.size,
+            meta_mtime = e.meta_mtime,
+            meta_size  = e.meta_size,
+            settings   = strings.clone(e.settings),
         }
     }
 }
@@ -143,17 +147,19 @@ _artifact_index_batch_set :: proc(on: bool) {
     _artifact_index_batch = on
 }
 
-_artifact_index_set :: proc(guid: uuid.Identifier, key: string, mtime, size: i64, settings_hex: string) {
+_artifact_index_set :: proc(guid: uuid.Identifier, key: string, mtime, size: i64, settings_hex: string, meta_mtime: i64 = 0, meta_size: i64 = 0) {
     context.allocator = runtime.default_allocator()
     if old, has := _artifact_index[guid]; has {
         delete(old.artifact)
         delete(old.settings)
     }
     _artifact_index[guid] = _Artifact_Entry{
-        artifact = strings.clone(key),
-        mtime    = mtime,
-        size     = size,
-        settings = strings.clone(settings_hex),
+        artifact   = strings.clone(key),
+        mtime      = mtime,
+        size       = size,
+        meta_mtime = meta_mtime,
+        meta_size  = meta_size,
+        settings   = strings.clone(settings_hex),
     }
     _artifact_index_dirty = true
 }
@@ -227,6 +233,9 @@ _catalog_pipeline_reset :: proc() {
 
 // "library/artifacts/<first 2 hex>/<key>.bin" — Unity's fan-out layout.
 _artifact_key_path :: proc(key: string, allocator := context.allocator) -> string {
+    if len(key) < 2 {
+        return strings.clone("", allocator)
+    }
     return fmt.aprintf("%s/%s/%s.bin", _artifact_dir, key[:2], key, allocator = allocator)
 }
 
@@ -327,7 +336,7 @@ _artifact_index_seed :: proc(guid: uuid.Identifier, key: string) {
 // Public resolve for tooling (thumbnail/preview caches). Temp-allocated path.
 asset_pipeline_artifact_path :: proc(guid: Asset_GUID) -> (path: string, ok: bool) {
     _artifact_index_ensure()
-    if e, has := _artifact_index[uuid.Identifier(guid)]; has {
+    if e, has := _artifact_index[uuid.Identifier(guid)]; has && len(e.artifact) >= 2 {
         return _artifact_key_path(e.artifact, context.temp_allocator), true
     }
     return "", false
@@ -343,6 +352,10 @@ _reimport_hooks: [dynamic]Reimport_Hook
 asset_pipeline_add_reimport_hook :: proc(hook: Reimport_Hook) {
     // Registry state never borrows the caller's allocator (same rule as
     // component_register — tests hand out scoped tracking allocators).
+    if hook == nil do return
+    for existing in _reimport_hooks {
+        if existing == hook do return
+    }
     context.allocator = runtime.default_allocator()
     append(&_reimport_hooks, hook)
 }

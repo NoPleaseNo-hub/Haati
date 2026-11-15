@@ -45,22 +45,6 @@ _AXES_2D :: handles.Axes{.X, .Y}
 @(private = "file")
 _edit: undo.Edit_Session
 
-@(private = "file")
-_edit_begin :: proc(targets: []undo.Edit_Target, label: string) {
-	_edit = undo.edit_session_begin(targets, label)
-	handles.on_drag_lost(proc(_: rawptr) { undo.edit_session_end(&_edit) })
-}
-
-@(private = "file")
-_unscale :: proc(field: ^[2]f32, now, before: [3]f32, s: [2]f32) {
-	for i in 0 ..< 2 do _unscale1(&field[i], now[i], before[i], s[i])
-}
-
-@(private = "file")
-_unscale1 :: proc(field: ^f32, now, before, s: f32) {
-	if now != before && s > 1e-6 do field^ = now / s
-}
-
 // A box-shaped collider (box, capsule): its size and offset as box bounds.
 @(private = "file")
 _box_handles :: proc(c: ^engine.CompData, size_field, offset_field: ^[2]f32, size2, offset2, s: [2]f32, label: string) {
@@ -76,11 +60,11 @@ _box_handles :: proc(c: ^engine.CompData, size_field, offset_field: ^[2]f32, siz
 			undo.edit_target_pooled(h, size_field, typeid_of([2]f32)),
 			undo.edit_target_pooled(h, offset_field, typeid_of([2]f32)),
 		}
-		_edit_begin(targets[:], label)
+		handles.begin_drag_edit(&_edit, targets[:], label)
 	}
 	if d.dragging || d.released {
-		_unscale(size_field, size, size0, s)
-		_unscale(offset_field, center, center0, s)
+		handles.unscale_vec2(size_field, size, size0, s)
+		handles.unscale_vec2(offset_field, center, center0, s)
 	}
 	if d.released do undo.edit_session_end(&_edit)
 }
@@ -118,11 +102,11 @@ circle_collider_handles :: proc(c: ^physics2d.CircleCollider2D, ctx: handles.Giz
 			undo.edit_target_pooled(h, &c.radius, typeid_of(f32)),
 			undo.edit_target_pooled(h, &c.offset, typeid_of([2]f32)),
 		}
-		_edit_begin(targets[:], "Edit Circle Collider 2D")
+		handles.begin_drag_edit(&_edit, targets[:], "Edit Circle Collider 2D")
 	}
 	if d.dragging || d.released {
-		_unscale1(&c.radius, radius, radius0, max(s.x, s.y))
-		_unscale(&c.offset, center, center0, s)
+		handles.unscale_scalar(&c.radius, radius, radius0, max(s.x, s.y))
+		handles.unscale_vec2(&c.offset, center, center0, s)
 	}
 	if d.released do undo.edit_session_end(&_edit)
 }

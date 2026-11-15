@@ -18,7 +18,6 @@ import "haati:engine"
 import "core:encoding/uuid"
 import "core:math"
 import "core:math/linalg"
-import "core:os"
 import "core:strings"
 
 // Once clamps at length and stops; Loop wraps.
@@ -148,7 +147,7 @@ animation_package_init :: proc() {
 }
 
 animation_clip_cache_init :: proc() {
-	animation_clip_cache = make(map[engine.Asset_GUID]AnimationClip)
+	animation_clip_cache = make(map[engine.Asset_GUID]AnimationClip, runtime.default_allocator())
 	_animation_clip_cache_ready = true
 }
 
@@ -176,7 +175,9 @@ animation_clip_load :: proc(guid: engine.Asset_GUID) -> (^AnimationClip, bool) {
 	// then posed from freed memory and froze. The Playable Graph window builds
 	// the authored shape into temp memory, which is how it got reached.
 	// os.read_entire_file below asks for temp explicitly and is unaffected.
+	prev_alloc := context.allocator
 	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev_alloc
 
 	// The ARTIFACT, not the source: the importer bakes the .meta's settings
 	// into it, so the runtime never opens a meta.
@@ -211,7 +212,7 @@ animation_clip_load :: proc(guid: engine.Asset_GUID) -> (^AnimationClip, bool) {
 			if !path_ok do return nil, false
 		}
 	}
-	data, read_err := os.read_entire_file(path, context.temp_allocator)
+	data, read_err := engine.vfs_read_entire_file(path, context.temp_allocator)
 	if read_err != nil do return nil, false
 
 	clip: AnimationClip
@@ -238,7 +239,9 @@ animation_clip_preview :: proc(guid: engine.Asset_GUID, clip: AnimationClip) {
 	if !_animation_clip_cache_ready do return
 	// The deep copy below becomes a cache entry, so it owns its memory for the
 	// same reason animation_clip_load's does.
+	prev_alloc := context.allocator
 	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev_alloc
 	// Settings are BAKED, so the edited document does not carry them: it holds
 	// length and channels, and wrap, frame rate and cycle offset came from the
 	// .meta at import. Keep the imported values rather than taking the
@@ -304,17 +307,19 @@ animation_clip_reimported :: proc(guid: engine.Asset_GUID) {
 // Frees what a clip owns and leaves it zeroed (docs/Components.md,
 // "Lifecycle procs").
 cleanup_AnimationClip :: proc(clip: ^AnimationClip) {
+	ch_alloc := clip.channels.allocator if clip.channels.allocator.procedure != nil else context.allocator
 	for &ch in clip.channels {
-		delete(ch.target)
-		delete(ch.component)
-		delete(ch.field)
+		delete(ch.target, ch_alloc)
+		delete(ch.component, ch_alloc)
+		delete(ch.field, ch_alloc)
 		delete(ch.times)
 		delete(ch.values)
 	}
 	delete(clip.channels)
+	ev_alloc := clip.events.allocator if clip.events.allocator.procedure != nil else context.allocator
 	for &ev in clip.events {
-		delete(ev.name)
-		delete(ev.target)
+		delete(ev.name, ev_alloc)
+		delete(ev.target, ev_alloc)
 	}
 	delete(clip.events)
 	clip^ = {}

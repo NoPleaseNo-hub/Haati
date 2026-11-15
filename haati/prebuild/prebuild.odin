@@ -81,19 +81,6 @@ _join :: proc(elems: []string, allocator := context.allocator) -> string {
 	return strings.join(elems, "/", allocator)
 }
 
-_dir_has_odin :: proc(dir: string) -> bool {
-	handle, err := os.open(dir)
-	if err != nil do return false
-	defer os.close(handle)
-	entries, rerr := os.read_dir(handle, -1, context.temp_allocator)
-	if rerr != nil do return false
-	defer os.file_info_slice_delete(entries, context.temp_allocator)
-	for entry in entries {
-		if entry.type != .Directory && strings.has_suffix(entry.name, ".odin") do return true
-	}
-	return false
-}
-
 // Installed package folder names, sorted (deterministic regardless of
 // readdir order). Names are cloned — the caller owns them.
 _package_dir_names :: proc(names: ^[dynamic]string) {
@@ -155,7 +142,7 @@ _package_gens_refresh :: proc() -> (changed: bool) {
 	strings.write_string(&b, "// imports pull in their @(init) system registrations.\n\n")
 	for name in names {
 		gen_dir := _join({PACKAGES_DIR, name, "gen"}, context.temp_allocator)
-		if !_dir_has_odin(gen_dir) do continue
+		if !gen_facts.dir_has_odin_files(gen_dir) do continue
 		fmt.sbprintf(&b, "import _ \"haati:packages/%s/gen\"\n", name)
 	}
 
@@ -266,7 +253,7 @@ _discover :: proc(list: ^[dynamic]string, dir: string) {
 			}
 		}
 	}
-	if _dir_has_odin(dir) do append(list, dir)
+	if gen_facts.dir_has_odin_files(dir) do append(list, dir)
 	handle, err := os.open(dir)
 	if err != nil do return
 	defer os.close(handle)

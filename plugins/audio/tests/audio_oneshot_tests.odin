@@ -80,3 +80,68 @@ test_one_shot_lifecycle :: proc(t: ^testing.T) {
 	audio.audio_stop(src)
 	testing.expect(t, !audio.audio_is_playing(src), "hard stop is immediate")
 }
+
+@(test)
+test_one_shot_pool_cap_stealing_and_shutdown :: proc(t: ^testing.T) {
+	tc := new(common.TestCtx)
+	defer free(tc)
+	common.setup(tc)
+	audio_editor.audio_importers_init()
+	context.user_ptr = &tc.uc
+	defer common.teardown(tc)
+	audio.mixer_init_headless()
+
+	src_dir :: "haati/tests/fixtures/_audio_cap_tmp"
+	wav :: src_dir + "/cap.wav"
+	os.make_directory(src_dir)
+	testing.expect(t, _write_test_wav(wav))
+	defer {
+		audio.clip_cache_shutdown()
+		os.remove(wav)
+		os.remove(wav + ".meta")
+		os.remove(src_dir)
+		_remove_tree("library")
+	}
+
+	asset_pipeline.asset_pipeline_init()
+	asset_pipeline.asset_pipeline_ensure_import_meta(wav)
+	Meta :: struct { guid: string }
+	meta: Meta
+	meta_data, _ := os.read_entire_file(wav + ".meta", context.temp_allocator)
+	testing.expect(t, json.unmarshal(meta_data, &meta, allocator = context.temp_allocator) == nil)
+	raw_guid, _ := uuid.read(meta.guid)
+	guid := engine.Asset_GUID(raw_guid)
+	testing.expect(t, asset_pipeline.asset_pipeline_import_asset(wav))
+
+	// Play and finish 10 one-shots to populate _free_one_shot_tracks
+	for _ in 0 ..< 10 {
+		testing.expect(t, audio.play_clip(guid, 0.5), "pool seed one-shot should start")
+	}
+	mixer := audio._audio_state.mixer
+	buf: [16384]u8
+	for _ in 0 ..< 200 {
+		if mix.Generate(mixer, raw_data(buf[:]), i32(len(buf))) <= 0 do break
+		still := false
+		for shot in audio._one_shots {
+			if mix.TrackPlaying(shot.track) do still = true
+		}
+		if !still do break
+	}
+	audio.audio_update(1.0 / 60.0)
+	testing.expect_value(t, len(audio._one_shots), 0)
+	testing.expect_value(t, len(audio._free_one_shot_tracks), 10)
+
+	// Fire 100 rapid one-shots with ascending gain so quietest voices (0.01..0.36) get stolen at cap=64
+	for i in 0 ..< 100 {
+		vol := f32(i + 1) * 0.01
+		testing.expect(t, audio.play_clip(guid, vol), "rapid one-shot should start or steal")
+	}
+	testing.expect(t, len(audio._one_shots) == audio.MAX_ONE_SHOT_VOICES, "active one-shots must cap at MAX_ONE_SHOT_VOICES (64)")
+	for shot in audio._one_shots {
+		testing.expectf(t, shot.volume >= 0.365, "quietest one-shots should have been stolen, kept vol=%.2f", shot.volume)
+	}
+
+	audio.clip_cache_shutdown()
+	testing.expect_value(t, len(audio._one_shots), 0)
+	testing.expect_value(t, len(audio._free_one_shot_tracks), 0)
+}

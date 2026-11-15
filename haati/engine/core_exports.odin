@@ -57,6 +57,8 @@ type_on_validate_by_typeid   :: core.type_on_validate_by_typeid
 unmarshal_over_reset         :: core.unmarshal_over_reset
 unmarshal_over_reset_object  :: core.unmarshal_over_reset_object
 unmarshal_value_over_reset   :: core.unmarshal_value_over_reset
+Value_Unmarshaler            :: core.Value_Unmarshaler
+register_value_unmarshaler   :: core.register_value_unmarshaler
 generate_type_info           :: core.generate_type_info
 typeid_to_u16                :: core.typeid_to_u16
 
@@ -130,3 +132,8 @@ job_system_reset_telemetry :: core.job_system_reset_telemetry
 job_dispatch               :: core.job_dispatch
 job_wait                   :: core.job_wait
 job_parallel_for           :: core.job_parallel_for
+
+// Bounded fixed C-string buffer helpers (`buf[:]`).
+buf_str                    :: core.buf_str
+buf_set                    :: core.buf_set
+buf_clear                  :: core.buf_clear

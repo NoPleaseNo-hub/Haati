@@ -133,20 +133,37 @@ test_hot_cartridge_dll_load_and_invoke :: proc(t: ^testing.T) {
 	testing.expect(t, engine.hot_proc_exists("hot_spring_vec3_ref"), "expected static `@(hot_proc)` `hot_spring_vec3_ref` to be registered")
 	testing.expect(t, engine.hot_proc_exists("mhgraph_hover_oscillator"), "expected transpiled `mhgraph_hover_oscillator` to be registered")
 
-	// Load the real compiled C-ABI `hot_cartridge_latest.dll` (copied to an isolated test DLL so Windows never locks `latest`)!
+	// Compile the generated C-ABI `builds/hot_cartridge_src` into an isolated test DLL
+	// so `mh test` never depends on or clobbers `builds/hot_cartridge_latest.dll`!
 	dll_ext :: ".dll" when ODIN_OS == .Windows else (".dylib" when ODIN_OS == .Darwin else ".so")
 	repo_root := engine.resolve_repo_root(context.temp_allocator)
-	src_dll, _ := filepath.join({repo_root, "builds", "hot_cartridge_latest" + dll_ext}, context.temp_allocator)
-	test_dll, _ := filepath.join({repo_root, "builds", fmt.tprintf("hot_cartridge_test_%d%s", os.get_pid(), dll_ext)}, context.temp_allocator)
-	defer _ = os.remove(test_dll)
+	odin_exe  := engine.resolve_odin_binary(context.temp_allocator)
+	test_stem, _ := filepath.join({repo_root, "builds", fmt.tprintf("hot_cartridge_test_%d", os.get_pid())}, context.temp_allocator)
+	test_dll := strings.concatenate({test_stem, dll_ext}, context.temp_allocator)
+	defer {
+		_ = os.remove(test_dll)
+		_ = os.remove(strings.concatenate({test_stem, ".lib"}, context.temp_allocator))
+		_ = os.remove(strings.concatenate({test_stem, ".exp"}, context.temp_allocator))
+		_ = os.remove(strings.concatenate({test_stem, ".pdb"}, context.temp_allocator))
+	}
 
-	if os.exists(src_dll) {
-		if raw_dll, rerr := os.read_entire_file(src_dll, context.temp_allocator); rerr == nil {
-			_ = os.write_entire_file(test_dll, raw_dll)
-			swapped, load_ok := engine.hot_cartridge_load_dll(test_dll)
-			testing.expect(t, load_ok, "expected `hot_cartridge_load_dll` to load compiled cartridge DLL cleanly")
-			testing.expect(t, swapped >= 3, "expected at least 3 `@(hot_proc)` symbols in cartridge DLL")
-		}
+	bstate, _, bstderr, berr := os.process_exec({
+		working_dir = repo_root,
+		command = {
+			odin_exe, "build", "builds/hot_cartridge_src",
+			"-build-mode:dll",
+			"-ignore-unknown-attributes",
+			fmt.tprintf("-collection:haati=%s/haati", repo_root),
+			fmt.tprintf("-collection:moonhug=%s/haati", repo_root),
+			"-vet-unused",
+			fmt.tprintf("-out:%s", test_dll),
+		},
+	}, context.temp_allocator)
+	testing.expectf(t, berr == nil && bstate.exit_code == 0, "expected isolated test cartridge build to succeed, got err=%v exit=%d:\n%s", berr, bstate.exit_code, string(bstderr))
+	if berr == nil && bstate.exit_code == 0 {
+		swapped, load_ok := engine.hot_cartridge_load_dll(test_dll)
+		testing.expect(t, load_ok, "expected `hot_cartridge_load_dll` to load compiled cartridge DLL cleanly")
+		testing.expect(t, swapped >= 3, "expected at least 3 `@(hot_proc)` symbols in cartridge DLL")
 	}
 
 	// Invoke `hot_spring_vec3_ref` across the C-ABI boundary mutating `cur_vec` By-Reference (`◆ ^[3]f32`)!

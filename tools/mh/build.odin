@@ -22,15 +22,20 @@ WIN_ICON_RC :: "haati/editor/haati.rc"
 // (tools_cache.odin). Prebuild also depends on the package generators it
 // compiles in, so their gen/ folders count as its sources.
 prebuild :: proc() -> bool {
+	return prebuild_for_project(resolve_target_project_dir(g_cli_args))
+}
+
+prebuild_for_project :: proc(compiled_project_dir: string) -> bool {
 	_ = ensure_package_links()
 	prune, pok := tool_bin("prune_package_gens", "haati/prebuild/prune_package_gens", {})
 	if !pok || !step("prune", prune) do return false
+	env := env_with_compiled_project(compiled_project_dir)
 	// Exit 2: the set of package generators changed and the prebuild rewrote
 	// the file that imports them, so it is built again and run once more.
 	for attempt in 0 ..< 2 {
 		gen, gok := tool_bin("prebuild", "haati/prebuild", package_gen_dirs(), COLLECTION_HAATI, COLLECTION_COMPAT)
 		if !gok do return false
-		code := run(gen)
+		code := run_env(env, gen)
 		if code == 0 do return true
 		if code == 2 && attempt == 0 do continue
 		fmt.eprintfln("haati: prebuild failed (exit %d)", code)
@@ -93,14 +98,22 @@ build_root_launcher :: proc() -> bool {
 
 // build_editor: generate, shaders, compile. `out` is named Haati so the OS
 // displays Haati in window/process switchers.
-build_editor :: proc(debug: bool, out_bin: string = EDITOR_BIN, want_console: bool = false) -> bool {
-	if !prebuild() do return false
+build_editor :: proc(debug: bool, out_bin: string = EDITOR_BIN, want_console: bool = false, args_for_project: []string = nil) -> bool {
+	cli := args_for_project if len(args_for_project) > 0 else g_cli_args
+	mount := mount_project_for_compile(cli)
+	defer unmount_project_for_compile(&mount)
+
+	if !prebuild_for_project(mount.compiled_project_dir) do return false
 	if !shaders_if_available() do return false
 	if !build_overwatch(allow_skip_if_locked = true) do return false
 	os.make_directory_all("builds")
 	sync_runtime_dlls("builds", false)
 	cmd := make([dynamic]string, context.temp_allocator)
-	append(&cmd, odin_bin(), "build", "haati/editor", IGNORE_ATTRS, COLLECTION_HAATI, COLLECTION_COMPAT, VET)
+	append(&cmd, odin_bin(), "build", "haati/editor", IGNORE_ATTRS, COLLECTION_HAATI, COLLECTION_COMPAT)
+	if mount.collection_flag != "" {
+		append(&cmd, mount.collection_flag)
+	}
+	append(&cmd, VET)
 	if debug do append(&cmd, "-debug")
 	when ODIN_OS == .Windows {
 		if !want_console {
@@ -119,11 +132,11 @@ build_editor :: proc(debug: bool, out_bin: string = EDITOR_BIN, want_console: bo
 // Build then run as a CHILD process, not `odin run`: `odin run` keeps the
 // ~1GB compiler resident for the whole life of the editor just to wait on it.
 cmd_run :: proc(args: []string) -> int {
-	return launch_editor("run")
+	return launch_editor("run", !has_flag(args, "--release"))
 }
 
 cmd_debug :: proc(args: []string) -> int {
-	return launch_editor("debug")
+	return launch_editor("debug", true)
 }
 
 // The file that tells a running editor its replacement is built. Lives under
@@ -139,7 +152,7 @@ RELAUNCH_MARKER :: "builds/relaunch_ready"
 // relaunch compiles to RELAUNCH_STAGE_BIN first. On a successful build this
 // writes RELAUNCH_MARKER, waits for the old editor to exit, swaps the staged
 // binary into EDITOR_BIN, removes the marker and launches the new one.
-launch_editor :: proc(mode: string) -> int {
+launch_editor :: proc(mode: string, with_debug: bool = true) -> int {
 	pid_str, relaunching := os.lookup_env("MH_RELAUNCH_PID", context.temp_allocator)
 	seq_str, _ := os.lookup_env("MH_RELAUNCH_SEQ", context.temp_allocator)
 	shm_name, _ := os.lookup_env("MH_SHM_NAME", context.temp_allocator)
@@ -151,7 +164,7 @@ launch_editor :: proc(mode: string) -> int {
 	}
 	want_console := false
 	if v, ok := os.lookup_env("MH_CONSOLE", context.temp_allocator); ok && v == "1" do want_console = true
-	if !build_editor(mode == "debug", target_bin, want_console) do return 1
+	if !build_editor(with_debug, target_bin, want_console) do return 1
 
 	pinned_shm: SHM_Pin = nil
 	defer shm_bridge_join()
@@ -162,8 +175,8 @@ launch_editor :: proc(mode: string) -> int {
 			fmt.printfln("mh: built, waiting for editor %d to exit", pid)
 			// Poll instead of waiting: the old editor is not our child.
 			// Also pin the OS RAM shared-memory snapshot (`MH_SHM_NAME`) before the old process exits!
-			deadline := time.now()._nsec + i64(15 * time.Second)
-			for process_alive(pid) && time.now()._nsec < deadline {
+			t0 := time.tick_now()
+			for process_alive(pid) && time.tick_since(t0) < 15 * time.Second {
 				if pinned_shm == nil && shm_name != "" {
 					pinned_shm = shm_bridge_try_pin(shm_name)
 				}
@@ -211,8 +224,15 @@ launch_editor :: proc(mode: string) -> int {
 			append(&env, fmt.tprintf("MH_SHM_HANDOFF=%s", shm_name))
 			shm_bridge_release_when_consumed(pinned_shm)
 		}
+		launch_cmd := make([dynamic]string, context.temp_allocator)
+		append(&launch_cmd, launch_bin)
+		if proj_arg := flag_value(g_cli_args, "--project"); proj_arg != "" {
+			append(&launch_cmd, fmt.tprintf("--project=%s", proj_arg))
+		} else if has_flag(g_cli_args, "--project-hub") {
+			append(&launch_cmd, "--project-hub")
+		}
 		// Spawn replacement editor detached so `mh_relaunch` exits as soon as `shm_bridge_join()` finishes!
-		return 0 if spawn_detached_env(env[:], launch_bin) else 1
+		return 0 if spawn_detached_env(env[:], ..launch_cmd[:]) else 1
 	}
 
 	env := make([dynamic]string, context.temp_allocator)
@@ -228,7 +248,14 @@ launch_editor :: proc(mode: string) -> int {
 		append(&env, fmt.tprintf("MH_SHM_HANDOFF=%s", shm_name))
 		shm_bridge_release_when_consumed(pinned_shm)
 	}
-	return run_env(env[:], target_bin)
+	launch_cmd := make([dynamic]string, context.temp_allocator)
+	append(&launch_cmd, target_bin)
+	if proj_arg := flag_value(g_cli_args, "--project"); proj_arg != "" {
+		append(&launch_cmd, fmt.tprintf("--project=%s", proj_arg))
+	} else if has_flag(g_cli_args, "--project-hub") {
+		append(&launch_cmd, "--project-hub")
+	}
+	return run_env(env[:], ..launch_cmd[:])
 }
 
 cmd_build :: proc(args: []string) -> int {
@@ -237,7 +264,7 @@ cmd_build :: proc(args: []string) -> int {
 		out_bin = "builds/Haati_staged" + EXE
 		fmt.printfln("haati: %s is currently open/locked — staging build to %s", EDITOR_BIN, out_bin)
 	}
-	if !build_editor(has_flag(args, "--debug"), out_bin, has_flag(args, "--console")) do return 1
+	if !build_editor(!has_flag(args, "--release"), out_bin, has_flag(args, "--console"), args) do return 1
 	fmt.printfln("haati: built %s", out_bin)
 	return 0
 }
@@ -248,15 +275,21 @@ cmd_build :: proc(args: []string) -> int {
 // `--pkg=<dir>` to check an isolated package (`-no-entry-point`), and `--json`
 // to emit machine-readable `-json-errors` for Antigravity and the in-engine studio.
 cmd_check :: proc(args: []string) -> int {
+	mount := mount_project_for_compile(args)
+	defer unmount_project_for_compile(&mount)
+
 	if !has_flag(args, "--fast") {
-		if !prebuild() do return 1
+		if !prebuild_for_project(mount.compiled_project_dir) do return 1
 	}
 	pkg := flag_value(args, "--pkg")
 	cmd := make([dynamic]string, context.temp_allocator)
 	if pkg == "" {
-		append(&cmd, odin_bin(), "check", "haati/editor", IGNORE_ATTRS, COLLECTION_HAATI, COLLECTION_COMPAT, VET)
+		append(&cmd, odin_bin(), "check", "haati/editor", IGNORE_ATTRS, COLLECTION_HAATI, COLLECTION_COMPAT)
+		if mount.collection_flag != "" do append(&cmd, mount.collection_flag)
+		append(&cmd, VET)
 	} else {
 		append(&cmd, odin_bin(), "check", pkg, "-no-entry-point", IGNORE_ATTRS, COLLECTION_HAATI, COLLECTION_COMPAT)
+		if mount.collection_flag != "" do append(&cmd, mount.collection_flag)
 	}
 	if has_flag(args, "--json") {
 		append(&cmd, "-json-errors")
@@ -266,9 +299,24 @@ cmd_check :: proc(args: []string) -> int {
 
 // Compiles the `typeid`-isolated C-ABI hot cartridge (`builds/hot_cartridge_src` -> `.dll`).
 // Pass `--fast` when no `@(hot_proc)` declarations were added/removed to skip prebuild (~130 ms).
-cmd_hot :: proc(args: []string) -> int {
+hot_build_internal :: proc(args: []string, manage_mount: bool = true) -> int {
+	mount: Compile_Project_Mount
+	if manage_mount {
+		mount = mount_project_for_compile(args)
+	} else {
+		proj_dir := resolve_target_project_dir(args)
+		if proj_dir != "" {
+			mount.project_dir = proj_dir
+			if dir_has_odin_files(proj_dir) {
+				mount.compiled_project_dir = proj_dir
+			}
+			mount.collection_flag = fmt.tprintf("-collection:project=%s", proj_dir)
+		}
+	}
+	defer if manage_mount do unmount_project_for_compile(&mount)
+
 	if !has_flag(args, "--fast") || !os.exists("builds/hot_cartridge_src/cartridge_generated.odin") {
-		if !prebuild() do return 1
+		if !prebuild_for_project(mount.compiled_project_dir) do return 1
 	}
 	os.make_directory_all("builds")
 	dll_ext :: ".dll" when ODIN_OS == .Windows else (".dylib" when ODIN_OS == .Darwin else ".so")
@@ -277,14 +325,26 @@ cmd_hot :: proc(args: []string) -> int {
 		out_path = fmt.tprintf("builds/hot_cartridge_latest%s", dll_ext)
 	}
 	cmd := make([dynamic]string, context.temp_allocator)
-	append(&cmd, odin_bin(), "build", "builds/hot_cartridge_src", "-build-mode:dll", IGNORE_ATTRS, COLLECTION_HAATI, COLLECTION_COMPAT, VET, fmt.tprintf("-out:%s", out_path))
+	append(&cmd, odin_bin(), "build", "builds/hot_cartridge_src", "-build-mode:dll", IGNORE_ATTRS, COLLECTION_HAATI, COLLECTION_COMPAT)
+	if mount.collection_flag != "" do append(&cmd, mount.collection_flag)
+	append(&cmd, VET)
+	if has_flag(args, "--release") {
+		append(&cmd, "-o:speed")
+	}
+	append(&cmd, fmt.tprintf("-out:%s", out_path))
 	if !step("hot cartridge build", ..cmd[:]) do return 1
 	fmt.printfln("haati: built %s", out_path)
 	return 0
 }
 
+cmd_hot :: proc(args: []string) -> int {
+	return hot_build_internal(args, manage_mount = true)
+}
+
 cmd_prebuild :: proc(args: []string) -> int {
-	return 0 if prebuild() else 1
+	mount := mount_project_for_compile(args)
+	defer unmount_project_for_compile(&mount)
+	return 0 if prebuild_for_project(mount.compiled_project_dir) else 1
 }
 
 // Gathers dependencies into each plugin's mh_plugin.json. The work lives
@@ -311,7 +371,10 @@ cmd_app :: proc(args: []string) -> int {
 // generated registrations, and a stale one fails the compile against renamed
 // types. Supports --pkg=<path> (default: haati/tests) and --name=<filter>.
 cmd_test :: proc(args: []string) -> int {
-	if !prebuild() do return 1
+	mount := mount_project_for_compile(args, explicit_only = true)
+	defer unmount_project_for_compile(&mount)
+
+	if !prebuild_for_project(mount.compiled_project_dir) do return 1
 	os.make_directory_all("builds")
 	sync_runtime_dlls("builds", false)
 	pkg := flag_value(args, "--pkg")
@@ -321,7 +384,9 @@ cmd_test :: proc(args: []string) -> int {
 	if pkg == "haati/tests" {
 		append(&cmd, "-all-packages")
 	}
-	append(&cmd, IGNORE_ATTRS, COLLECTION_HAATI, COLLECTION_COMPAT, VET, "-define:ODIN_TEST_THREADS=1", fmt.tprintf("-out:builds/test_runner%s", EXE))
+	append(&cmd, IGNORE_ATTRS, COLLECTION_HAATI, COLLECTION_COMPAT)
+	if mount.collection_flag != "" do append(&cmd, mount.collection_flag)
+	append(&cmd, VET, "-define:ODIN_TEST_THREADS=1", fmt.tprintf("-out:builds/test_runner%s", EXE))
 	if name := flag_value(args, "--name"); name != "" {
 		append(&cmd, fmt.tprintf("-define:ODIN_TEST_NAMES=%s", name))
 	}
@@ -342,6 +407,7 @@ cmd_mcp :: proc(args: []string) -> int {
 // and rebuild on the next run. builds/ itself is committed (a .gitkeep), so
 // the directory is emptied rather than removed.
 cmd_clean :: proc(args: []string) -> int {
+	_ = sweep_stale_compile_mount()
 	os.remove_all("builds")
 	os.make_directory_all("builds")
 	_ = os.write_entire_file("builds/.gitkeep", []u8{})

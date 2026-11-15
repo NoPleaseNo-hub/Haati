@@ -103,8 +103,7 @@ particle_shape_handles :: proc(ps: ^particles.ParticleSystem, ctx: handles.Gizmo
 			undo.edit_target_pooled(h, &ps.shape_angle, typeid_of(f32)),
 			undo.edit_target_pooled(h, &ps.shape_box, typeid_of([3]f32)),
 		}
-		_edit = undo.edit_session_begin(targets[:], "Edit Particle Shape")
-		handles.on_drag_lost(proc(_: rawptr) { undo.edit_session_end(&_edit) })
+		handles.begin_drag_edit(&_edit, targets[:], "Edit Particle Shape")
 	}
 	if d.dragging || d.released {
 		if r != ps.shape_radius do ps.shape_radius = r

@@ -17,7 +17,8 @@ struct main0_in
 fragment main0_out main0(main0_in in [[stage_in]], texture2d<float> tex [[texture(0)]], sampler texSmplr [[sampler(0)]])
 {
     main0_out out = {};
-    out.out_color = tex.sample(texSmplr, in.frag_uv) * in.frag_color;
+    float4 c = tex.sample(texSmplr, in.frag_uv) * in.frag_color;
+    out.out_color = float4(pow(fast::max(c.xyz, float3(0.0)), float3(2.2000000476837158203125)), c.w);
     return out;
 }
 

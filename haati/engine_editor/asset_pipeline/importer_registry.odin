@@ -77,6 +77,9 @@ _importer_registry_maps_init :: proc "contextless" () {
 importer_register :: proc(desc: Importer_Desc) {
 	// Process-global registry: never borrow the caller's allocator (tests hand
 	// out scoped tracking allocators that tear down afterwards).
+	if existing, ok := _importers[desc.name]; ok && existing.version == desc.version {
+		return
+	}
 	context.allocator = runtime.default_allocator()
 	_importers[desc.name] = desc
 	for ext in desc.extensions {
@@ -84,7 +87,7 @@ importer_register :: proc(desc: Importer_Desc) {
 	}
 }
 
-_TEXTURE_EXTS := []string{".png", ".jpg", ".jpeg", ".bmp"}
+_TEXTURE_EXTS := []string{".png", ".jpg", ".jpeg", ".bmp", ".dds"}
 _MESH_EXTS    := []string{".glb", ".gltf"}
 _SHADER_EXTS  := []string{".glsl"}
 

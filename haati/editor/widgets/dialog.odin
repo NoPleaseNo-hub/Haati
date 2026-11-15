@@ -18,12 +18,14 @@ package widgets
 import "base:runtime"
 import "core:strings"
 import im "haati:external/odin-imgui"
+import thm "haati:editor/theme"
 
 Dialog_Button :: struct {
 	label:      string,
 	action:     proc(), // nil: the button only closes the dialog
-	is_default: bool,               // Enter presses it, drawn highlighted
-	is_cancel:  bool,               // Escape and the close button press it
+	is_default: bool,   // Enter presses it, drawn highlighted
+	is_cancel:  bool,   // Escape and the close button press it
+	is_danger:  bool,   // Destructive confirm action (styled with theme status_error)
 }
 
 Dialog :: struct {
@@ -96,6 +98,35 @@ dialog_close :: proc() {
 	_dialog_wants_popup = false
 }
 
+// Computes the work-area center of the monitor under the mouse cursor,
+// falling back to the main viewport if no monitor rectangle matches.
+active_monitor_center :: proc() -> im.Vec2 {
+	mp := im.GetMousePos()
+	pio := im.GetPlatformIO()
+	if pio != nil && pio.Monitors.Size > 0 && pio.Monitors.Data != nil {
+		mons := ([^]im.PlatformMonitor)(pio.Monitors.Data)[:pio.Monitors.Size]
+		for m in mons {
+			if mp.x >= m.MainPos.x && mp.x < m.MainPos.x + m.MainSize.x &&
+			   mp.y >= m.MainPos.y && mp.y < m.MainPos.y + m.MainSize.y {
+				if m.WorkSize.x > 64 && m.WorkSize.y > 64 {
+					return m.WorkPos + m.WorkSize * 0.5
+				}
+				return m.MainPos + m.MainSize * 0.5
+			}
+		}
+	}
+	vp := im.GetMainViewport()
+	if vp.WorkSize.x > 64 && vp.WorkSize.y > 64 {
+		return vp.WorkPos + vp.WorkSize * 0.5
+	}
+	return vp.Pos + vp.Size * 0.5
+}
+
+// Positions the next ImGui window centered on the active monitor's work area.
+center_next_window_on_active_monitor :: proc(cond: im.Cond = .Appearing) {
+	im.SetNextWindowPos(active_monitor_center(), cond, im.Vec2{0.5, 0.5})
+}
+
 // Called once per frame from the main loop, outside every window.
 dialog_draw :: proc() {
 	if !_dialog_is_open && !im.IsPopupOpen(_DIALOG_ID) do return
@@ -107,8 +138,7 @@ dialog_draw :: proc() {
 	cancel := -1
 	for b, i in _dialog.buttons do if b.is_cancel { cancel = i; break }
 
-	vp := im.GetMainViewport()
-	im.SetNextWindowPos(vp.Pos + vp.Size * 0.5, .Appearing, im.Vec2{0.5, 0.5})
+	center_next_window_on_active_monitor(.Appearing)
 	title := strings.clone_to_cstring(strings.concatenate({_dialog.title, _DIALOG_ID}, context.temp_allocator), context.temp_allocator)
 	keep_open := true
 	// The close button shows only when a button means "cancel".
@@ -174,17 +204,29 @@ _dialog_draw_buttons :: proc() -> int {
 	row := w * n + style.ItemSpacing.x * max(n - 1, 0)
 	im.SetCursorPosX(im.GetCursorPosX() + max(im.GetContentRegionAvail().x - row, 0) * 0.5)
 
+	p  := thm.palette()
+	st := thm.studio_tokens()
 	chosen := -1
 	for b, i in _dialog.buttons {
 		if i > 0 do im.SameLine()
 		label := strings.clone_to_cstring(b.label, context.temp_allocator)
-		if b.is_default {
-			im.PushStyleColorImVec4(.Button, im.GetStyleColorVec4(.ButtonHovered)^)
-			im.PushStyleColorImVec4(.ButtonHovered, im.GetStyleColorVec4(.ButtonActive)^)
+		color_pushes: i32 = 0
+		if b.is_danger {
+			im.PushStyleColorImVec4(.Button,        thm.with_alpha(p.status_error, 0.80))
+			im.PushStyleColorImVec4(.ButtonHovered, thm.with_alpha(p.status_error, 0.92))
+			im.PushStyleColorImVec4(.ButtonActive,  p.status_error)
+			im.PushStyleColorImVec4(.Text,          st.pill_active_text)
+			color_pushes = 4
+		} else if b.is_default {
+			im.PushStyleColorImVec4(.Button,        p.accent)
+			im.PushStyleColorImVec4(.ButtonHovered, p.accent_hover)
+			im.PushStyleColorImVec4(.ButtonActive,  p.accent_active)
+			im.PushStyleColorImVec4(.Text,          st.pill_active_text)
+			color_pushes = 4
 		}
 		if im.Button(label, im.Vec2{w, 0}) do chosen = i
+		if color_pushes > 0 do im.PopStyleColor(color_pushes)
 		if b.is_default {
-			im.PopStyleColor(2)
 			im.SetItemDefaultFocus()
 		}
 	}

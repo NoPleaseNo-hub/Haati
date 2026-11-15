@@ -4,6 +4,7 @@ import "base:intrinsics"
 import "core:fmt"
 import "core:math"
 import im "haati:external/odin-imgui"
+import thm "haati:editor/theme"
 import "haati:editor/widgets"
 import engine "../../engine"
 import "../../engine/log"
@@ -82,7 +83,7 @@ decorator_header :: proc(ctx: ^DrawContext, text:cstring = "") {
 	if !ctx.is_visible || !ctx.is_pre do return
 
 	im.Spacing()
-    im.TextColored({0.7, 0.7, 1.0, 1.0}, text) // Light blue tint for visibility
+    im.TextColoredUnformatted(thm.palette().accent, text)
     im.Separator()
 }
 

@@ -127,11 +127,6 @@ generate :: proc(w: ^db.World) -> bool {
 }
 
 _generate_host :: proc(w: ^db.World, host: gen_facts.Runnable_Pkg, frame_rows, fixed_rows: []_UpdateRow, runnables: []gen_facts.Runnable_Pkg) {
-	// The host's slice of the rows: own entries + library packages.
-	_included :: proc(e: _UpdateRow, host: string, runnables: []gen_facts.Runnable_Pkg) -> bool {
-		return e.pkg == host || !gen_facts.is_runnable(runnables, e.pkg)
-	}
-
 	b := strings.builder_make()
 	defer strings.builder_destroy(&b)
 
@@ -144,7 +139,7 @@ _generate_host :: proc(w: ^db.World, host: gen_facts.Runnable_Pkg, frame_rows, f
 	defer delete(imports)
 	_collect_imports :: proc(imports: ^[dynamic]_UpdateRow, rows: []_UpdateRow, host: string, runnables: []gen_facts.Runnable_Pkg) {
 		for e in rows {
-			if e.pkg == host || !_included(e, host, runnables) do continue
+			if e.pkg == host || !gen_facts.is_included_for_host(runnables, host, e.pkg) do continue
 			found := false
 			for p in imports^ do if p.pkg == e.pkg { found = true; break }
 			if !found do append(imports, e)
@@ -159,16 +154,11 @@ _generate_host :: proc(w: ^db.World, host: gen_facts.Runnable_Pkg, frame_rows, f
 	// Divisor guards read the engine tick counter, and `__update` ticks VisualScriptRunner components.
 	strings.write_string(&b, "import __vs_eng \"haati:engine\"\n\n")
 
-	_call_name :: proc(e: _UpdateRow, host: string) -> string {
-		if e.pkg != host do return fmt.tprintf("%s.%s", e.pkg, e.name)
-		return e.name
-	}
-
 	strings.write_string(&b, "__update :: proc(dt: f32) {\n")
 	strings.write_string(&b, "\t__vs_eng.visual_script_runners_tick(dt)\n")
 	for e in frame_rows {
-		if !_included(e, host.name, runnables) do continue
-		fmt.sbprintf(&b, "\t%s(dt)\n", _call_name(e, host.name))
+		if !gen_facts.is_included_for_host(runnables, host.name, e.pkg) do continue
+		fmt.sbprintf(&b, "\t%s(dt)\n", gen_facts.qualified_ident(host.name, e.pkg, e.name))
 	}
 	strings.write_string(&b, "}\n\n")
 
@@ -177,11 +167,12 @@ _generate_host :: proc(w: ^db.World, host: gen_facts.Runnable_Pkg, frame_rows, f
 	// subscribers run every Nth tick at fixed_dt * N.
 	strings.write_string(&b, "__fixed_update :: proc(fixed_dt: f32) {\n")
 	for e in fixed_rows {
-		if !_included(e, host.name, runnables) do continue
+		if !gen_facts.is_included_for_host(runnables, host.name, e.pkg) do continue
+		call_name := gen_facts.qualified_ident(host.name, e.pkg, e.name)
 		if e.divisor > 1 {
-			fmt.sbprintf(&b, "\tif __vs_eng.fixed_tick_index() %% %d == 0 do %s(fixed_dt * %d)\n", e.divisor, _call_name(e, host.name), e.divisor)
+			fmt.sbprintf(&b, "\tif __vs_eng.fixed_tick_index() %% %d == 0 do %s(fixed_dt * %d)\n", e.divisor, call_name, e.divisor)
 		} else {
-			fmt.sbprintf(&b, "\t%s(fixed_dt)\n", _call_name(e, host.name))
+			fmt.sbprintf(&b, "\t%s(fixed_dt)\n", call_name)
 		}
 	}
 	strings.write_string(&b, "}\n")

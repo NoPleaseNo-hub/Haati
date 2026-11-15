@@ -1282,7 +1282,7 @@ hand_pose_scan_folder :: proc(dir_path: string = HAND_POSES_DIR, allocator := co
 	entries := make([dynamic]Hand_Pose_Folder_Entry, allocator)
 	if len(dir_path) == 0 do return entries
 
-	if !os.is_dir(dir_path) {
+	if !engine.vfs_is_mounted() && !os.is_dir(dir_path) {
 		hand_pose_seed_default_folder(dir_path, false)
 	}
 
@@ -1317,7 +1317,7 @@ hand_pose_scan_folder :: proc(dir_path: string = HAND_POSES_DIR, allocator := co
 	}
 
 	_scan_into(dir_path, &entries, allocator)
-	if len(entries) == 0 {
+	if len(entries) == 0 && !engine.vfs_is_mounted() {
 		hand_pose_seed_default_folder(dir_path, false)
 		_scan_into(dir_path, &entries, allocator)
 	}
@@ -1372,7 +1372,7 @@ hand_pose_profile_save_to_disk :: proc(profile: Hand_Pose_Profile, filename: str
 
 // Reads a 188-byte .mhpose binary file directly into a Hand_Pose_Profile by pointer cast!
 hand_pose_profile_load_from_disk :: proc(full_path: string) -> (Hand_Pose_Profile, bool) {
-	data, rerr := os.read_entire_file(full_path, context.temp_allocator)
+	data, rerr := engine.vfs_read_entire_file(full_path, context.temp_allocator)
 	if rerr != nil do return {}, false
 	if len(data) < size_of(Hand_Pose_Binary_Record) do return {}, false
 

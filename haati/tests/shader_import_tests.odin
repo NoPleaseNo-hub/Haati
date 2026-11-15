@@ -10,11 +10,7 @@ import "../engine"
 import "haati:engine_editor/asset_pipeline"
 
 _toolchain_available :: proc() -> bool {
-	state, _, _, err := os.process_exec({command = []string{"glslc", "--version"}}, context.temp_allocator)
-	if err != nil do return false
-	if !state.exited || state.exit_code != 0 do return false
-	state, _, _, err = os.process_exec({command = []string{"spirv-cross", "--help"}}, context.temp_allocator)
-	return err == nil
+	return asset_pipeline._have_shader_toolchain()
 }
 
 @(test)

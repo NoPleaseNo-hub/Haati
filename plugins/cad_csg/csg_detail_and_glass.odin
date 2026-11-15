@@ -1665,7 +1665,7 @@ _cached_faker_archetype: CSG_Faker_Binary_Archetype
 
 // Reads the binary `.fmesh` header (supporting both v2 and v3 `.fmesh` files) for Void File Explorer preview & inspector.
 csg_read_faker_binary_header :: proc(path: string) -> (arch: CSG_Faker_Binary_Archetype, ok: bool) {
-	data, err := os.read_entire_file(path, context.temp_allocator)
+	data, err := engine.vfs_read_entire_file(path, context.temp_allocator)
 	if err != nil || len(data) < size_of(CSG_Faker_Binary_Archetype_V2) {
 		return {}, false
 	}
@@ -1778,7 +1778,7 @@ csg_spawn_faker_mesh_from_binary :: proc(
 	world_pos: [3]f32 = {0, 1.6, 0},
 	path:      string = "assets/meshes/faker_object.fmesh",
 ) -> engine.Transform_Handle {
-	data, err := os.read_entire_file(path, context.temp_allocator)
+	data, err := engine.vfs_read_entire_file(path, context.temp_allocator)
 	arch := _cached_faker_archetype
 	has_file := err == nil && len(data) >= size_of(CSG_Faker_Binary_Archetype_V2)
 	hdr_offset := size_of(CSG_Faker_Binary_Archetype_V2)

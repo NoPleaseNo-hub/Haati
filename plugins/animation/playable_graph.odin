@@ -531,6 +531,18 @@ _pose_make :: proc(b: ^Animation_Binding, allocator: runtime.Allocator) -> Pose 
 }
 
 @(private = "file")
+_pose_zero :: proc(p: Pose) {
+	for &t in p.trs do t = {}
+	for &pr in p.props do pr = {}
+}
+
+@(private = "file")
+_pose_free :: proc(p: Pose, allocator: runtime.Allocator) {
+	if p.trs != nil do delete(p.trs, allocator)
+	if p.props != nil do delete(p.props, allocator)
+}
+
+@(private = "file")
 _eval_node :: proc(
 	g: ^Playable_Graph,
 	h: Playable_Handle,
@@ -568,19 +580,31 @@ _eval_node :: proc(
 			}
 		}
 	case Playable_Mixer:
-		for inp in n.inputs {
-			if inp.weight <= PLAYABLE_WEIGHT_EPS do continue
+		if len(n.inputs) > 0 {
 			child := _pose_make(b, allocator)
-			_eval_node(g, inp.node, b, child, path_weight * inp.weight, scripts, allocator)
-			_pose_accumulate(out, child, inp.weight, b)
+			defer _pose_free(child, allocator)
+			first := true
+			for inp in n.inputs {
+				if inp.weight <= PLAYABLE_WEIGHT_EPS do continue
+				if !first do _pose_zero(child)
+				first = false
+				_eval_node(g, inp.node, b, child, path_weight * inp.weight, scripts, allocator)
+				_pose_accumulate(out, child, inp.weight, b)
+			}
 		}
 	case Playable_Layer_Mixer:
 		_pose_set_default(out, b)
-		for inp in n.inputs {
-			if inp.weight <= PLAYABLE_WEIGHT_EPS do continue
+		if len(n.inputs) > 0 {
 			child := _pose_make(b, allocator)
-			_eval_node(g, inp.node, b, child, path_weight * inp.weight, scripts, allocator)
-			_pose_blend_over(out, child, inp.weight, b)
+			defer _pose_free(child, allocator)
+			first := true
+			for inp in n.inputs {
+				if inp.weight <= PLAYABLE_WEIGHT_EPS do continue
+				if !first do _pose_zero(child)
+				first = false
+				_eval_node(g, inp.node, b, child, path_weight * inp.weight, scripts, allocator)
+				_pose_blend_over(out, child, inp.weight, b)
+			}
 		}
 	case Playable_Script:
 		if scripts != nil {

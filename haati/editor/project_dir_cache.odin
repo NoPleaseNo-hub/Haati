@@ -13,6 +13,7 @@ package editor
 // external changes still show up quickly — same "no file watcher" stance as
 // the asset db, at 2 Hz instead of 120 Hz.
 
+import "base:runtime"
 import "core:os"
 import "core:path/filepath"
 import "core:slice"
@@ -41,22 +42,34 @@ project_dir_listing :: proc(path: string) -> (entries: []Project_Dir_Entry, ok: 
 		return l.entries, l.ok
 	}
 
+	prev_alloc := context.allocator
+	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev_alloc
+	if _dir_listings == nil {
+		_dir_listings = make(map[string]_Dir_Listing, 0, runtime.default_allocator())
+	}
 	fresh, scan_ok := _dir_scan(path)
-	_dir_listings[strings.clone(path)] = _Dir_Listing{entries = fresh, ok = scan_ok}
+	_dir_listings[strings.clone(path, runtime.default_allocator())] = _Dir_Listing{entries = fresh, ok = scan_ok}
 	return fresh, scan_ok
 }
 
 // Drop everything — call after any editor-side file mutation so the UI
 // updates the same frame (external changes ride the TTL).
 project_dir_cache_invalidate :: proc() {
+	prev_alloc := context.allocator
+	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev_alloc
 	for k, l in _dir_listings {
 		_listing_free(l)
-		delete(k)
+		delete(k, runtime.default_allocator())
 	}
 	clear(&_dir_listings)
 }
 
 project_dir_cache_shutdown :: proc() {
+	prev_alloc := context.allocator
+	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev_alloc
 	project_dir_cache_invalidate()
 	delete(_dir_listings)
 	_dir_listings = nil
@@ -64,8 +77,8 @@ project_dir_cache_shutdown :: proc() {
 
 @(private = "file")
 _listing_free :: proc(l: _Dir_Listing) {
-	for e in l.entries do delete(e.name)
-	delete(l.entries)
+	for e in l.entries do delete(e.name, runtime.default_allocator())
+	delete(l.entries, runtime.default_allocator())
 }
 
 @(private = "file")

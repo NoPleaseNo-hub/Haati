@@ -21,6 +21,7 @@ import "core:math"
 import im "haati:external/odin-imgui"
 import "haati:engine/log"
 import icons "haati:editor/icons"
+import thm "haati:editor/theme"
 import widgets "haati:editor/widgets"
 
 Draw_Proc :: proc()
@@ -53,7 +54,9 @@ on_window_event_hook: proc(action: string, id: string)
 // Records a closed window ID so Ctrl+Shift+T can reopen it in LIFO order.
 push_closed :: proc(id: string) {
 	if id == "" do return
+	prev := context.allocator
 	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev
 	for i := len(_closed_window_ids) - 1; i >= 0; i -= 1 {
 		if _closed_window_ids[i] == id {
 			delete(_closed_window_ids[i])
@@ -131,8 +134,9 @@ open_ids :: proc(allocator := context.temp_allocator) -> []string {
 // that is no longer installed) are skipped quietly, unlike `open`.
 open_saved :: proc(ids: []string) {
 	for id in ids {
+		resolved_id := id == "editor_defaults" ? "project_settings" : id
 		for &r, ri in _registry {
-			if r.id != id do continue
+			if r.id != resolved_id do continue
 			already := false
 			for &e in _open_windows do if e.reg == ri do already = true
 			if !already do append(&_open_windows, _Open{reg = ri, open = true})
@@ -141,20 +145,45 @@ open_saved :: proc(ids: []string) {
 	}
 }
 
+@(private = "file")
+_pending_settings_tab: string
+
+// Open the unified Settings window pre-selected on a specific tab name (e.g. "Code & Script IDE").
+open_settings_tab :: proc(tab_name: string) {
+	if len(_pending_settings_tab) > 0 {
+		delete(_pending_settings_tab, runtime.default_allocator())
+		_pending_settings_tab = ""
+	}
+	if len(tab_name) > 0 {
+		_pending_settings_tab = strings.clone(tab_name, runtime.default_allocator())
+	}
+	open("project_settings")
+}
+
+// Consume any pending tab selection queued for the unified Settings window.
+consume_pending_settings_tab :: proc(allocator := context.temp_allocator) -> string {
+	if len(_pending_settings_tab) == 0 do return ""
+	out := strings.clone(_pending_settings_tab, allocator)
+	delete(_pending_settings_tab, runtime.default_allocator())
+	_pending_settings_tab = ""
+	return out
+}
+
 // Show the window declared under `id`, or focus it if already open.
 open :: proc(id: string) {
+	resolved_id := id == "editor_defaults" ? "project_settings" : id
 	for &r, ri in _registry {
-		if r.id != id do continue
+		if r.id != resolved_id do continue
 		for &e in _open_windows {
 			if e.reg == ri {
 				e.open = true
 				_focus_request = ri
-				if on_window_event_hook != nil do on_window_event_hook("Focus Window", id)
+				if on_window_event_hook != nil do on_window_event_hook("Focus Window", resolved_id)
 				return
 			}
 		}
 		append(&_open_windows, _Open{reg = ri, open = true})
-		if on_window_event_hook != nil do on_window_event_hook("Open Window", id)
+		if on_window_event_hook != nil do on_window_event_hook("Open Window", resolved_id)
 		return
 	}
 	log.errorf("editor_window: unknown id %q (declare it with @(editor_window={{id=...}}))", id)
@@ -263,55 +292,57 @@ get_effective_scale :: proc(id: string) -> f32 {
 // CENTRALIZED MODAL DIALOGS (AUTORESIZING & ROOT SCALED)
 // ─────────────────────────────────────────────────────────────
 
-Confirm_Dialog :: struct {
-	open:          bool,
-	title:         string,
-	message:       string,
-	confirm_label: string,
-	cancel_label:  string,
-	is_danger:     bool,
-	on_confirm:    proc(),
-	on_cancel:     proc(),
-}
-
-@(private = "file")
-_active_dialog: Confirm_Dialog
-
 show_confirm_dialog :: proc(title: string, message: string, confirm_label: string = "Confirm", on_confirm: proc() = nil, is_danger: bool = true, cancel_label: string = "Cancel", on_cancel: proc() = nil) {
-	close_confirm_dialog()
-	_active_dialog = Confirm_Dialog{
-		open          = true,
-		title         = strings.clone(title),
-		message       = strings.clone(message),
-		confirm_label = strings.clone(confirm_label),
-		cancel_label  = strings.clone(cancel_label),
-		is_danger     = is_danger,
-		on_confirm    = on_confirm,
-		on_cancel     = on_cancel,
+	buttons := [2]widgets.Dialog_Button{
+		{label = confirm_label, action = on_confirm, is_default = !is_danger, is_danger = is_danger},
+		{label = cancel_label, action = on_cancel, is_cancel = true},
 	}
+	widgets.dialog_open(widgets.Dialog{
+		title       = title,
+		description = message,
+		icon        = is_danger ? icons.ICON_MD_WARNING : icons.ICON_MD_HELP,
+		buttons     = buttons[:],
+	})
 }
 
 close_confirm_dialog :: proc() {
-	if _active_dialog.open {
-		delete(_active_dialog.title)
-		delete(_active_dialog.message)
-		delete(_active_dialog.confirm_label)
-		delete(_active_dialog.cancel_label)
-		_active_dialog.open = false
-	}
+	widgets.dialog_close()
+}
+
+Text_Dialog_Opts :: struct {
+	title:            string,
+	prompt:           string,
+	initial_text:     string,
+	confirm_label:    string,
+	cancel_label:     string,
+	select_stem_only: bool,
+	on_apply:         proc(string),
+	on_cancel:        proc(),
 }
 
 Rename_Dialog :: struct {
-	open:       bool,
-	title:      string,
-	buffer:     [256]u8,
-	focus:      bool,
-	on_apply:   proc(string),
-	on_cancel:  proc(),
+	open:             bool,
+	title:            string,
+	prompt:           string,
+	confirm_label:    string,
+	cancel_label:     string,
+	select_stem_only: bool,
+	stem_selected:    bool,
+	buffer:           [256]u8,
+	focus:            bool,
+	on_apply:         proc(string),
+	on_cancel:        proc(),
 }
 
 @(private = "file")
 _active_rename: Rename_Dialog
+
+open_scene_handler: proc(path: string, prompt_save: bool) -> bool
+
+request_open_scene :: proc(path: string, prompt_save := true) -> bool {
+	if open_scene_handler == nil do return false
+	return open_scene_handler(path, prompt_save)
+}
 
 modal_scale: f32 = 1.0
 
@@ -323,24 +354,46 @@ set_modal_scale :: proc(s: f32) {
 	modal_scale = math.clamp(s, 0.7, 2.0)
 }
 
-show_rename_dialog :: proc(title: string, current_name: string, on_apply: proc(string), on_cancel: proc() = nil) {
+show_text_input_dialog :: proc(opts: Text_Dialog_Opts) {
 	close_rename_dialog()
+	prev := context.allocator
+	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev
 	_active_rename = Rename_Dialog{
-		open      = true,
-		title     = strings.clone(title),
-		focus     = true,
-		on_apply  = on_apply,
-		on_cancel = on_cancel,
+		open             = true,
+		title            = strings.clone(opts.title),
+		prompt           = strings.clone(len(opts.prompt) > 0 ? opts.prompt : "New Name:"),
+		confirm_label    = strings.clone(len(opts.confirm_label) > 0 ? opts.confirm_label : "Apply"),
+		cancel_label     = strings.clone(len(opts.cancel_label) > 0 ? opts.cancel_label : "Cancel"),
+		select_stem_only = opts.select_stem_only,
+		focus            = true,
+		on_apply         = opts.on_apply,
+		on_cancel        = opts.on_cancel,
 	}
 	mem.zero(&_active_rename.buffer, len(_active_rename.buffer))
-	name_bytes := transmute([]u8)current_name
+	name_bytes := transmute([]u8)opts.initial_text
 	copy_len := min(len(name_bytes), len(_active_rename.buffer) - 1)
-	copy(_active_rename.buffer[:], name_bytes[:copy_len])
+	if copy_len > 0 do copy(_active_rename.buffer[:], name_bytes[:copy_len])
+}
+
+show_rename_dialog :: proc(title: string, current_name: string, on_apply: proc(string), on_cancel: proc() = nil) {
+	show_text_input_dialog(Text_Dialog_Opts{
+		title        = title,
+		initial_text = current_name,
+		on_apply     = on_apply,
+		on_cancel    = on_cancel,
+	})
 }
 
 close_rename_dialog :: proc() {
 	if _active_rename.open {
+		prev := context.allocator
+		context.allocator = runtime.default_allocator()
+		defer context.allocator = prev
 		delete(_active_rename.title)
+		delete(_active_rename.prompt)
+		delete(_active_rename.confirm_label)
+		delete(_active_rename.cancel_label)
 		_active_rename.open = false
 		_active_rename.on_apply = nil
 		_active_rename.on_cancel = nil
@@ -348,10 +401,34 @@ close_rename_dialog :: proc() {
 }
 
 @(private = "file")
-_uses_independent_pane_zoom :: proc(id: string) -> bool {
-	// Studio workspaces implement independent per-segment Ctrl+MouseWheel zoom
-	// (Explorer / Code / Problems / Graph Canvas) so headers & buttons never clip!
-	return id == "odin_micro_studio" || id == "mh_visual_script"
+_rename_input_callback :: proc "c" (data: ^im.InputTextCallbackData) -> i32 {
+	if data == nil || data.UserData == nil do return 0
+	dlg := cast(^Rename_Dialog)data.UserData
+	if dlg.select_stem_only && !dlg.stem_selected && data.EventActivated && data.BufTextLen > 0 {
+		buf := (cast([^]u8)data.Buf)[:data.BufTextLen]
+		dot := -1
+		for i := len(buf) - 1; i >= 0; i -= 1 {
+			if buf[i] == '.' {
+				dot = i
+				break
+			}
+		}
+		sel_end := i32(dot > 0 ? dot : int(data.BufTextLen))
+		data.SelectionStart = 0
+		data.SelectionEnd = sel_end
+		data.CursorPos = sel_end
+		dlg.stem_selected = true
+	}
+	return 0
+}
+
+uses_independent_pane_zoom :: proc(id: string) -> bool {
+	// Studio workspaces & content browsers implement independent per-pane Ctrl+MouseWheel zoom
+	// so toolbars, headers, trees & buttons never distort or clip!
+	return id == "odin_micro_studio" ||
+	       id == "mh_visual_script" ||
+	       id == "void_file_explorer" ||
+	       id == "void_material_editor"
 }
 
 // One call per editor frame, after the built-in views. Removal happens here,
@@ -375,7 +452,7 @@ draw_all :: proc() {
 		// NoCollapse matches every built-in view — no collapse triangle when
 		// the window floats. Enable HorizontalScrollbar when zoomed up so narrow
 		// docked panes never clip right-hand content off-screen.
-		indep_zoom := _uses_independent_pane_zoom(r.id)
+		indep_zoom := uses_independent_pane_zoom(r.id)
 		per_scale_pre := indep_zoom ? f32(1.0) : get_window_scale(r.id)
 		win_flags := im.WindowFlags{.NoCollapse}
 		if per_scale_pre > 1.05 {
@@ -427,73 +504,11 @@ draw_all :: proc() {
 	st := im.GetStyle()
 	has_modal_font := abs(modal_scale - 1.0) > 0.01
 
-	if _active_dialog.open {
-		if has_modal_font do im.PushFontFloat(nil, st.FontSizeBase * modal_scale)
-		vp := im.GetMainViewport()
-		im.SetNextWindowPos(vp.Pos + vp.Size * 0.5, .Always, im.Vec2{0.5, 0.5})
-		modal_flags := im.WindowFlags{.AlwaysAutoResize, .NoSavedSettings}
-		modal_title := strings.clone_to_cstring(fmt.tprintf("%s###CentralModal", _active_dialog.title), context.temp_allocator)
-		im.OpenPopup(modal_title)
-
-		if im.BeginPopupModal(modal_title, &_active_dialog.open, modal_flags) {
-			io := im.GetIO()
-			if io.KeyCtrl && io.MouseWheel != 0 {
-				set_modal_scale(modal_scale + io.MouseWheel * 0.05)
-			}
-
-			if _active_dialog.is_danger {
-				im.TextColored({1.0, 0.35, 0.35, 1.0}, "Warning / Confirmation")
-			} else {
-				im.TextColored({0.35, 0.75, 1.0, 1.0}, "Confirmation")
-			}
-			im.Separator()
-			im.Spacing()
-
-			im.TextWrappedUnformatted(strings.clone_to_cstring(_active_dialog.message, context.temp_allocator))
-			im.Spacing()
-			im.Spacing()
-			im.Separator()
-			im.Spacing()
-
-			// Buttons
-			if _active_dialog.is_danger {
-				im.PushStyleColorImVec4(.Button, {0.75, 0.20, 0.20, 0.85})
-				im.PushStyleColorImVec4(.ButtonHovered, {0.90, 0.25, 0.25, 1.0})
-				im.PushStyleColorImVec4(.ButtonActive, {1.0, 0.15, 0.15, 1.0})
-			} else {
-				im.PushStyleColorImVec4(.Button, {0.20, 0.50, 0.85, 0.85})
-				im.PushStyleColorImVec4(.ButtonHovered, {0.25, 0.65, 1.0, 1.0})
-				im.PushStyleColorImVec4(.ButtonActive, {0.35, 0.75, 1.0, 1.0})
-			}
-
-			confirm_pressed := im.Button(strings.clone_to_cstring(_active_dialog.confirm_label, context.temp_allocator)) || im.IsKeyPressed(.Enter)
-			im.PopStyleColor(3)
-
-			im.SameLine(0, 15)
-			cancel_pressed := im.Button(strings.clone_to_cstring(_active_dialog.cancel_label, context.temp_allocator)) || im.IsKeyPressed(.Escape)
-
-			if confirm_pressed {
-				cb := _active_dialog.on_confirm
-				close_confirm_dialog()
-				im.CloseCurrentPopup()
-				if cb != nil do cb()
-			} else if cancel_pressed || !_active_dialog.open {
-				cb := _active_dialog.on_cancel
-				close_confirm_dialog()
-				im.CloseCurrentPopup()
-				if cb != nil do cb()
-			}
-
-			im.EndPopup()
-		}
-		if has_modal_font do im.PopFont()
-	}
-
 	// Centralized Rename Dialog (Auto-resizes cleanly at viewport root, independent scale)
 	if _active_rename.open {
 		if has_modal_font do im.PushFontFloat(nil, st.FontSizeBase * modal_scale)
-		vp := im.GetMainViewport()
-		im.SetNextWindowPos(vp.Pos + vp.Size * 0.5, .Always, im.Vec2{0.5, 0.5})
+		wpos, wsz := monitor_work_rect_at(im.GetMousePos(), true)
+		im.SetNextWindowPos(wpos + wsz * 0.5, .Appearing, im.Vec2{0.5, 0.5})
 		modal_flags := im.WindowFlags{.AlwaysAutoResize, .NoSavedSettings}
 		modal_title := strings.clone_to_cstring(fmt.tprintf("%s###CentralRenameModal", _active_rename.title), context.temp_allocator)
 		im.OpenPopup(modal_title)
@@ -504,23 +519,31 @@ draw_all :: proc() {
 				set_modal_scale(modal_scale + io.MouseWheel * 0.05)
 			}
 
-			im.TextColored({0.35, 0.75, 1.0, 1.0}, fmt.ctprintf("%s  %s", icons.ICON_MD_EDIT, _active_rename.title))
+			widgets.text_coloredf(thm.palette().accent, "%s  %s", icons.ICON_MD_EDIT, _active_rename.title)
 			im.Separator()
 			im.Spacing()
 
-			im.Text("New Name:")
+			im.TextUnformatted(widgets.temp_cstr(_active_rename.prompt))
 			im.SetNextItemWidth(320.0)
 			if _active_rename.focus {
 				im.SetKeyboardFocusHere()
 				_active_rename.focus = false
 			}
-			enter_pressed := im.InputText("##CentralRenameInput", cstring(raw_data(_active_rename.buffer[:])), len(_active_rename.buffer), {.EnterReturnsTrue, .AutoSelectAll})
+			in_flags: im.InputTextFlags = {.EnterReturnsTrue}
+			enter_pressed := false
+			if _active_rename.select_stem_only {
+				in_flags += {.CallbackAlways}
+				enter_pressed = im.InputText("##CentralRenameInput", cstring(raw_data(_active_rename.buffer[:])), len(_active_rename.buffer), in_flags, _rename_input_callback, &_active_rename)
+			} else {
+				in_flags += {.AutoSelectAll}
+				enter_pressed = im.InputText("##CentralRenameInput", cstring(raw_data(_active_rename.buffer[:])), len(_active_rename.buffer), in_flags)
+			}
 
 			im.Spacing()
 			im.Separator()
 			im.Spacing()
 
-			if im.Button(fmt.ctprintf("%s  Apply", icons.ICON_MD_CHECK), {110, 30}) || enter_pressed {
+			if im.Button(fmt.ctprintf("%s  %s", icons.ICON_MD_CHECK, _active_rename.confirm_label), {110, 30}) || enter_pressed {
 				name := strings.string_from_null_terminated_ptr(raw_data(_active_rename.buffer[:]), len(_active_rename.buffer))
 				cb := _active_rename.on_apply
 				close_rename_dialog()
@@ -528,7 +551,7 @@ draw_all :: proc() {
 				if cb != nil do cb(name)
 			}
 			im.SameLine(0, 15)
-			if im.Button(fmt.ctprintf("%s  Cancel", icons.ICON_MD_CLOSE), {110, 30}) || im.IsKeyPressed(.Escape) || !_active_rename.open {
+			if im.Button(fmt.ctprintf("%s  %s", icons.ICON_MD_CLOSE, _active_rename.cancel_label), {110, 30}) || im.IsKeyPressed(.Escape) || !_active_rename.open {
 				cb := _active_rename.on_cancel
 				close_rename_dialog()
 				im.CloseCurrentPopup()
@@ -556,39 +579,42 @@ shutdown :: proc() {
 		delete(_window_scales)
 		_window_scales = nil
 	}
+	if len(_pending_settings_tab) > 0 {
+		delete(_pending_settings_tab, runtime.default_allocator())
+		_pending_settings_tab = ""
+	}
 	viewports_shutdown()
 }
 
 _get_central_dock_target :: proc() -> im.ID {
-	if main_central_dock_id != 0 do return main_central_dock_id
+	if main_central_dock_id != 0 {
+		if leaf := resolve_leaf_dock_node(main_central_dock_id); leaf != 0 do return leaf
+	}
 	if main_dockspace_id != 0 {
 		if central := im.DockBuilderGetCentralNode(main_dockspace_id); central != nil {
-			return central.ID_
+			if leaf := resolve_leaf_dock_node(central.ID_); leaf != 0 do return leaf
 		}
-		return main_dockspace_id
+		return resolve_leaf_dock_node(main_dockspace_id)
 	}
 	return 0
 }
 
 toggle_window_dock :: proc(id: string) {
-	target_dock := _get_central_dock_target()
 	for &r in _registry {
 		if r.id == id {
 			if im.IsWindowDocked() {
-				im.DockBuilderDockWindow(r.title, 0)
-			} else if target_dock != 0 {
-				im.DockBuilderDockWindow(r.title, target_dock)
-				if main_dockspace_id != 0 do im.DockBuilderFinish(main_dockspace_id)
+				pop_out(r.title)
+			} else {
+				reunite(r.title)
 			}
 			return
 		}
 	}
 	c_title := strings.clone_to_cstring(id, context.temp_allocator)
 	if im.IsWindowDocked() {
-		im.DockBuilderDockWindow(c_title, 0)
-	} else if target_dock != 0 {
-		im.DockBuilderDockWindow(c_title, target_dock)
-		if main_dockspace_id != 0 do im.DockBuilderFinish(main_dockspace_id)
+		pop_out(c_title)
+	} else {
+		reunite(c_title)
 	}
 }
 
@@ -656,6 +682,9 @@ decorate_floating_window :: proc(title: cstring, p_open: ^bool = nil) {
 
 	if close_hovered || max_hovered || dock_hovered {
 		im.SetMouseCursor(.Arrow)
+		if im.IsMouseDown(.Left) || im.IsMouseClicked(.Left) {
+			im.StopMouseMovingWindow()
+		}
 	}
 
 	// Pop-out button: inside the main window it lifts the panel into its own
@@ -671,16 +700,12 @@ decorate_floating_window :: proc(title: cstring, p_open: ^bool = nil) {
 		tip = outside ? "Return to Main Window (re-dock where it was)" : "Pop Out into a Separate OS Window"
 	}
 
-	// Handle clicks: respond immediately on mouse press or mouse release
-	if dock_hovered && (im.IsMouseClicked(.Left) || (dock_active && im.IsMouseReleased(.Left))) {
+	// Handle clicks on press edge and cancel any ImGui window-drag (`MovingWindow`) on button interaction.
+	if dock_hovered && im.IsMouseClicked(.Left) {
+		im.StopMouseMovingWindow()
+		im.ClearActiveID()
 		if !can_pop {
-			target_dock := _get_central_dock_target()
-			if target_dock != 0 {
-				im.DockBuilderDockWindow(title, target_dock)
-				if main_dockspace_id != 0 {
-					im.DockBuilderFinish(main_dockspace_id)
-				}
-			}
+			reunite(title)
 		} else if outside {
 			reunite(title)
 		} else {
@@ -690,10 +715,14 @@ decorate_floating_window :: proc(title: cstring, p_open: ^bool = nil) {
 
 	in_title_bar := mouse_pos.x >= win_pos.x && mouse_pos.x < dock_min.x && mouse_pos.y >= win_pos.y && mouse_pos.y <= win_pos.y + title_h
 	if (max_hovered && im.IsMouseClicked(.Left)) || (in_title_bar && is_win_hovered && im.IsMouseDoubleClicked(.Left)) {
+		im.StopMouseMovingWindow()
+		im.ClearActiveID()
 		toggle_maximize_window(title, win_pos, win_size, outside)
 	}
 
-	if close_hovered && (im.IsMouseClicked(.Left) || (close_active && im.IsMouseReleased(.Left))) {
+	if close_hovered && im.IsMouseClicked(.Left) {
+		im.StopMouseMovingWindow()
+		im.ClearActiveID()
 		if p_open != nil {
 			p_open^ = false
 		}

@@ -1985,12 +1985,10 @@ cad_csg_scene_overlay :: proc(vertical: bool) {
 			widgets.tooltip("Switch CSG Wrap Method (0..3) and immediately re-wrap the source mesh in-place!")
 			im.SameLine(0, 4)
 
-			im.PushStyleColorImVec4(.Button, {0.82, 0.36, 0.16, 0.95})
-			if im.SmallButton("Undo -> Mesh") {
+			if widgets.small_button_colored("Undo -> Mesh", {0.82, 0.36, 0.16, 0.95}) {
 				_ = revert_csg_to_original_mesh(sel_h)
 				return
 			}
-			im.PopStyleColor(1)
 			widgets.tooltip("Undoes the Mesh -> CSG conversion and restores the original MeshFilter + MeshRenderer!")
 			im.SameLine(0, 4)
 		}
@@ -2292,12 +2290,10 @@ cad_csg_scene_overlay :: proc(vertical: bool) {
 	}
 
 	if can_revert_or_rewrap_csg_mesh(sel_h) {
-		im.PushStyleColorImVec4(.Button, {0.82, 0.36, 0.16, 0.95})
-		if im.SmallButton("Undo->Mesh") {
+		if widgets.small_button_colored("Undo->Mesh", {0.82, 0.36, 0.16, 0.95}) {
 			_ = revert_csg_to_original_mesh(sel_h)
 			return
 		}
-		im.PopStyleColor(1)
 		widgets.tooltip("Restore original MeshFilter + MeshRenderer.")
 		im.SameLine(0, 3)
 	}
@@ -5449,7 +5445,7 @@ _draw_cad_csg_panel_contents :: proc() {
 		// List every recorded Geo-Mod Blast Crater with its own selectable row, radius slider, and `[X]` delete button!
 		if len(vol.recorded_blasts) > 0 {
 			im.Spacing()
-			im.TextColored({1.0, 0.58, 0.28, 1.0}, "Recorded Geo-Mod Blast Craters (%d):", len(vol.recorded_blasts))
+			im.TextColoredUnformatted({1.0, 0.58, 0.28, 1.0}, fmt.ctprintf("Recorded Geo-Mod Blast Craters (%d):", len(vol.recorded_blasts)))
 			remove_blast_idx := -1
 			for &rb, b_idx in vol.recorded_blasts {
 				im.PushIDInt(i32(10000 + b_idx))

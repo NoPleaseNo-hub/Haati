@@ -99,9 +99,8 @@ test_artifact_content_addressing :: proc(t: ^testing.T) {
 @(test)
 test_shader_failed_import_keeps_last_good_artifact :: proc(t: ^testing.T) {
 	// The shader toolchain is an optional dependency (authoring only) — skip
-	// when it isn't installed.
-	state, _, _, exec_err := os.process_exec({command = []string{"glslc", "--version"}}, context.temp_allocator)
-	if exec_err != nil || !state.exited || state.exit_code != 0 do return
+	// when it isn't available via bundled tools/shader_tools or PATH.
+	if !asset_pipeline._have_shader_toolchain() do return
 
 	src_dir :: "haati/tests/fixtures/_pipeline_tmp"
 	glsl :: src_dir + "/probe.glsl"

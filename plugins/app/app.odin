@@ -6,12 +6,13 @@ import tween "haati:packages/tween"
 import gfx "haati:engine/gfx"
 import "haati:engine/gizmos"
 import input "haati:engine/input"
+import "core:encoding/json"
 import "core:os"
 import "core:fmt"
 import "core:path/filepath"
 import "core:strings"
 import "core:encoding/uuid"
-import "haati:engine/catalog"
+import "haati:engine/crash_journal"
 import "haati:engine/log"
 
 MENU_SCENE_GUID :: "b794d34b-3067-4b7e-ac2d-5cd46c16c5c1"
@@ -25,6 +26,8 @@ main :: proc() {
     // Machine-tagged log lines: the editor's play pipe parses them back into
     // its console (standalone runs just see the tagged text in the terminal).
     log.stdout_tagged = true
+    crash_journal.init()
+    defer engine.vfs_unmount()
 
     // Normalize the runtime cwd to moonhug/ when launched inside a checkout, or
     // to the executable directory when shipped standalone.
@@ -71,12 +74,11 @@ main :: proc() {
             } else if os.exists(beside_stem) {
                 _catalog_path = beside_stem
             } else if os.exists(pak_path) {
-                dst_dir := strings.concatenate({stem, "_data"}, context.temp_allocator)
-                if catalog.pak_extract_directory(pak_path, dst_dir) && os.exists(beside_stem) {
-                    _catalog_path = beside_stem
+                if engine.vfs_mount_pak(pak_path) {
+                    _catalog_path = "catalog.json"
                 }
             }
-            if !in_repo && _catalog_path != "" {
+            if !in_repo && _catalog_path != "" && !engine.vfs_is_mounted() {
                 data_dir: string
                 {
                     context.allocator = context.temp_allocator
@@ -87,7 +89,14 @@ main :: proc() {
         }
     }
 
-    if !gfx.init("App", 800, 600) {
+    app_title: cstring = "Haati App"
+    if pdata, perr := engine.vfs_read_entire_file(engine.PROJECT_MANIFEST_FILE, context.temp_allocator); perr == nil && len(pdata) > 0 {
+        m: engine.Project_Manifest
+        if json.unmarshal(pdata, &m, allocator = context.temp_allocator) == nil && m.name != "" {
+            app_title = strings.clone_to_cstring(m.name, context.temp_allocator)
+        }
+    }
+    if !gfx.init(app_title, 1280, 720) {
         log.error("gfx init failed")
         return
     }
@@ -125,7 +134,7 @@ main :: proc() {
             scene_path, _ = engine.asset_db_get_path(guid)
         }
     }
-    if os.exists(scene_path) {
+    if engine.vfs_exists(scene_path) {
         engine.scene_load_single_path(scene_path)
         scene_loaded()
     } else {

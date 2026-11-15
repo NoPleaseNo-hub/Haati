@@ -7603,7 +7603,7 @@ draw_cad_left_drawer :: proc(img_min, img_max: im.Vec2) {
 	im.PushStyleVarImVec2(.WindowPadding, {8, 8})
 
 	drawer_h := min(max_h, 560.0)
-	if im.BeginChild("##cad_scene3d_left_drawer", {cur_w, drawer_h}, {.Borders}, {}) {
+	if im.BeginChild("##cad_scene3d_left_drawer", {max(cur_w, 1.0), max(drawer_h, 1.0)}, {.Borders}, {}) {
 		if im.IsWindowHovered(im.HoveredFlags_AllowWhenBlockedByActiveItem | im.HoveredFlags_ChildWindows) {
 			_mesh_ed.drawer_hovered = true
 		}
@@ -7633,14 +7633,15 @@ draw_cad_left_drawer :: proc(img_min, img_max: im.Vec2) {
 			case .Mat_Deform: card_title = "6. Materials & Deform"
 			}
 		}
-		im.TextColored({0.58, 0.88, 1.0, 1.0}, "%s", card_title)
+		im.TextColoredUnformatted({0.58, 0.88, 1.0, 1.0}, card_title)
 		im.SameLine(max(avail_w - 52.0, 80.0))
-		if _mesh_ed.drawer_pinned do im.PushStyleColorImVec4(.Button, {0.22, 0.58, 0.84, 0.98})
-		pin_lbl := fmt.ctprintf("%s##cad_pin_drawer", icons.ICON_MD_LOCK if _mesh_ed.drawer_pinned else icons.ICON_MD_LOCK_OPEN)
+		was_pinned := _mesh_ed.drawer_pinned
+		if was_pinned do im.PushStyleColorImVec4(.Button, {0.22, 0.58, 0.84, 0.98})
+		pin_lbl := fmt.ctprintf("%s##cad_pin_drawer", icons.ICON_MD_LOCK if was_pinned else icons.ICON_MD_LOCK_OPEN)
 		if im.Button(pin_lbl, {24, 20}) {
-			_mesh_ed.drawer_pinned = !_mesh_ed.drawer_pinned
+			_mesh_ed.drawer_pinned = !was_pinned
 		}
-		if _mesh_ed.drawer_pinned do im.PopStyleColor(1)
+		if was_pinned do im.PopStyleColor(1)
 		widgets.tooltip(
 			"Pinned Open: card stays open while clicking in the 3D viewport (click to unpin)" if _mesh_ed.drawer_pinned else
 			"Unpinned Popover: card auto-collapses out of your way as soon as you click in Scene3D (click to pin open)",
@@ -7736,7 +7737,7 @@ _draw_cad_session_cache_and_axis_header :: proc(avail_w, half_w, third_w, fourth
 	// 1. CAD Session Memory Cache status + Undo / Redo buttons
 	cache_on, m_undo_n, _, c_undo_n, _, bytes_used := cad_mode_memory_cache_stats()
 	kb_used := f32(bytes_used) / 1024.0
-	im.TextColored({0.40, 0.96, 0.68, 1.0}, fmt.ctprintf("CAD Cache: %s (%.1f KB)", "Active" if cache_on else "Idle", kb_used))
+	im.TextColoredUnformatted({0.40, 0.96, 0.68, 1.0}, fmt.ctprintf("CAD Cache: %s (%.1f KB)", "Active" if cache_on else "Idle", kb_used))
 	widgets.tooltip("Dedicated CAD Mode Session Memory Cache: allocated automatically when entering CAD Mode to store Mesh & CSG Undo/Redo snapshots, and freed 100%% when exiting CAD Mode!")
 
 	if is_csg {
@@ -7761,7 +7762,7 @@ _draw_cad_session_cache_and_axis_header :: proc(avail_w, half_w, third_w, fourth
 		if has_target {
 			name := "Mesh"
 			if t := engine.pool_get(&w.transforms, engine.Handle(_mesh_ed.target_owner)); t != nil && len(t.name) > 0 do name = t.name
-			im.TextColored({0.75, 0.95, 1.0, 1.0}, fmt.ctprintf("Target: %s (%dV, %dF)", name, len(_mesh_ed.verts), len(_mesh_ed.faces)))
+			im.TextColoredUnformatted({0.75, 0.95, 1.0, 1.0}, fmt.ctprintf("Target: %s (%dV, %dF)", name, len(_mesh_ed.verts), len(_mesh_ed.faces)))
 		} else {
 			im.TextColored({1.0, 0.72, 0.35, 1.0}, "Target: (Click a Mesh/CSG or Spawn Shape)")
 		}
@@ -7905,7 +7906,7 @@ _draw_csg_drawer_draw :: proc(avail_w, half_w: f32) {
 	if vol_tex, _ := _resolve_active_volume(false); vol_tex != nil && _ed.selected_brush_idx >= 0 && _ed.selected_brush_idx < len(vol_tex.brushes) {
 		sb := &vol_tex.brushes[_ed.selected_brush_idx]
 		im.Separator()
-		im.TextColored({0.95, 0.85, 0.35, 1.0}, fmt.ctprintf("Brush TexGen UV (%s):", sb.name))
+		im.TextColoredUnformatted({0.95, 0.85, 0.35, 1.0}, fmt.ctprintf("Brush TexGen UV (%s):", sb.name))
 		tex_dirty := false
 		if im.Checkbox("Brush-Locked UVs (No Swim)", &sb.uv_lock_brush) do tex_dirty = true
 		if sb.uv_scale <= 0.001 do sb.uv_scale = 0.5
@@ -8025,11 +8026,11 @@ _draw_csg_drawer_booleans :: proc(avail_w, half_w, third_w: f32) {
 		}
 	}
 
-	im.TextColored({0.25, 0.95, 0.45, 1.0}, fmt.ctprintf("Target (CSG A): %s", target_name))
+	im.TextColoredUnformatted({0.25, 0.95, 0.45, 1.0}, fmt.ctprintf("Target (CSG A): %s", target_name))
 	if tool_h != {} {
 		extra_lbl := ""
 		if len(extra_tools) > 0 do extra_lbl = fmt.tprintf(" (+ %d more)", len(extra_tools))
-		im.TextColored({0.35, 0.85, 1.0, 1.0}, fmt.ctprintf("Tool(s) (CSG/Mesh B): %s%s", tool_name, extra_lbl))
+		im.TextColoredUnformatted({0.35, 0.85, 1.0, 1.0}, fmt.ctprintf("Tool(s) (CSG/Mesh B): %s%s", tool_name, extra_lbl))
 		if im.Button("Swap (A <-> B)##csg_swap", {-1, 22}) {
 			// Reorder selection so `tool_h` becomes Target A and `target_h` becomes Tool B
 			engine.inspector_request_select(tool_h)
@@ -8347,20 +8348,16 @@ _draw_csg_drawer_kitbash :: proc(avail_w, half_w: f32) {
 	if can_revert_or_rewrap_csg_mesh(owner_h) {
 		im.SeparatorText("Compare CSG Wrap Methods / Undo to Mesh")
 		_draw_csg_wrap_mode_selector(avail_w)
-		im.PushStyleColorImVec4(.Button, {0.18, 0.56, 0.82, 0.98})
-		if im.Button("Re-Wrap CSG with Selected Method", {half_w, 25}) {
+		if widgets.button_colored("Re-Wrap CSG with Selected Method", {0.18, 0.56, 0.82, 0.98}, {half_w, 25}) {
 			_ = convert_editable_mesh_to_csg(make_dynamic_physics = vol.is_dynamic_rigidbody, append_to_active_volume = false)
 		}
-		im.PopStyleColor(1)
 		widgets.tooltip("Re-runs Mesh -> CSG conversion in-place on the original source mesh using the newly selected CSG Wrap Mode so you can compare all 4 methods!")
 		im.SameLine(0, 4)
-		im.PushStyleColorImVec4(.Button, {0.82, 0.36, 0.16, 0.98})
-		if im.Button("Undo: Revert to Mesh", {half_w, 25}) {
+		if widgets.button_colored("Undo: Revert to Mesh", {0.82, 0.36, 0.16, 0.98}, {half_w, 25}) {
 			if revert_csg_to_original_mesh(owner_h) {
 				return
 			}
 		}
-		im.PopStyleColor(1)
 		widgets.tooltip("Undoes the Mesh -> CSG conversion and restores the original MeshFilter + MeshRenderer (or Posed Skeletal Rig)!")
 	}
 
@@ -8647,20 +8644,16 @@ _draw_csg_drawer_bake :: proc(avail_w, half_w: f32) {
 		if can_revert_or_rewrap_csg_mesh(act_h) {
 			im.SeparatorText("Mesh -> CSG Wrap Switcher & Undo")
 			_draw_csg_wrap_mode_selector(avail_w)
-			im.PushStyleColorImVec4(.Button, {0.18, 0.56, 0.82, 0.98})
-			if im.Button("Re-Wrap with Selected Method", {half_w, 25}) {
+			if widgets.button_colored("Re-Wrap with Selected Method", {0.18, 0.56, 0.82, 0.98}, {half_w, 25}) {
 				_ = convert_editable_mesh_to_csg(make_dynamic_physics = vol_act.is_dynamic_rigidbody, append_to_active_volume = false)
 			}
-			im.PopStyleColor(1)
 			widgets.tooltip("Re-wraps the original source mesh using the selected CSG Wrap Mode so you can compare all 4 methods back-to-back!")
 			im.SameLine(0, 4)
-			im.PushStyleColorImVec4(.Button, {0.82, 0.36, 0.16, 0.98})
-			if im.Button("Undo: Revert CSG -> Mesh", {half_w, 25}) {
+			if widgets.button_colored("Undo: Revert CSG -> Mesh", {0.82, 0.36, 0.16, 0.98}, {half_w, 25}) {
 				if revert_csg_to_original_mesh(act_h) {
 					return
 				}
 			}
-			im.PopStyleColor(1)
 			widgets.tooltip("Undoes the Mesh -> CSG conversion and restores the original MeshFilter + MeshRenderer (or Posed Skeletal Rig)!")
 			im.Separator()
 		}
@@ -8831,7 +8824,7 @@ _draw_mesh_drawer_poly_edit :: proc(avail_w, half_w, third_w, fourth_w: f32) {
 
 	switch _mesh_ed.select_mode {
 	case .Vertex:
-		im.TextColored({1.0, 0.85, 0.30, 1.0}, fmt.ctprintf("Vertex Tools (%d selected):", len(_mesh_ed.selected_verts)))
+		im.TextColoredUnformatted({1.0, 0.85, 0.30, 1.0}, fmt.ctprintf("Vertex Tools (%d selected):", len(_mesh_ed.selected_verts)))
 		im.TextDisabled("Shift/Ctrl+Click 3+ verts -> Make Face (F)")
 
 		can_make_face := len(_mesh_ed.selected_verts) >= 2
@@ -9079,11 +9072,11 @@ _draw_mesh_drawer_booleans :: proc(avail_w, half_w, third_w: f32) {
 		}
 	}
 
-	im.TextColored({0.25, 0.95, 0.45, 1.0}, fmt.ctprintf("Target (Mesh A): %s", target_name))
+	im.TextColoredUnformatted({0.25, 0.95, 0.45, 1.0}, fmt.ctprintf("Target (Mesh A): %s", target_name))
 	if tool_h != {} {
 		extra_lbl := ""
 		if len(extra_tools) > 0 do extra_lbl = fmt.tprintf(" (+ %d more)", len(extra_tools))
-		im.TextColored({0.35, 0.85, 1.0, 1.0}, fmt.ctprintf("Tool(s) (Mesh B): %s%s", tool_name, extra_lbl))
+		im.TextColoredUnformatted({0.35, 0.85, 1.0, 1.0}, fmt.ctprintf("Tool(s) (Mesh B): %s%s", tool_name, extra_lbl))
 		if im.Button("Swap (A <-> B)", {-1, 22}) {
 			_mesh_ed.target_owner = {}
 			engine.inspector_request_select(tool_h)
@@ -9218,7 +9211,7 @@ _draw_mesh_drawer_convert :: proc(avail_w, half_w: f32) {
 	im.PopStyleColor(1)
 	widgets.tooltip("Writes this mesh to disk as 'assets/meshes/<Name>.glb' (glTF 2.0 binary) and '.obj', imports into AssetDB, and binds to MeshFilter!")
 	if len(_mesh_ed.save_status) > 0 {
-		im.TextColored({0.35, 0.98, 0.55, 1.0}, strings.clone_to_cstring(_mesh_ed.save_status, context.temp_allocator))
+		im.TextColoredUnformatted({0.35, 0.98, 0.55, 1.0}, strings.clone_to_cstring(_mesh_ed.save_status, context.temp_allocator))
 	}
 
 	im.SeparatorText("Watertight Check & Multi-Pass Repair")
@@ -9230,14 +9223,14 @@ _draw_mesh_drawer_convert :: proc(avail_w, half_w: f32) {
 	if is_watertight_ready {
 		im.PushStyleColorImVec4(.Text, {0.28, 0.96, 0.48, 1.0})
 		if r.concave_face_count == 0 {
-			im.TextWrapped(fmt.ctprintf("%s Watertight Convex Mesh (%dV, %dF)", icons.ICON_MD_CHECK, r.vert_count, r.face_count))
+			im.TextWrappedUnformatted(fmt.ctprintf("%s Watertight Convex Mesh (%dV, %dF)", icons.ICON_MD_CHECK, r.vert_count, r.face_count))
 		} else {
-			im.TextWrapped(fmt.ctprintf("%s Watertight Concave / Tunnel Mesh (%dV, %dF) — Ready for Multi-Hull CSG!", icons.ICON_MD_CHECK, r.vert_count, r.face_count))
+			im.TextWrappedUnformatted(fmt.ctprintf("%s Watertight Concave / Tunnel Mesh (%dV, %dF) — Ready for Multi-Hull CSG!", icons.ICON_MD_CHECK, r.vert_count, r.face_count))
 		}
 		im.PopStyleColor(1)
 	} else {
 		im.PushStyleColorImVec4(.Text, {1.0, 0.52, 0.28, 1.0})
-		im.TextWrapped(fmt.ctprintf("%s Repair Needed (%d open edges, %d flipped):", icons.ICON_MD_WARNING, r.open_boundary_edges, r.inverted_normal_faces))
+		im.TextWrappedUnformatted(fmt.ctprintf("%s Repair Needed (%d open edges, %d flipped):", icons.ICON_MD_WARNING, r.open_boundary_edges, r.inverted_normal_faces))
 		im.PopStyleColor(1)
 		if r.open_boundary_edges > 0 {
 			if im.Button("Auto-Fix: Multi-Pass Stitch & Close Holes", {avail_w, 22}) {
@@ -10044,7 +10037,7 @@ draw_procedural_texture_and_material_studio_contents :: proc() {
 			im.SameLine()
 		}
 		im.BeginGroup()
-		im.TextColored({0.45, 0.92, 1.0, 1.0}, fmt.ctprintf("Active Stamps: %d / %d", len(vol.soft_deform_stamps), cad_csg.MAX_SOFT_DEFORM_STAMPS))
+		im.TextColoredUnformatted({0.45, 0.92, 1.0, 1.0}, fmt.ctprintf("Active Stamps: %d / %d", len(vol.soft_deform_stamps), cad_csg.MAX_SOFT_DEFORM_STAMPS))
 		im.TextWrapped("Encoding: Neutral (0,0,0) = RGB(128,128,128). Displacements map [-1m..+1m] -> [0..255].")
 		im.TextWrapped("Jolt Physics Colliders (LAYER_STATIC_WORLD) remain 100%% untouched while visual vertices deform via p' = p0 + delta_p(x, t)!")
 		if im.Button("Save Material DataTable JSON", {210, 23}) {

@@ -145,14 +145,25 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //   "delegates": [
 //     "On_Boost_Pulse"
 //   ],
+//   "enums": [
+// 
+//   ],
+//   "structs": [
+// 
+//   ],
 //   "variables": [
 //     {
 //       "name": "amplitude",
 //       "pin_type": 3,
 //       "is_array": false,
+//       "array_count": 0,
+//       "array_is_bounded": false,
+//       "custom_type_name": "",
 //       "default_f32": 0.40000001,
 //       "default_int": 0,
 //       "default_i64": 0,
+//       "default_u64": 0,
+//       "default_f64": 0.0000000000000000,
 //       "default_bool": false,
 //       "default_vec2": [
 //         0.00000000,
@@ -180,9 +191,14 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //       "name": "frequency",
 //       "pin_type": 3,
 //       "is_array": false,
+//       "array_count": 0,
+//       "array_is_bounded": false,
+//       "custom_type_name": "",
 //       "default_f32": 2.20000005,
 //       "default_int": 0,
 //       "default_i64": 0,
+//       "default_u64": 0,
+//       "default_f64": 0.0000000000000000,
 //       "default_bool": false,
 //       "default_vec2": [
 //         0.00000000,
@@ -210,9 +226,14 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //       "name": "phase",
 //       "pin_type": 3,
 //       "is_array": false,
+//       "array_count": 0,
+//       "array_is_bounded": false,
+//       "custom_type_name": "",
 //       "default_f32": 0.00000000,
 //       "default_int": 0,
 //       "default_i64": 0,
+//       "default_u64": 0,
+//       "default_f64": 0.0000000000000000,
 //       "default_bool": false,
 //       "default_vec2": [
 //         0.00000000,
@@ -255,6 +276,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //       "per_object_ts": false,
 //       "hot_proc_target": "",
 //       "odin_body": "",
+//       "for_mode": 0,
+//       "loop_reverse": false,
+//       "sub_op": 0,
+//       "target_var_or_type": "",
 //       "action_name": "",
 //       "trigger_edge": 0,
 //       "input_priority": 10,
@@ -272,9 +297,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 0,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -291,7 +319,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         }
 //       ]
 //     },
@@ -312,6 +343,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //       "per_object_ts": false,
 //       "hot_proc_target": "On_Jump_Boost",
 //       "odin_body": "// Scoped Procedure Body (`using self` variables active!)\nhot.log_info(\"Custom procedure executed\")",
+//       "for_mode": 0,
+//       "loop_reverse": false,
+//       "sub_op": 0,
+//       "target_var_or_type": "",
 //       "action_name": "",
 //       "trigger_edge": 0,
 //       "input_priority": 10,
@@ -329,9 +364,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 0,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -348,7 +386,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         },
 //         {
 //           "name": "Exec",
@@ -356,9 +397,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 0,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -375,7 +419,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         },
 //         {
 //           "name": "Payload",
@@ -383,9 +430,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 0,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -402,7 +452,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         },
 //         {
 //           "name": "Input Vec2",
@@ -410,9 +463,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 0,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -429,7 +485,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         },
 //         {
 //           "name": "Pressed",
@@ -437,9 +496,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 0,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -456,7 +518,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         }
 //       ]
 //     },
@@ -477,6 +542,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //       "per_object_ts": false,
 //       "hot_proc_target": "On_Jump_Boost",
 //       "odin_body": "",
+//       "for_mode": 0,
+//       "loop_reverse": false,
+//       "sub_op": 0,
+//       "target_var_or_type": "",
 //       "action_name": "Jump",
 //       "trigger_edge": 0,
 //       "input_priority": 10,
@@ -491,9 +560,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 0,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -510,7 +582,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         },
 //         {
 //           "name": "Target Proc",
@@ -518,9 +593,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 0,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -537,7 +615,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         }
 //       ],
 //       "outputs": [
@@ -547,9 +628,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 0,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -566,7 +650,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         }
 //       ]
 //     },
@@ -587,6 +674,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //       "per_object_ts": false,
 //       "hot_proc_target": "",
 //       "odin_body": "",
+//       "for_mode": 0,
+//       "loop_reverse": false,
+//       "sub_op": 0,
+//       "target_var_or_type": "",
 //       "action_name": "",
 //       "trigger_edge": 0,
 //       "input_priority": 10,
@@ -601,9 +692,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 0,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -620,7 +714,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         },
 //         {
 //           "name": "New Pos",
@@ -628,9 +725,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 0,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -647,7 +747,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         }
 //       ],
 //       "outputs": [
@@ -657,9 +760,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 0,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -676,7 +782,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         }
 //       ]
 //     },
@@ -697,6 +806,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //       "per_object_ts": false,
 //       "hot_proc_target": "",
 //       "odin_body": "",
+//       "for_mode": 0,
+//       "loop_reverse": false,
+//       "sub_op": 0,
+//       "target_var_or_type": "",
 //       "action_name": "",
 //       "trigger_edge": 0,
 //       "input_priority": 10,
@@ -714,9 +827,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 0,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -733,7 +849,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         },
 //         {
 //           "name": "dt",
@@ -741,9 +860,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 0,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -760,7 +882,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         },
 //         {
 //           "name": "Object dt",
@@ -768,9 +893,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 0,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -787,7 +915,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         }
 //       ]
 //     },
@@ -808,6 +939,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //       "per_object_ts": false,
 //       "hot_proc_target": "",
 //       "odin_body": "",
+//       "for_mode": 0,
+//       "loop_reverse": false,
+//       "sub_op": 0,
+//       "target_var_or_type": "",
 //       "action_name": "",
 //       "trigger_edge": 0,
 //       "input_priority": 10,
@@ -825,9 +960,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 0,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -844,7 +982,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         },
 //         {
 //           "name": "Ref (^Ptr)",
@@ -852,9 +993,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 1,
 //           "is_addressable": true,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -871,7 +1015,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         }
 //       ]
 //     },
@@ -892,6 +1039,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //       "per_object_ts": false,
 //       "hot_proc_target": "",
 //       "odin_body": "",
+//       "for_mode": 0,
+//       "loop_reverse": false,
+//       "sub_op": 0,
+//       "target_var_or_type": "",
 //       "action_name": "",
 //       "trigger_edge": 0,
 //       "input_priority": 10,
@@ -909,9 +1060,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 0,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -928,7 +1082,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         },
 //         {
 //           "name": "Ref (^Ptr)",
@@ -936,9 +1093,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 1,
 //           "is_addressable": true,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -955,7 +1115,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         }
 //       ]
 //     },
@@ -976,6 +1139,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //       "per_object_ts": false,
 //       "hot_proc_target": "",
 //       "odin_body": "",
+//       "for_mode": 0,
+//       "loop_reverse": false,
+//       "sub_op": 0,
+//       "target_var_or_type": "",
 //       "action_name": "",
 //       "trigger_edge": 0,
 //       "input_priority": 10,
@@ -993,9 +1160,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 0,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -1012,7 +1182,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         },
 //         {
 //           "name": "Ref (^Ptr)",
@@ -1020,9 +1193,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 1,
 //           "is_addressable": true,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -1039,7 +1215,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         }
 //       ]
 //     },
@@ -1060,6 +1239,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //       "per_object_ts": false,
 //       "hot_proc_target": "",
 //       "odin_body": "",
+//       "for_mode": 0,
+//       "loop_reverse": false,
+//       "sub_op": 0,
+//       "target_var_or_type": "",
 //       "action_name": "",
 //       "trigger_edge": 0,
 //       "input_priority": 10,
@@ -1077,9 +1260,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 0,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -1096,7 +1282,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         },
 //         {
 //           "name": "Pos Ref (^Vec3)",
@@ -1104,9 +1293,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 1,
 //           "is_addressable": true,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -1123,7 +1315,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         }
 //       ]
 //     },
@@ -1144,6 +1339,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //       "per_object_ts": false,
 //       "hot_proc_target": "_mhnode_10",
 //       "odin_body": "// Mutate `pos^` by reference (`\u25c6 ^Ref`) using `amp` & `phase^`!\nphase^ += dt * freq * math.TAU\nwave_y = math.sin(phase^) * amp\npos.y += wave_y * dt\n",
+//       "for_mode": 0,
+//       "loop_reverse": false,
+//       "sub_op": 0,
+//       "target_var_or_type": "",
 //       "action_name": "",
 //       "trigger_edge": 0,
 //       "input_priority": 10,
@@ -1158,9 +1357,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 0,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -1177,7 +1379,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         },
 //         {
 //           "name": "amp",
@@ -1185,9 +1390,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 0,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.34999999,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -1204,7 +1412,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         },
 //         {
 //           "name": "freq",
@@ -1212,9 +1423,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 0,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 2.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -1231,7 +1445,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         },
 //         {
 //           "name": "phase",
@@ -1239,9 +1456,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 1,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -1258,7 +1478,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         },
 //         {
 //           "name": "pos",
@@ -1266,9 +1489,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 1,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -1285,7 +1511,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         }
 //       ],
 //       "outputs": [
@@ -1295,9 +1524,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 0,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -1314,7 +1546,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         },
 //         {
 //           "name": "wave_y",
@@ -1322,9 +1557,12 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //           "pass_mode": 0,
 //           "is_addressable": false,
 //           "is_array": false,
+//           "custom_type_name": "",
 //           "default_f32": 0.00000000,
 //           "default_int": 0,
 //           "default_i64": 0,
+//           "default_u64": 0,
+//           "default_f64": 0.0000000000000000,
 //           "default_bool": false,
 //           "default_vec2": [
 //             0.00000000,
@@ -1341,7 +1579,10 @@ mhgraph_hover_oscillator :: proc "c" (api: ^hot.Engine_Hot_API, self: hot.Hot_En
 //             0.00000000,
 //             0.00000000
 //           ],
-//           "default_str": ""
+//           "default_str": "",
+//           "split_expanded": false,
+//           "split_parent_name": "",
+//           "split_field_name": ""
 //         }
 //       ]
 //     }

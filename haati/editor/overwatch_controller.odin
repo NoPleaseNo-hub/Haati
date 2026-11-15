@@ -28,12 +28,14 @@ import "widgets"
 
 @(private = "file")
 _ow_ctrl: struct {
-	proc_handle:       os.Process,
-	has_proc_handle:   bool,
-	last_sel_handle:   engine.Transform_Handle,
-	last_sim_active:   bool,
-	last_hot_gen:      int,
-	started_grace_sec: f32,
+	proc_handle:        os.Process,
+	has_proc_handle:    bool,
+	last_sel_handle:    engine.Transform_Handle,
+	last_sim_active:    bool,
+	last_hot_gen:       int,
+	last_moving_window: bool,
+	last_drag_drop:     bool,
+	started_grace_sec:  f32,
 }
 
 @(private = "file")
@@ -70,11 +72,13 @@ overwatch_recorder_start :: proc(headless := false) -> bool {
 
 	wnd.on_window_event_hook = _on_window_hook
 	undo.on_undo_event_hook  = _on_undo_hook
-	_ow_ctrl.started_grace_sec = 3.0
-	_ow_ctrl.last_sel_handle   = {}
-	_ow_ctrl.last_sim_active   = sim_is_active()
+	_ow_ctrl.started_grace_sec  = 3.0
+	_ow_ctrl.last_sel_handle    = {}
+	_ow_ctrl.last_sim_active    = sim_is_active()
 	_, hot_gen, _, _, _ := engine.hot_cartridge_status()
-	_ow_ctrl.last_hot_gen = hot_gen
+	_ow_ctrl.last_hot_gen       = hot_gen
+	_ow_ctrl.last_moving_window = false
+	_ow_ctrl.last_drag_drop     = false
 
 	// 2. Locate (or auto-build if missing) `builds/Haati_Overwatch.exe` and spawn detached!
 	repo_root := engine.resolve_repo_root(context.temp_allocator)
@@ -83,7 +87,7 @@ overwatch_recorder_start :: proc(headless := false) -> bool {
 
 	if !os.exists(bin_abs) {
 		odin_exe := engine.resolve_odin_binary(context.temp_allocator)
-		if bp, started := engine.bg_process_start_to_file(repo_root, {odin_exe, "run", "tools/mh", "--", "overwatch"}); started {
+		if bp, started := engine.bg_process_start_to_file(repo_root, {odin_exe, "run", "tools/haati", "--", "overwatch"}); started {
 			_, _ = engine.bg_process_wait(&bp, 30000)
 		}
 	}
@@ -218,6 +222,24 @@ overwatch_recorder_tick :: proc(dt_sec: f32) {
 	if !io.WantTextInput && im.IsKeyPressed(.Delete, false) {
 		engine.overwatch_record_event(.User_Action, "Shortcut", fmt.tprintf("Pressed Delete (Selected: %s)", sel_name))
 	}
+
+	// 2e. Window Drag & Asset Drag-and-Drop Milestones
+	g_ctx := im.GetCurrentContext()
+	moving_now := g_ctx != nil && g_ctx.MovingWindow != nil
+	if moving_now != _ow_ctrl.last_moving_window {
+		_ow_ctrl.last_moving_window = moving_now
+		if moving_now {
+			w_name := g_ctx.MovingWindow.Name != nil ? string(g_ctx.MovingWindow.Name) : "(window)"
+			engine.overwatch_record_event(.User_Action, "WindowDrag", fmt.tprintf("Started dragging window '%s'", w_name))
+		} else {
+			engine.overwatch_record_event(.User_Action, "WindowDrag", "Ended window drag")
+		}
+	}
+	drag_drop_now := g_ctx != nil && g_ctx.DragDropActive
+	if drag_drop_now != _ow_ctrl.last_drag_drop {
+		_ow_ctrl.last_drag_drop = drag_drop_now
+		engine.overwatch_record_event(.User_Action, "DragDrop", drag_drop_now ? "Started drag-and-drop operation" : "Ended drag-and-drop operation")
+	}
 }
 
 @(private = "file")
@@ -241,19 +263,24 @@ _open_latest_overwatch_report :: proc() {
 
 @(toolbar={zone="right", order=18})
 _toolbar_overwatch_recorder :: proc() {
+	p := thm.palette()
 	active := engine.overwatch_hooks_extended()
 	spikes := engine.overwatch_spike_count()
 
 	if active {
 		pulse := 0.5 + 0.5 * f32(math.sin(im.GetTime() * 5.0))
-		btn_bg := im.Vec4{0.72 + 0.18 * pulse, 0.16, 0.20, 0.92}
-		btn_hv := im.Vec4{0.92, 0.24, 0.28, 1.00}
+		rec_dark   := thm.lerp_col(p.status_error, p.bg_canvas, 0.25)
+		rec_bright := thm.lerp_col(p.status_error, thm.rgb(0xFFFFFF), 0.14)
+		btn_bg     := thm.with_alpha(thm.lerp_col(rec_dark, rec_bright, pulse), 0.92)
+		btn_hv     := thm.with_alpha(rec_bright, 1.0)
+		btn_act    := thm.with_alpha(thm.lerp_col(p.status_error, p.bg_canvas, 0.40), 1.0)
+		text_col   := p.bg_canvas if p.is_light else p.text_primary
 		im.PushStyleColorImVec4(.Button, btn_bg)
 		im.PushStyleColorImVec4(.ButtonHovered, btn_hv)
-		im.PushStyleColorImVec4(.ButtonActive, {0.60, 0.12, 0.16, 1.0})
-		im.PushStyleColorImVec4(.Text, {1.0, 0.96, 0.96, 1.0})
+		im.PushStyleColorImVec4(.ButtonActive, btn_act)
+		im.PushStyleColorImVec4(.Text, text_col)
 	} else {
-		im.PushStyleColorImVec4(.Text, {0.94, 0.42, 0.46, 0.92})
+		im.PushStyleColorImVec4(.Text, thm.with_alpha(p.status_error, 0.92))
 	}
 
 	lbl := (active && spikes > 0) \
@@ -291,7 +318,6 @@ _toolbar_overwatch_recorder :: proc() {
 	}
 
 	if im.BeginPopup("##toolbar_overwatch_popup") {
-		p := thm.palette()
 		im.TextColored(p.accent, icons.ICON_MD_RECORD + "  Overwatch Out-of-Process Recorder")
 		im.Separator()
 

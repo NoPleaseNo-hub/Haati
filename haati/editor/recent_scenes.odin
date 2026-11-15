@@ -15,10 +15,86 @@ import "core:path/filepath"
 import "core:strings"
 import im "haati:external/odin-imgui"
 import "haati:engine"
+import "haati:editor/icons"
 import "haati:editor/undo"
 import "haati:editor/widgets"
+import wnd "haati:editor/window"
 
 RECENT_SCENES_MAX :: 10
+
+@(private = "file")
+_pending_open_scene_path: string
+
+@(init)
+_recent_scenes_init :: proc "contextless" () {
+	wnd.open_scene_handler = _request_open_scene_impl
+}
+
+@(private = "file")
+_set_pending_open_scene :: proc(path: string) {
+	context.allocator = runtime.default_allocator()
+	if len(_pending_open_scene_path) > 0 {
+		delete(_pending_open_scene_path)
+		_pending_open_scene_path = ""
+	}
+	if len(path) > 0 {
+		_pending_open_scene_path = strings.clone(path)
+	}
+}
+
+@(private = "file")
+_request_open_scene_impl :: proc(path: string, prompt_save: bool) -> bool {
+	if len(path) == 0 do return false
+	clean_p, _ := filepath.clean(path, context.temp_allocator)
+	norm_p, _ := strings.replace_all(clean_p, "\\", "/", context.temp_allocator)
+	engine.asset_db_request_refresh()
+
+	if prompt_save {
+		if cur := engine.sm_scene_get_active(); cur != nil && cur.dirty && !strings.equal_fold(cur.path, norm_p) {
+			_set_pending_open_scene(norm_p)
+			btns := [3]widgets.Dialog_Button{
+				{
+					label = "Save",
+					is_default = true,
+					action = proc() {
+						if cur_sc := engine.sm_scene_get_active(); cur_sc != nil && len(cur_sc.path) > 0 {
+							engine.scene_save(cur_sc, cur_sc.path)
+						}
+						target := strings.clone(_pending_open_scene_path, context.temp_allocator)
+						_set_pending_open_scene("")
+						if len(target) > 0 do editor_open_scene(target)
+					},
+				},
+				{
+					label = "Don't Save",
+					is_danger = true,
+					action = proc() {
+						target := strings.clone(_pending_open_scene_path, context.temp_allocator)
+						_set_pending_open_scene("")
+						if len(target) > 0 do editor_open_scene(target)
+					},
+				},
+				{
+					label = "Cancel",
+					is_cancel = true,
+					action = proc() {
+						_set_pending_open_scene("")
+					},
+				},
+			}
+			widgets.dialog_open(widgets.Dialog{
+				title       = "Unsaved Scene Changes",
+				description = "The active scene has unsaved changes. Save before switching scenes?",
+				icon        = icons.ICON_MD_WARNING,
+				buttons     = btns[:],
+			})
+			return true
+		}
+	}
+
+	editor_open_scene(norm_p)
+	return true
+}
 
 // Fresh navigation to `path`: the nested-scene edit stack resets, undo for
 // the scenes being replaced is purged, and the scene becomes active.

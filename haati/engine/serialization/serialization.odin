@@ -1,5 +1,6 @@
 package serialization
 
+import "base:runtime"
 import "core:fmt"
 import "core:os"
 import "core:encoding/json"
@@ -12,6 +13,10 @@ TYPE_GUID_KEY :: "__type_guid"
 
 BeforeSerializeProc :: proc(ptr: rawptr, tid: typeid, is_cleanup: bool)
 AfterDeserializeProc :: proc(ptr: rawptr, tid: typeid)
+File_Reader_Proc :: #type proc(path: string, allocator: runtime.Allocator) -> ([]u8, os.Error)
+
+file_reader_hook:   File_Reader_Proc
+read_only_vfs_hook: proc() -> bool
 
 mapBeforeSerialize: map[typeid]BeforeSerializeProc
 mapAfterDeserialize: map[typeid]AfterDeserializeProc
@@ -45,19 +50,31 @@ load_from_file :: proc(filepath: string) -> (file_data: any, ok: bool) {
         return any{}, false
     }
 
-    // Read file
-    raw_data, read_ok := os.read_entire_file(filepath, context.allocator)
+    // Read file (mounted VFS first via hook or direct engine VFS, disk fallback)
+    raw_data: []u8
+    read_ok: os.Error
+    if file_reader_hook != nil {
+        raw_data, read_ok = file_reader_hook(filepath, context.allocator)
+    } else {
+        raw_data, read_ok = engine.vfs_read_entire_file(filepath, context.allocator)
+    }
     if read_ok != nil {
         log.error(fmt.tprintf("Failed to read file: %s", filepath))
         return any{}, false
     }
     defer delete(raw_data)
 
+    read_only := engine.vfs_is_mounted()
+    if read_only_vfs_hook != nil {
+        read_only = read_only_vfs_hook()
+    }
     data := raw_data
     sanitized_data, was_sanitized := engine.material_sanitize_legacy_json(raw_data, context.temp_allocator)
     if was_sanitized {
         data = sanitized_data
-        _ = os.write_entire_file(filepath, sanitized_data)
+        if !read_only {
+            _ = os.write_entire_file(filepath, sanitized_data)
+        }
     }
 
     // Parse JSON
@@ -102,8 +119,13 @@ load_from_file :: proc(filepath: string) -> (file_data: any, ok: bool) {
     // Zeroed, then the file over the type's reset defaults: a field the file
     // lacks keeps its default.
     instance := engine.create_zero_instance_by_guid(guid)
+    if instance.data == nil {
+        log.error(fmt.tprintf("Failed to allocate instance for __type_guid: %s", guid_str))
+        return any{}, false
+    }
     unmarshal_err := engine.unmarshal_over_reset_object(data, root, instance.data, instance.id, json.DEFAULT_SPECIFICATION, context.allocator)
     if unmarshal_err != nil {
+        free(instance.data)
         log.error(fmt.tprintf("Failed to unmarshal JSON: %v", unmarshal_err))
         return any{}, false
     }
@@ -117,8 +139,8 @@ load_from_file :: proc(filepath: string) -> (file_data: any, ok: bool) {
     return result, true
 }
 
-// write_asset_to_path writes a default asset (guid + marshaled data) to file_path. Used by Create Asset menu.
-write_asset_to_path :: proc(file_path: string, guid: uuid.Identifier, data: any) -> bool {
+// write_asset_to_path writes a default asset (guid + marshaled data) to file_path.
+write_asset_to_path :: proc(file_path: string, guid: uuid.Identifier, data: any, log_tag := "Created asset") -> bool {
     if file_path == "" || len(file_path) < 5 {
         log.error("write_asset_to_path: invalid file path")
         return false
@@ -151,66 +173,36 @@ write_asset_to_path :: proc(file_path: string, guid: uuid.Identifier, data: any)
     strings.write_string(&builder, TYPE_GUID_KEY)
     strings.write_string(&builder, "\": \"")
     strings.write_string(&builder, guid_str)
-    strings.write_string(&builder, "\",\n  ")
-    strings.write_bytes(&builder, data_bytes[4:])
+    brace_idx := -1
+    for bi := 0; bi < len(data_bytes); bi += 1 {
+        if data_bytes[bi] == '{' {
+            brace_idx = bi
+            break
+        }
+    }
+    tail := ""
+    if brace_idx >= 0 {
+        after_brace := strings.trim_left_space(string(data_bytes[brace_idx + 1:]))
+        if len(after_brace) > 0 && after_brace != "}" {
+            tail = after_brace
+        }
+    }
+    if tail != "" {
+        strings.write_string(&builder, "\",\n  ")
+        strings.write_string(&builder, tail)
+    } else {
+        strings.write_string(&builder, "\"\n}")
+    }
     full_json := strings.to_string(builder)
     if write_err := os.write_entire_file(file_path, transmute([]byte)full_json); write_err != nil {
         log.error(fmt.tprintf("write_asset_to_path: failed to write %s", file_path))
         return false
     }
-    log.info(fmt.tprintf("Created asset: %s", file_path))
+    log.info(fmt.tprintf("%s: %s", log_tag, file_path))
     return true
 }
 
 save_to_file :: proc(filepath: string, file_data: any) -> bool {
-    if filepath == "" || len(filepath) < 5 {
-        log.error(fmt.tprintf("Invalid filepath: %s", filepath))
-        return false
-    }
-
-    tid := file_data.id
-    if cb, ok := mapBeforeSerialize[tid]; ok {
-        cb(file_data.data, tid, false)
-    }
-
-    guid := engine.get_guid_by_typeid(tid)
-
-    opts := json.Marshal_Options{
-        spec    = .JSON,
-        pretty  = true,
-        use_spaces = true,
-        spaces  = 2,
-    }
-    raw_bytes, marshal_err := json.marshal(file_data, opts)
-    if marshal_err != nil {
-        log.error(fmt.tprintf("JSON marshal failed: %v", marshal_err))
-        return false
-    }
-    data_bytes := engine.json_canonicalize_floats(raw_bytes)
-    delete(raw_bytes)
-    defer delete(data_bytes)
-    if cb, ok := mapBeforeSerialize[tid]; ok {
-        cb(file_data.data, tid, true)
-    }
-
-    guid_str := uuid.to_string(guid)
-    defer delete(guid_str)
-    builder := strings.builder_make()
-    defer strings.builder_destroy(&builder)
-    strings.write_string(&builder, "{\n  \"")
-    strings.write_string(&builder, TYPE_GUID_KEY)
-    strings.write_string(&builder, "\": \"")
-    strings.write_string(&builder, guid_str)
-    strings.write_string(&builder, "\",\n  ")
-    strings.write_bytes(&builder, data_bytes[4:])
-
-    full_json := strings.to_string(builder)
-
-    if write_err := os.write_entire_file(filepath, transmute([]byte)full_json); write_err != nil {
-        log.error(fmt.tprintf("Failed to write file: %s", filepath))
-        return false
-    }
-
-    log.info(fmt.tprintf("Saved successfully to %s", filepath))
-    return true
+    guid := engine.get_guid_by_typeid(file_data.id)
+    return write_asset_to_path(filepath, guid, file_data, "Saved successfully to")
 }

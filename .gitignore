@@ -52,3 +52,11 @@ haati/ProjectSettings/campawn_settings.json
 # Private game project plugin (exempt from public Haati engine repo)
 /plugins/void_odin/
 /plugins/void_odin
+
+# Bundled portable toolchain binaries (downloaded/copied locally)
+/tools/odin/
+/tools/shader_tools/
+
+# Umbrella workspace files (live outside Haati_Engine/ after split)
+/Agent_Docs/
+/AGENTS.md

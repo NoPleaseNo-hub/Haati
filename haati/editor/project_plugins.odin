@@ -15,9 +15,7 @@ import im "haati:external/odin-imgui"
 import "haati:engine_editor/asset_pipeline"
 import "haati:editor/icons"
 import "haati:editor/widgets"
-
-// The working directory is moonhug/, so plugins/ is one level up.
-PLUGINS_DIR :: "../plugins"
+import "../engine"
 
 Plugin_Link_State :: enum {
 	Off,       // nothing in packages/ for this plugin
@@ -30,18 +28,44 @@ Plugin_Entry :: struct {
 	state: Plugin_Link_State,
 }
 
+// Required built-in engine modules hard-imported by editor/engine whose
+// haati:packages/<name> mount stays active for game projects (void_odin, app).
+is_core_engine_module :: proc(name: string) -> bool {
+	switch name {
+	case "cad_csg",
+		"control_rig",
+		"physics3d",
+		"physics2d",
+		"input_manager",
+		"mhgui",
+		"text",
+		"sprites",
+		"essentials",
+		"node_graph",
+		"audio",
+		"animation",
+		"sequencer",
+		"particles",
+		"tween":
+		return true
+	}
+	return false
+}
+
 project_plugins_register :: proc() {
 	settings_add_custom_tab("Plugins", project_plugins_draw)
 }
 
 // Temp-allocated, sorted by the dir cache.
 plugins_list :: proc() -> []Plugin_Entry {
-	entries, ok := project_dir_listing(PLUGINS_DIR)
+	plugins_dir := engine.engine_plugins_dir(context.temp_allocator)
+	pkgs_dir := project_packages_path()
+	entries, ok := project_dir_listing(plugins_dir)
 	if !ok do return nil
 	out := make([dynamic]Plugin_Entry, context.temp_allocator)
 	for entry in entries {
 		if !entry.is_dir || strings.has_prefix(entry.name, ".") do continue
-		link := fmt.tprintf("%s/%s", _PROJECT_PACKAGES_PATH, entry.name)
+		link := fmt.tprintf("%s/%s", pkgs_dir, entry.name)
 		state := Plugin_Link_State.Off
 		if info, lerr := os.lstat(link, context.temp_allocator); lerr == nil {
 			state = info.type == .Symlink ? .Linked : .Directory
@@ -58,27 +82,27 @@ _plugin_after_change :: proc(verb, name: string) {
 	fmt.printfln("[Editor] %s plugin %s - code changes apply after Relaunch", verb, name)
 }
 
-// packages/<name> -> ../../plugins/<name>, relative so the repository can move.
 @(private = "file")
 _plugin_enable :: proc(name: string) {
-	link := fmt.tprintf("%s/%s", _PROJECT_PACKAGES_PATH, name)
-	target := fmt.tprintf("../%s/%s", PLUGINS_DIR, name)
-	if err := os.symlink(target, link); err != nil {
-		fmt.printfln("[Editor] Enable plugin: symlink %s -> %s failed: %v", link, target, err)
+	link := fmt.tprintf("%s/%s", project_packages_path(), name)
+	target := fmt.tprintf("%s/%s", engine.engine_plugins_dir(context.temp_allocator), name)
+	if !engine.os_create_dir_link(link, target) {
+		fmt.printfln("[Editor] Enable plugin: link %s -> %s failed", link, target)
 		return
 	}
 	_plugin_after_change("Enabled", name)
 }
 
-// Only ever removes a symlink. A real directory in packages/ is someone's
-// copy and stays.
+// Only ever removes a symlink/junction. A real directory in packages/ is
+// someone's copy and stays.
 @(private = "file")
 _plugin_disable :: proc(name: string) {
-	link := fmt.tprintf("%s/%s", _PROJECT_PACKAGES_PATH, name)
+	if is_core_engine_module(name) do return
+	link := fmt.tprintf("%s/%s", project_packages_path(), name)
 	info, lerr := os.lstat(link, context.temp_allocator)
 	if lerr != nil || info.type != .Symlink do return
-	if err := os.remove(link); err != nil {
-		fmt.printfln("[Editor] Disable plugin: unlink %s failed: %v", link, err)
+	if !engine.os_remove_dir_link(link) {
+		fmt.printfln("[Editor] Disable plugin: unlink %s failed", link)
 		return
 	}
 	_plugin_after_change("Disabled", name)
@@ -112,18 +136,27 @@ project_plugins_draw :: proc() {
 			im.TableNextRow()
 			im.TableNextColumn()
 
+			core_mod := is_core_engine_module(p.name)
 			on := p.state != .Off
-			im.BeginDisabled(p.state == .Directory)
+			im.BeginDisabled(p.state == .Directory || core_mod)
 			if im.Checkbox(strings.clone_to_cstring(p.name, context.temp_allocator), &on) {
 				if on do _plugin_enable(p.name)
-				else do _plugin_disable(p.name)
+				else if !core_mod do _plugin_disable(p.name)
 			}
 			im.EndDisabled()
+			if core_mod {
+				im.SameLine()
+				im.TextDisabled("[Core Module]")
+			}
 			tip: cstring
-			switch p.state {
-			case .Linked:    tip = fmt.ctprintf("Enabled: packages/%s -> ../../plugins/%s", p.name, p.name)
-			case .Off:       // nothing to say: no link exists
-			case .Directory: tip = fmt.ctprintf("packages/%s is a real directory (a copy), not a link", p.name)
+			if core_mod {
+				tip = fmt.ctprintf("Required built-in engine module: haati:packages/%s stays active for game projects (void_odin, app).", p.name)
+			} else {
+				switch p.state {
+				case .Linked:    tip = fmt.ctprintf("Enabled: packages/%s -> ../../plugins/%s", p.name, p.name)
+				case .Off:       // nothing to say: no link exists
+				case .Directory: tip = fmt.ctprintf("packages/%s is a real directory (a copy), not a link", p.name)
+				}
 			}
 			widgets.tooltip(tip, im.HoveredFlags_AllowWhenDisabled)
 		}

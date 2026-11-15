@@ -75,3 +75,23 @@ spatial_gains :: proc(
 		right = clamp(1 + pan, 0, 1),
 	}
 }
+
+// Computes pinna/head-shadowing directional low-pass cutoff (Hz) from listener-to-source azimuth.
+// Front-facing sources stay bright (~22 kHz); directly behind attenuates smoothly down to ~3.2 kHz.
+spatial_hrtf_lowpass_hz :: proc(
+	listener_pos: [3]f32, listener_rot: [4]f32,
+	source_pos: [3]f32,
+	spatial_blend: f32 = 1.0,
+) -> f32 {
+	if spatial_blend <= 0.001 do return 22000.0
+	delta := source_pos - listener_pos
+	d2 := linalg.length2(delta)
+	if d2 <= 1e-6 do return 22000.0
+	dir_to_src := delta / math.sqrt(d2)
+
+	q := engine.quat_to_native(listener_rot)
+	forward := linalg.normalize0(linalg.quaternion128_mul_vector3(q, [3]f32{0, 0, -1}))
+	front_dot := clamp(linalg.dot(forward, dir_to_src), -1.0, 1.0)
+	rear_factor := clamp((1.0 - front_dot) * 0.5, 0.0, 1.0) * clamp(spatial_blend, 0.0, 1.0)
+	return math.lerp(f32(22000.0), f32(3200.0), rear_factor * rear_factor)
+}

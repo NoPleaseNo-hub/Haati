@@ -170,7 +170,7 @@ _picker_asset_rows :: proc(key: engine.TypeKey, search: []string, picked: ^engin
         }
     }
     if shown == 0 {
-        im.TextDisabled("(no assets with this root component)" if key != engine.INVALID_TYPE_KEY else "(no matches)")
+        im.TextDisabledUnformatted("(no assets with this root component)" if key != engine.INVALID_TYPE_KEY else "(no matches)")
     }
     return result
 }

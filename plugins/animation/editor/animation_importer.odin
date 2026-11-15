@@ -21,9 +21,6 @@ import cgltf "vendor:cgltf"
 
 @(phase={key=ImportersInit, order=1, mode=Editor})
 animation_importers_init :: proc() {
-	@(static) done := false
-	if done do return
-	done = true
 	asset_pipeline.importer_register({
 		name         = "animation",
 		version      = 1,

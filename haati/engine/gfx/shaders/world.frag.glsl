@@ -11,5 +11,7 @@ layout(set = 2, binding = 0) uniform sampler2D tex;
 layout(location = 0) out vec4 out_color;
 
 void main() {
-    out_color = texture(tex, frag_uv) * frag_color;
+    vec4 c = texture(tex, frag_uv) * frag_color;
+    // Emit linear color into the HDR target so single-pass composite linear_to_srgb stays exact.
+    out_color = vec4(pow(max(c.rgb, vec3(0.0)), vec3(2.2)), c.a);
 }

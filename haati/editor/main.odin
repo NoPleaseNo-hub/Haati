@@ -33,6 +33,12 @@ import cs "haati:editor/code_studio"
 import vs "haati:editor/visual_script"
 
 main :: proc() {
+    _run_editor_session()
+    relaunch_execute_pending_direct_switch()
+}
+
+@(private = "file")
+_run_editor_session :: proc() {
     when ODIN_DEBUG {
         track: mem.Tracking_Allocator
         mem.tracking_allocator_init(&track, context.allocator)
@@ -49,9 +55,10 @@ main :: proc() {
         }
     }
 
-    // Anchor at moonhug/ before anything reads a relative path. Detection is
-    // by directory content, not folder name (engine/project_root.odin).
-    engine.project_chdir_root()
+    // Resolve Haati_Engine/ vs external active game project root (or Project Hub
+    // startup mode when no last_project_path exists / --project-hub is passed).
+    _, hub_mode := engine.editor_boot_resolve_roots(os.args[1:])
+    defer engine.project_roots_shutdown()
 
     // Before anything that can fault: from here on a crash lands in
     // logs/crash_<pid>.log with a stack (docs/CrashJournal.md).
@@ -68,16 +75,34 @@ main :: proc() {
 
     win_w, win_h, win_x, win_y := load_editor_settings()
     has_saved_settings := win_w > 0 && win_h > 0
+    startup_title := engine.is_project_hub_startup() \
+        ? "Haati Editor — Project Hub" \
+        : fmt.tprintf("%s — %s", WINDOW_TITLE, engine.active_project_name())
     // Window starts hidden so saved geometry applies before first present.
-    if !gfx.init(WINDOW_TITLE, has_saved_settings ? win_w : 800, has_saved_settings ? win_h : 600, show = false) {
+    if !gfx.init(strings.clone_to_cstring(startup_title, context.temp_allocator), has_saved_settings ? win_w : 1020, has_saved_settings ? win_h : 660, show = false) {
         fmt.eprintln("gfx init failed (is SDL3 installed? brew install sdl3)")
         return
     }
     defer gfx.shutdown()
+    defer editor_settings_shutdown()
 
-    if has_saved_settings && win_x >= 0 && win_y >= 0 {
+    // Hold Shift on launch (when not given an explicit --project=) to enter Project Hub.
+    if !hub_mode && !relaunch_has_explicit_project_arg(os.args[1:]) {
+        mods := sdl.GetModState()
+        if (.LSHIFT in mods || .RSHIFT in mods) {
+            engine.enter_project_hub_startup_mode()
+            sdl.SetWindowTitle(gfx.window(), "Haati Editor — Project Hub")
+        }
+    }
+
+    if has_saved_settings && win_x != NO_SAVED_WINDOW_POS && win_y != NO_SAVED_WINDOW_POS && window_rect_visible_on_any_display(win_x, win_y, win_w, win_h) {
         gfx.set_window_geometry(win_x, win_y, win_w, win_h)
-    } else if !has_saved_settings {
+    } else if has_saved_settings {
+        dx, dy, dw, dh := gfx.display_usable_bounds()
+        cw := clamp(win_w, 320, max(dw, 320))
+        ch := clamp(win_h, 240, max(dh, 240))
+        gfx.set_window_geometry(dx + (dw - cw) / 2, dy + (dh - ch) / 2, cw, ch)
+    } else {
         apply_default_window_size()
     }
     // NOTE: Do NOT call `gfx.show_window()` here! Keeping the window hidden until
@@ -130,8 +155,8 @@ main :: proc() {
     viewport_platform_install()
 
     apply_editor_theme()
-    // Apply window/taskbar icon before showing the window so the MoonHug logo is present from frame 0!
-    set_dock_icon("../EditorIcon.png")
+    // Apply window/taskbar icon before showing the window so the Haati logo is present from frame 0!
+    set_dock_icon(engine.engine_file_path("EditorIcon.png", context.temp_allocator))
     // From here reports draw pumped frames — startup shows dark-themed progress
     // instead of a white/black flash (progress_overlay.odin).
     progress_overlay_install()
@@ -143,6 +168,7 @@ main :: proc() {
     uc.is_editor = true // engine.application_is_editor; never changes at runtime
     engine.job_system_init()
     defer engine.job_system_shutdown()
+    defer engine.hot_cartridge_shutdown()
 
     w := new(engine.World)
     engine.w_init(w)
@@ -163,7 +189,15 @@ main :: proc() {
     phase_editor_run(.EditorInit)
     progress.end()
     defer phase_editor_run(.EditorShutdown)
-    queue_scenes_from_settings()
+
+    auto_rebuild_on_boot := !engine.is_project_hub_startup() &&
+        engine.has_active_project() &&
+        !relaunch_is_project_rebuilt_env() &&
+        relaunch_needs_project_rebuild(engine.active_project_root())
+
+    if !engine.is_project_hub_startup() && !auto_rebuild_on_boot {
+        queue_scenes_from_settings()
+    }
     frames_presented := 0
 
     // Resolve which host Simulate ticks, from the generated table
@@ -171,25 +205,28 @@ main :: proc() {
     // load_editor_settings.
     simulate_init()
     defer simulate_shutdown()
-    // Reopen what was open last session — declarations must exist first.
-    if len(editor_settings.open_window_ids) > 0 {
-        wnd.open_saved(editor_settings.open_window_ids[:])
-    } else {
-        wnd.open("void_file_explorer")
-        wnd.open("void_hierarchy")
-        wnd.open("void_inspector")
-    }
+    if !engine.is_project_hub_startup() && !auto_rebuild_on_boot {
+        // Reopen what was open last session — declarations must exist first.
+        if len(editor_settings.open_window_ids) > 0 {
+            wnd.open_saved(editor_settings.open_window_ids[:])
+        } else {
+            wnd.open("void_file_explorer")
+            wnd.open("void_hierarchy")
+            wnd.open("void_inspector")
+        }
 
-    // Guarantee all docked windows in imgui.ini are reopened so ImGui doesn't drop or collapse tabs
-    docked_ids := docked_window_ids_from_imgui_ini(context.temp_allocator)
-    if len(docked_ids) > 0 {
-        wnd.open_saved(docked_ids)
+        // Guarantee all docked windows in imgui.ini are reopened so ImGui doesn't drop or collapse tabs
+        docked_ids := docked_window_ids_from_imgui_ini(context.temp_allocator)
+        if len(docked_ids) > 0 {
+            wnd.open_saved(docked_ids)
+        }
     }
     defer wnd.shutdown()
     defer preview.shutdown()
-    _register_project_settings() // @(project_settings) vars -> settings tabs
-    project_plugins_register()   // the Plugins tab: plugins/ with a link toggle each
-    editor_defaults_init()       // UserSettings/editor_defaults.json + Editor Defaults tab
+    editor_defaults_migrate_legacy() // one-time migration of UserSettings/editor_defaults.json -> EngineSettings/
+    _register_project_settings()     // @(project_settings) vars -> Settings tabs (Tier 1 backdrop + Tier 2 Engine + Tier 3 Project Overrides)
+    project_plugins_register()       // the Plugins tab: plugins/ with a link toggle each
+    editor_defaults_init()           // sync loaded settings -> live UI/IDE/Graph/External IDE subsystems
     defer editor_defaults_shutdown()
     defer settings_shutdown()
     defer thumbnails_shutdown()
@@ -200,8 +237,13 @@ main :: proc() {
     defer relaunch_shm_cleanup()
     defer overwatch_recorder_shutdown()
     studio_windows_init()
+    progress_overlay_uninstall()
+    if auto_rebuild_on_boot {
+        relaunch_request_project(engine.active_project_root())
+    }
 
     for !menu.quit_requested && !gfx.quit_requested() {
+        frame_start_ns := sdl.GetTicksNS()
         engine.overwatch_frame_begin()
         relaunch_tick()
         studio_windows_frame_tick()
@@ -211,8 +253,10 @@ main :: proc() {
         // the user sees the full layout, then scenes appear, instead of a
         // blank window behind a blocking load.
         SCENE_LOAD_WARMUP_FRAMES :: 3
-        if frames_presented >= SCENE_LOAD_WARMUP_FRAMES do load_next_pending_scene()
-        relaunch_shm_tick_restore(frames_presented)
+        if !engine.is_project_hub_startup() && !auto_rebuild_on_boot {
+            if frames_presented >= SCENE_LOAD_WARMUP_FRAMES do load_next_pending_scene()
+            relaunch_shm_tick_restore(frames_presented)
+        }
 
         // Events feed both the editor input snapshot and imgui (the SDL3
         // backend owns keyboard/mouse/text/clipboard/DisplaySize/DeltaTime).
@@ -224,14 +268,18 @@ main :: proc() {
         // Runs asynchronously off the main thread so that window focus
         // never stalls rendering or freezes the frame loop!
         if input.focus_gained() {
-            asset_pipeline.asset_db_refresh_async()
+            if !engine.is_project_hub_startup() && !auto_rebuild_on_boot {
+                asset_pipeline.asset_db_refresh_async()
+            }
             if dock_icon_pending {
                 dock_icon_pending = false
-                set_dock_icon("../EditorIcon.png") // cwd was normalized to moonhug/ at startup
+                set_dock_icon(engine.engine_file_path("EditorIcon.png", context.temp_allocator))
             }
         }
-        if asset_pipeline.asset_db_refresh_tick() {
-            project_dir_cache_invalidate()
+        if !engine.is_project_hub_startup() && !auto_rebuild_on_boot {
+            if asset_pipeline.asset_db_refresh_tick() {
+                project_dir_cache_invalidate()
+            }
         }
 
         // Skip GPU command buffer creation & offscreen rendering when minimized/hidden ONLY if no
@@ -261,7 +309,7 @@ main :: proc() {
         // Once per frame rather than at every mutation site: selection moves
         // from clicks, picking, pending-select and undo restore alike.
         engine.inspector_set_active_selection(sel_scene_active())
-        engine.inspector_set_inspected_selection(inspector_active_target())
+        engine.inspector_set_inspected_selection(sel_scene_inspected_active())
         engine.inspector_set_selection_all(sel_scene_items())
 
         // Thumbnail generation before ANY view draws: scene previews spawn and
@@ -281,129 +329,129 @@ main :: proc() {
         im.GetStyle().FontScaleMain = wnd.get_main_scale()
         text_input_escape_frame() // Escape commits text fields (text_input.odin)
 
-        menu.process_shortcuts()
-        draw_tool_bar()
-        // Dockspace host under the toolbar; must precede the dockable views'
-        // Begin() calls (dock.odin — builds the default layout on first run).
-        draw_dockspace()
+        if engine.is_project_hub_startup() {
+            project_hub_draw_startup_screen()
+            widgets.dialog_draw()
+        } else {
+            menu.process_shortcuts()
+            draw_tool_bar()
+            // Dockspace host under the toolbar; must precede the dockable views'
+            // Begin() calls (dock.odin — builds the default layout on first run).
+            draw_dockspace()
 
-        _process_undo_shortcuts()
-        _process_simulate_shortcuts()
-        // Ctrl+Shift+T: Reopen most recently closed editor tab (LIFO stack)
-        if !im.GetIO().WantTextInput && im.GetIO().KeyCtrl && im.GetIO().KeyShift && im.IsKeyPressed(.T, false) {
-            if reopened, ok := wnd.reopen_last_closed(); ok {
-                engine.overwatch_record_event(.Window_Tab, "Shortcut", fmt.tprintf("Reopened closed tab '%s' (Ctrl+Shift+T)", reopened))
+            _process_undo_shortcuts()
+            _process_simulate_shortcuts()
+            // Ctrl+Shift+T: Reopen most recently closed editor tab (LIFO stack)
+            if !im.GetIO().WantTextInput && im.GetIO().KeyCtrl && im.GetIO().KeyShift && im.IsKeyPressed(.T, false) {
+                if reopened, ok := wnd.reopen_last_closed(); ok {
+                    engine.overwatch_record_event(.Window_Tab, "Shortcut", fmt.tprintf("Reopened closed tab '%s' (Ctrl+Shift+T)", reopened))
+                }
             }
+
+            // A Play requested LAST frame starts here: the frame in between let
+            // every editor preview restore the world it had posed, so the
+            // snapshot captures authored values and tracks release together
+            // (sim.request_start).
+            sim_start_pending()
+
+            // Advance the in-editor simulation before the views draw, so hierarchy,
+            // inspector and scene all show the same frame. Placed AFTER the toolbar
+            // so a Stop pressed this frame takes effect before the tick, never
+            // ticking a scene that is already being torn down.
+            // The game reads input only while the Game view has focus
+            // (view_game.odin); editor views read it unblocked.
+            // Application focus for the game is the Game view's focus during a
+            // run (view_game.odin); the tick is the game scope, editor views
+            // read outside it.
+            game_view_frame_begin()
+            // Gameplay gizmos measure against the game camera: the sim draws them
+            // once, and the game view is the one they are for (docs/Gizmos.md).
+            if v, ok := _game_gizmo_view(); ok do gizmos.set_view(v)
+            input.set_app_focused(!sim_is_active() || game_view_focused)
+            input.set_game_scope(true)
+            engine.overwatch_phase_begin(.Sim_Tick, "sim_tick")
+            sim_tick(gfx.delta_time())
+            engine.overwatch_phase_end(.Sim_Tick)
+            input.set_game_scope(false)
+
+            // ImGui UI
+            engine.overwatch_phase_begin(.Editor_UI, "editor_views")
+            scene_2d_sync_viewport()
+            project_selection_frame_sync()
+
+            if menu.show_console {
+                draw_console_view()
+            }
+
+            if menu.show_history {
+                draw_history_view()
+            }
+
+            // Package editor views (animation, playable graph, ...) — each owns
+            // its own visibility flag (editor/preview).
+            preview.draw_views()
+            engine.overwatch_phase_end(.Editor_UI)
+
+            // The scrub preview poses the world ONLY for the scene/game render:
+            // apply here, restore right after, so every other consumer of the
+            // world this frame (saves, undo, inspector) sees authored values.
+            preview.apply_all()
+            // Handles and gizmo hooks record once per frame, before any view
+            // renders: every view draws the same shapes (gizmo_pass.odin).
+            engine.overwatch_phase_begin(.Gizmo_Pass, "gizmo_pass")
+            gizmo_pass()
+            engine.overwatch_phase_end(.Gizmo_Pass)
+            if menu.show_scene {
+                engine.overwatch_phase_begin(.Scene_3D_View, "Scene3D")
+                draw_scene_view()
+                engine.overwatch_phase_end(.Scene_3D_View)
+            }
+
+            if menu.show_scene_2d {
+                engine.overwatch_phase_begin(.Scene_2D_View, "Scene2D")
+                draw_scene_2d_view()
+                engine.overwatch_phase_end(.Scene_2D_View)
+            }
+
+            if menu.show_game {
+                engine.overwatch_phase_begin(.Game_View, "Game")
+                draw_game_view()
+                engine.overwatch_phase_end(.Game_View)
+            }
+            preview.restore_all()
+
+            engine.overwatch_phase_begin(.Plugin_Windows, "plugin_windows")
+            if menu.show_input_debug {
+                draw_input_debug()
+            }
+
+            if menu.show_output {
+                draw_output_view()
+            }
+
+            // Plugin-opened windows (editor/window, docs/Plugins.md).
+            wnd.draw_all()
+            tab_menu_draw_floating_nodes()
+            wnd.apply_pending_dock_ops()
+            studio_windows_draw_popups()
+            project_hub_draw_modal()
+
+            draw_about_popup()
+            // Confirmations and other modal questions (widgets/dialog.odin).
+            widgets.dialog_draw()
+            widgets.code_jump_popup_draw()
+            draw_status_bar()
+            draw_pending_scene_overlay()
+            engine.overwatch_phase_end(.Plugin_Windows)
+
+            // Import settings undo steps: a finished change to a settings document
+            // becomes one step (inspector/import_settings_docs.odin).
+            inspector.import_settings_track(_frame_may_finish_edit())
+
+            // Selection undo steps (Unity model): diff selection against the
+            // frame's baseline after all views handled input.
+            selection_undo_track()
         }
-
-        // A Play requested LAST frame starts here: the frame in between let
-        // every editor preview restore the world it had posed, so the
-        // snapshot captures authored values and tracks release together
-        // (sim.request_start).
-        sim_start_pending()
-
-        // Advance the in-editor simulation before the views draw, so hierarchy,
-        // inspector and scene all show the same frame. Placed AFTER the toolbar
-        // so a Stop pressed this frame takes effect before the tick, never
-        // ticking a scene that is already being torn down.
-        // The game reads input only while the Game view has focus
-        // (view_game.odin); editor views read it unblocked.
-        // Application focus for the game is the Game view's focus during a
-        // run (view_game.odin); the tick is the game scope, editor views
-        // read outside it.
-        game_view_frame_begin()
-        // Gameplay gizmos measure against the game camera: the sim draws them
-        // once, and the game view is the one they are for (docs/Gizmos.md).
-        if v, ok := _game_gizmo_view(); ok do gizmos.set_view(v)
-        input.set_app_focused(!sim_is_active() || game_view_focused)
-        input.set_game_scope(true)
-        engine.overwatch_phase_begin(.Sim_Tick, "sim_tick")
-        sim_tick(gfx.delta_time())
-        engine.overwatch_phase_end(.Sim_Tick)
-        input.set_game_scope(false)
-
-        // ImGui UI
-        engine.overwatch_phase_begin(.Editor_UI, "editor_views")
-        scene_2d_sync_viewport()
-        project_selection_frame_sync()
-        if menu.show_inspector {
-            draw_hierarchy_inspector()
-        }
-
-        if menu.show_project_inspector {
-            inspector.view_inspector_draw(&menu.show_project_inspector)
-        }
-
-        if menu.show_console {
-            draw_console_view()
-        }
-
-        if menu.show_history {
-            draw_history_view()
-        }
-
-        // Package editor views (animation, playable graph, ...) — each owns
-        // its own visibility flag (editor/preview).
-        preview.draw_views()
-        engine.overwatch_phase_end(.Editor_UI)
-
-        // The scrub preview poses the world ONLY for the scene/game render:
-        // apply here, restore right after, so every other consumer of the
-        // world this frame (saves, undo, inspector) sees authored values.
-        preview.apply_all()
-        // Handles and gizmo hooks record once per frame, before any view
-        // renders: every view draws the same shapes (gizmo_pass.odin).
-        engine.overwatch_phase_begin(.Gizmo_Pass, "gizmo_pass")
-        gizmo_pass()
-        engine.overwatch_phase_end(.Gizmo_Pass)
-        if menu.show_scene {
-            engine.overwatch_phase_begin(.Scene_3D_View, "Scene3D")
-            draw_scene_view()
-            engine.overwatch_phase_end(.Scene_3D_View)
-        }
-
-        if menu.show_scene_2d {
-            engine.overwatch_phase_begin(.Scene_2D_View, "Scene2D")
-            draw_scene_2d_view()
-            engine.overwatch_phase_end(.Scene_2D_View)
-        }
-
-        if menu.show_game {
-            engine.overwatch_phase_begin(.Game_View, "Game")
-            draw_game_view()
-            engine.overwatch_phase_end(.Game_View)
-        }
-        preview.restore_all()
-
-        engine.overwatch_phase_begin(.Plugin_Windows, "plugin_windows")
-        if menu.show_input_debug {
-            draw_input_debug()
-        }
-
-        if menu.show_output {
-            draw_output_view()
-        }
-
-        // Plugin-opened windows (editor/window, docs/Plugins.md).
-        wnd.draw_all()
-        tab_menu_draw_floating_nodes()
-        studio_windows_draw_popups()
-
-        draw_about_popup()
-        // Confirmations and other modal questions (widgets/dialog.odin).
-        widgets.dialog_draw()
-        widgets.code_jump_popup_draw()
-        draw_status_bar()
-        draw_pending_scene_overlay()
-        engine.overwatch_phase_end(.Plugin_Windows)
-
-        // Import settings undo steps: a finished change to a settings document
-        // becomes one step (inspector/import_settings_docs.odin).
-        inspector.import_settings_track(_frame_may_finish_edit())
-
-        // Selection undo steps (Unity model): diff selection against the
-        // frame's baseline after all views handled input.
-        selection_undo_track()
 
         // Render. Scene/game views already encoded their offscreen passes
         // into this frame's command buffer during the UI calls above; imgui's
@@ -411,38 +459,56 @@ main :: proc() {
         // pass, and its draw happens inside it (pass_end callback).
         engine.overwatch_phase_begin(.Swapchain_Present, "swapchain_present")
         im.Render()
-        dd := im.GetDrawData()
-        im_sdlgpu.PrepareDrawData(dd, gfx.command_buffer())
-        swap_bg := thm.palette().bg_canvas
-        if gfx.pass_begin_swapchain([4]f32{swap_bg.x, swap_bg.y, swap_bg.z, 1}, depth = false) {
-            gfx.pass_end(proc(cmd: ^sdl.GPUCommandBuffer, rp: ^sdl.GPURenderPass) {
-                im_sdlgpu.RenderDrawData(im.GetDrawData(), cmd, rp)
-            })
-            // A queued full-window screenshot copies the swapchain HERE: the UI
-            // has drawn into it and the command buffer is still open. Costs
-            // nothing on frames nobody asked for one.
-            mcp_bridge_capture_frame()
-        } else {
-            // Only throttle in software when the main window is genuinely minimized/hidden.
-            // Transient single-frame non-blocking swapchain skips during drags must not sleep.
-            cur_flags := sdl.GetWindowFlags(gfx.window())
-            if .MINIMIZED in cur_flags || .HIDDEN in cur_flags {
-                if has_secondary_lifeline && viewport_any_editor_window_has_focus() {
-                    sdl.Delay(8)
-                } else if !viewport_is_mouse_dragging() {
-                    sdl.Delay(editor_defaults_background_delay_ms())
+        @(static) _last_main_present_ns: u64 = 0
+        skip_for_mixed_hz := false
+        if viewport_any_secondary_window() && !gfx.is_main_mailbox_active() {
+            main_hz := viewport_main_refresh_hz()
+            target_hz := viewport_target_refresh_hz()
+            if target_hz > main_hz + 5.0 {
+                main_interval_ns := u64(1_000_000_000.0 / f64(max(main_hz, 30.0)))
+                now_ns := sdl.GetTicksNS()
+                if _last_main_present_ns != 0 && now_ns - _last_main_present_ns < main_interval_ns {
+                    skip_for_mixed_hz = true
                 }
             }
         }
+        swap_bg := thm.palette().bg_canvas
+        swapped := !skip_for_mixed_hz && gfx.pass_begin_swapchain([4]f32{swap_bg.x, swap_bg.y, swap_bg.z, 1}, depth = false)
+        if swapped {
+            _last_main_present_ns = sdl.GetTicksNS()
+            dd := im.GetDrawData()
+            im_sdlgpu.PrepareDrawData(dd, gfx.command_buffer())
+            gfx.pass_end(proc(cmd: ^sdl.GPUCommandBuffer, rp: ^sdl.GPURenderPass) {
+                im_sdlgpu.RenderDrawData(im.GetDrawData(), cmd, rp)
+            })
+        }
+        // Services pending "editor" screenshot (returns capture_failed cleanly if !swapped).
+        mcp_bridge_capture_frame()
         gfx.frame_end()
         imgui_present_platform_windows()
+        if (!swapped || viewport_any_secondary_window()) && !gfx.swapchain_waited_this_frame {
+            cur_flags := sdl.GetWindowFlags(gfx.window())
+            any_focused := viewport_any_editor_window_has_focus()
+            if (.MINIMIZED in cur_flags || .HIDDEN in cur_flags) && !has_secondary_lifeline && !viewport_is_mouse_dragging() {
+                sdl.Delay(editor_defaults_background_delay_ms())
+            } else if !any_focused && !viewport_is_mouse_dragging() {
+                sdl.Delay(editor_defaults_background_delay_ms())
+            } else {
+                hz := f64(viewport_target_refresh_hz())
+                target_ns := u64(1_000_000_000.0 / max(hz, 30.0))
+                elapsed_ns := sdl.GetTicksNS() - frame_start_ns
+                if elapsed_ns < target_ns {
+                    sdl.DelayPrecise(target_ns - elapsed_ns)
+                }
+            }
+        }
         engine.overwatch_phase_end(.Swapchain_Present)
         engine.overwatch_frame_end(gfx.delta_time(), sim_is_active())
         progress_overlay_frame_scope(false)
         frames_presented += 1
 
         @(static) _settings_autosave_sec: f32 = 0
-        if input.focused() {
+        if input.focused() && !engine.is_project_hub_startup() && !auto_rebuild_on_boot {
             _settings_autosave_sec += gfx.delta_time()
             if _settings_autosave_sec >= 4.0 {
                 _settings_autosave_sec = 0.0
@@ -452,10 +518,11 @@ main :: proc() {
 
         free_all(context.temp_allocator)
     }
-    delete(_pending_scene_loads)
 
-    save_editor_settings()
-    settings_save_all()
+    if !engine.is_project_hub_startup() && !auto_rebuild_on_boot {
+        save_editor_settings()
+        settings_save_all()
+    }
 }
 
 // Popped-out panels (imgui multi-viewport): create, move, resize, destroy
@@ -485,10 +552,12 @@ editor_init :: proc() {
     _register_asset_previews()
     init_project_view()
     progress.report("Scanning assets")
-    engine.asset_catalog_auto = true // editor maintains library/catalog.json
+    engine.asset_catalog_auto = true         // editor maintains library/catalog.json
+    engine.asset_catalog_defer_writes = true // coalesce scan + import pass writes into one
     asset_pipeline.asset_pipeline_init()
     engine.asset_db_init("assets")
     asset_pipeline.asset_pipeline_import_all()
+    engine.asset_catalog_flush_deferred()
     progress.report("Initializing caches")
     engine.texture_cache_init()
     engine.mesh_cache_init()
@@ -633,7 +702,6 @@ draw_pending_scene_overlay :: proc() {
 @(phase={key=engine.Phase.EditorShutdown, order=0, mode=Editor})
 editor_shutdown :: proc() {
     join_play_thread()
-    studio_windows_shutdown()
     asset_pipeline.asset_db_refresh_shutdown()
     shutdown_game_view()
     shutdown_scene_2d_view()
@@ -645,6 +713,12 @@ editor_shutdown :: proc() {
     engine.asset_db_shutdown()
     engine.sm_shutdown()
     engine.scene_lib_shutdown()
+    studio_windows_shutdown()
+    project_hub_shutdown()
+    relaunch_shutdown()
+    for p in _pending_scene_loads do delete(p)
+    delete(_pending_scene_loads)
+    _pending_scene_loads = nil
     _shutdown_context_menu_registry()
     inspector.shutdown_registries()
     shutdown_hierarchy_views()
@@ -652,7 +726,7 @@ editor_shutdown :: proc() {
     _save_user_settings()
     menu.shutdown_menu()
     view_chrome_shutdown()
-    inspector_lock_shutdown()
+    rotation_euler_cache_shutdown()
     log.info("Editor Shutdown")
     log.shutdown()
 }

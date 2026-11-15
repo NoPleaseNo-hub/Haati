@@ -16,6 +16,39 @@ BG_Process :: struct {
 	pid:    int,
 }
 
+foreign import kernel32 "system:Kernel32.lib"
+
+@(private = "file")
+PROC_THREAD_ATTRIBUTE_HANDLE_LIST :: uintptr(0x00020002)
+
+@(private = "file")
+STARTUPINFOEXW :: struct {
+	StartupInfo:     win.STARTUPINFOW,
+	lpAttributeList: rawptr,
+}
+
+@(default_calling_convention = "system")
+foreign kernel32 {
+	InitializeProcThreadAttributeList :: proc(
+		lpAttributeList:  rawptr,
+		dwAttributeCount: win.DWORD,
+		dwFlags:          win.DWORD,
+		lpSize:           ^win.SIZE_T,
+	) -> win.BOOL ---
+	UpdateProcThreadAttribute :: proc(
+		lpAttributeList: rawptr,
+		dwFlags:         win.DWORD,
+		Attribute:       uintptr,
+		lpValue:         rawptr,
+		cbSize:          win.SIZE_T,
+		lpPreviousValue: rawptr,
+		lpReturnSize:    ^win.SIZE_T,
+	) -> win.BOOL ---
+	DeleteProcThreadAttributeList :: proc(
+		lpAttributeList: rawptr,
+	) ---
+}
+
 @(private = "file")
 _quote_win32_arg :: proc(arg: string, b: ^strings.Builder) {
 	if len(arg) == 0 {
@@ -111,7 +144,7 @@ bg_process_start_to_file :: proc(
 		out_handle = win.CreateFileW(
 			log_w,
 			win.GENERIC_WRITE,
-			win.FILE_SHARE_READ | win.FILE_SHARE_WRITE,
+			win.FILE_SHARE_READ | win.FILE_SHARE_WRITE | win.FILE_SHARE_DELETE,
 			&sa,
 			win.CREATE_ALWAYS,
 			win.FILE_ATTRIBUTE_NORMAL,
@@ -146,20 +179,60 @@ bg_process_start_to_file :: proc(
 		win.CloseHandle(nul_in)
 	}
 
-	si: win.STARTUPINFOW
-	si.cb          = size_of(win.STARTUPINFOW)
-	si.dwFlags     = win.STARTF_USESHOWWINDOW
-	si.wShowWindow = u16(win.SW_HIDE)
-	if inherit_handles == win.TRUE {
-		si.dwFlags  |= win.STARTF_USESTDHANDLES
-		si.hStdInput  = nul_in
-		si.hStdOutput = out_handle
-		si.hStdError  = out_handle
-	}
+	si_ex: STARTUPINFOEXW
+	si_ex.StartupInfo.cb          = size_of(win.STARTUPINFOW)
+	si_ex.StartupInfo.dwFlags     = win.STARTF_USESHOWWINDOW
+	si_ex.StartupInfo.wShowWindow = u16(win.SW_HIDE)
 
 	pi: win.PROCESS_INFORMATION
 	creation_flags: win.DWORD = win.CREATE_NO_WINDOW | win.CREATE_UNICODE_ENVIRONMENT
 	env_block := _build_env_block_utf16(env)
+
+	inherit_list: [2]win.HANDLE
+	attr_buf: []byte
+	attr_list_ready := false
+	defer if attr_list_ready {
+		DeleteProcThreadAttributeList(raw_data(attr_buf))
+	}
+
+	if inherit_handles == win.TRUE {
+		si_ex.StartupInfo.dwFlags  |= win.STARTF_USESTDHANDLES
+		si_ex.StartupInfo.hStdInput  = nul_in
+		si_ex.StartupInfo.hStdOutput = out_handle
+		si_ex.StartupInfo.hStdError  = out_handle
+
+		// Restrict inherited handles to ONLY out_handle and nul_in (never
+		// duplicate handles in PROC_THREAD_ATTRIBUTE_HANDLE_LIST).
+		handle_count := 0
+		inherit_list[handle_count] = out_handle
+		handle_count += 1
+		if nul_in != win.INVALID_HANDLE_VALUE && nul_in != out_handle {
+			inherit_list[handle_count] = nul_in
+			handle_count += 1
+		}
+
+		attr_size: win.SIZE_T = 0
+		_ = InitializeProcThreadAttributeList(nil, 1, 0, &attr_size)
+		if attr_size > 0 {
+			attr_buf = make([]byte, int(attr_size), context.temp_allocator)
+			if InitializeProcThreadAttributeList(raw_data(attr_buf), 1, 0, &attr_size) != win.FALSE {
+				attr_list_ready = true
+				if UpdateProcThreadAttribute(
+					raw_data(attr_buf),
+					0,
+					PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+					&inherit_list[0],
+					win.SIZE_T(handle_count * size_of(win.HANDLE)),
+					nil,
+					nil,
+				) != win.FALSE {
+					si_ex.StartupInfo.cb = size_of(STARTUPINFOEXW)
+					si_ex.lpAttributeList = raw_data(attr_buf)
+					creation_flags |= win.EXTENDED_STARTUPINFO_PRESENT
+				}
+			}
+		}
+	}
 
 	started := win.CreateProcessW(
 		nil,
@@ -170,7 +243,7 @@ bg_process_start_to_file :: proc(
 		creation_flags,
 		env_block,
 		cwd_w,
-		&si,
+		&si_ex.StartupInfo,
 		&pi,
 	)
 	if !started {

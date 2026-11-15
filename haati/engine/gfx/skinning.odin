@@ -108,7 +108,7 @@ skin_source_create :: proc(vertices: []Vertex, skin: []Skin_Vertex) -> Skin_Sour
 	assert(len(vertices) == len(skin))
 	vsize := u32(len(vertices) * size_of(Vertex))
 	ssize := u32(len(skin) * size_of(Skin_Vertex))
-	if vsize == 0 do return {}
+	if _gfx.device == nil || vsize == 0 || ssize == 0 do return {}
 
 	bind := sdl.CreateGPUBuffer(_gfx.device, {usage = {.COMPUTE_STORAGE_READ}, size = vsize})
 	skin_buf := sdl.CreateGPUBuffer(_gfx.device, {usage = {.COMPUTE_STORAGE_READ}, size = ssize})
@@ -122,12 +122,28 @@ skin_source_create :: proc(vertices: []Vertex, skin: []Skin_Vertex) -> Skin_Sour
 	defer sdl.ReleaseGPUTransferBuffer(_gfx.device, transfer)
 
 	mapped := sdl.MapGPUTransferBuffer(_gfx.device, transfer, false)
+	if mapped == nil {
+		sdl.ReleaseGPUBuffer(_gfx.device, bind)
+		sdl.ReleaseGPUBuffer(_gfx.device, skin_buf)
+		return {}
+	}
 	runtime.mem_copy_non_overlapping(mapped, raw_data(vertices), int(vsize))
 	runtime.mem_copy_non_overlapping(rawptr(uintptr(mapped) + uintptr(vsize)), raw_data(skin), int(ssize))
 	sdl.UnmapGPUTransferBuffer(_gfx.device, transfer)
 
 	cmd := sdl.AcquireGPUCommandBuffer(_gfx.device)
+	if cmd == nil {
+		sdl.ReleaseGPUBuffer(_gfx.device, bind)
+		sdl.ReleaseGPUBuffer(_gfx.device, skin_buf)
+		return {}
+	}
 	copy_pass := sdl.BeginGPUCopyPass(cmd)
+	if copy_pass == nil {
+		_ = sdl.CancelGPUCommandBuffer(cmd)
+		sdl.ReleaseGPUBuffer(_gfx.device, bind)
+		sdl.ReleaseGPUBuffer(_gfx.device, skin_buf)
+		return {}
+	}
 	sdl.UploadToGPUBuffer(copy_pass, {transfer_buffer = transfer}, {buffer = bind, size = vsize}, false)
 	sdl.UploadToGPUBuffer(copy_pass, {transfer_buffer = transfer, offset = vsize}, {buffer = skin_buf, size = ssize}, false)
 	sdl.EndGPUCopyPass(copy_pass)
@@ -178,6 +194,7 @@ skinned_mesh_pose :: proc(m: ^Skinned_Mesh, src: Skin_Source, palette: []matrix[
 	psize := n * size_of(matrix[4, 4]f32)
 
 	mapped := sdl.MapGPUTransferBuffer(_gfx.device, m.transfer, true)
+	if mapped == nil do return
 	runtime.mem_copy_non_overlapping(mapped, raw_data(palette), int(psize))
 	sdl.UnmapGPUTransferBuffer(_gfx.device, m.transfer)
 
@@ -198,19 +215,26 @@ skinned_mesh_pose :: proc(m: ^Skinned_Mesh, src: Skin_Source, palette: []matrix[
 	}
 
 	cmd := sdl.AcquireGPUCommandBuffer(_gfx.device)
+	if cmd == nil do return
 	copy_pass := sdl.BeginGPUCopyPass(cmd)
+	if copy_pass == nil {
+		_ = sdl.CancelGPUCommandBuffer(cmd)
+		return
+	}
 	sdl.UploadToGPUBuffer(copy_pass, {transfer_buffer = m.transfer}, {buffer = m.palette, size = psize}, true)
 	sdl.EndGPUCopyPass(copy_pass)
 
 	out := sdl.GPUStorageBufferReadWriteBinding{buffer = m.vbuf, cycle = true}
 	pass := sdl.BeginGPUComputePass(cmd, nil, 0, &out, 1)
-	sdl.BindGPUComputePipeline(pass, _gfx.skin_pipeline)
-	inputs := [3]^sdl.GPUBuffer{src.bind, src.skin, m.palette}
-	sdl.BindGPUComputeStorageBuffers(pass, 0, raw_data(inputs[:]), 3)
-	params := _Skin_Params{vertex_count = m.vertex_count, joint_count = n}
-	sdl.PushGPUComputeUniformData(cmd, 0, &params, size_of(params))
-	sdl.DispatchGPUCompute(pass, (m.vertex_count + _SKIN_THREADS - 1) / _SKIN_THREADS, 1, 1)
-	sdl.EndGPUComputePass(pass)
+	if pass != nil {
+		sdl.BindGPUComputePipeline(pass, _gfx.skin_pipeline)
+		inputs := [3]^sdl.GPUBuffer{src.bind, src.skin, m.palette}
+		sdl.BindGPUComputeStorageBuffers(pass, 0, raw_data(inputs[:]), 3)
+		params := _Skin_Params{vertex_count = m.vertex_count, joint_count = n}
+		sdl.PushGPUComputeUniformData(cmd, 0, &params, size_of(params))
+		sdl.DispatchGPUCompute(pass, (m.vertex_count + _SKIN_THREADS - 1) / _SKIN_THREADS, 1, 1)
+		sdl.EndGPUComputePass(pass)
+	}
 	_ = sdl.SubmitGPUCommandBuffer(cmd)
 }
 
@@ -218,12 +242,16 @@ skinned_mesh_pose :: proc(m: ^Skinned_Mesh, src: Skin_Source, palette: []matrix[
 // encodes their compute skinning dispatches on `cmd` before the render pass begins.
 @(private)
 _flush_pending_skinning :: proc(cmd: ^sdl.GPUCommandBuffer) {
-	if cmd == nil || len(_pending_skin_dispatches) == 0 || _gfx.skin_pipeline == nil {
+	if _gfx.device == nil || cmd == nil || len(_pending_skin_dispatches) == 0 || _gfx.skin_pipeline == nil {
 		clear(&_pending_skin_dispatches)
 		return
 	}
 
 	copy_pass := sdl.BeginGPUCopyPass(cmd)
+	if copy_pass == nil {
+		clear(&_pending_skin_dispatches)
+		return
+	}
 	for &d in _pending_skin_dispatches {
 		if d.m == nil || d.m.palette == nil || d.m.transfer == nil do continue
 		sdl.UploadToGPUBuffer(copy_pass, {transfer_buffer = d.m.transfer}, {buffer = d.m.palette, size = d.psize}, true)
@@ -234,6 +262,7 @@ _flush_pending_skinning :: proc(cmd: ^sdl.GPUCommandBuffer) {
 		if d.m == nil || d.m.vbuf == nil || d.src.bind == nil do continue
 		out := sdl.GPUStorageBufferReadWriteBinding{buffer = d.m.vbuf, cycle = true}
 		pass := sdl.BeginGPUComputePass(cmd, nil, 0, &out, 1)
+		if pass == nil do continue
 		sdl.BindGPUComputePipeline(pass, _gfx.skin_pipeline)
 		inputs := [3]^sdl.GPUBuffer{d.src.bind, d.src.skin, d.m.palette}
 		sdl.BindGPUComputeStorageBuffers(pass, 0, raw_data(inputs[:]), 3)

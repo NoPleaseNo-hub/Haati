@@ -74,31 +74,11 @@ _project_unique_dest :: proc(dir, name: string) -> string {
 	return dst
 }
 
-// Recursive copy that SKIPS every .meta — copies are new assets and must
-// mint fresh guids on refresh.
-@(private = "file")
-_project_copy_recursive :: proc(src, dst: string) -> bool {
-	if os.is_dir(src) {
-		if os.make_directory(dst) != nil do return false
-		handle, err := os.open(src)
-		if err != nil do return false
-		defer os.close(handle)
-		entries, rerr := os.read_dir(handle, -1, context.temp_allocator)
-		if rerr != nil do return false
-		defer os.file_info_slice_delete(entries, context.temp_allocator)
-		ok := true
-		for entry in entries {
-			if strings.has_suffix(entry.name, ".meta") do continue
-			sub_src, _ := filepath.join({src, entry.name}, context.temp_allocator)
-			sub_dst, _ := filepath.join({dst, entry.name}, context.temp_allocator)
-			if !_project_copy_recursive(sub_src, sub_dst) do ok = false
-		}
-		return ok
-	}
-	data, rerr := os.read_entire_file(src, context.temp_allocator)
-	if rerr != nil do return false
-	return os.write_entire_file(dst, data) == nil
-}
+// Recursive copy lives in engine (asset_fs_copy_recursive) so plugins and editor share it.
+// OS shell integration lives in engine (os_move_to_trash, os_open_in_os, os_reveal_in_os).
+file_move_to_trash :: proc(path: string) -> bool { return engine.os_move_to_trash(path) }
+file_open_in_os    :: proc(path: string) -> bool { return engine.os_open_in_os(path) }
+file_reveal_in_os  :: proc(path: string) -> bool { return engine.os_reveal_in_os(path) }
 
 // Move with the .meta (guid preserved — mirrors _project_apply_rename).
 @(private = "file")
@@ -131,7 +111,7 @@ _project_select_paths :: proc(paths: []string) {
 project_ops_new_folder :: proc() {
 	dir := projectViewData.currentPath
 	if dir == "" do return
-	if dir == _PROJECT_PACKAGES_PATH {
+	if dir == project_packages_path() {
 		fmt.println("[Editor] New Folder: packages are managed on disk (haati/packages), not here")
 		return
 	}
@@ -181,7 +161,7 @@ project_ops_paste :: proc() {
 	}
 	dst_dir := projectViewData.currentPath
 	if dst_dir == "" do return
-	if dst_dir == _PROJECT_PACKAGES_PATH {
+	if dst_dir == project_packages_path() {
 		fmt.println("[Editor] Paste: the Packages node lists packages, not files — paste inside a package's content instead")
 		return
 	}
@@ -202,7 +182,7 @@ project_ops_paste :: proc() {
 			if _project_move(src, dst) do append(&pasted, dst)
 		} else {
 			dst := _project_unique_dest(dst_dir, filepath.base(src))
-			if _project_copy_recursive(src, dst) do append(&pasted, dst)
+			if engine.asset_fs_copy_recursive(src, dst) do append(&pasted, dst)
 		}
 	}
 	// A cut clipboard is one-shot (Finder/Explorer semantics).
@@ -222,7 +202,7 @@ project_ops_duplicate :: proc() {
 	for src in srcs {
 		if !os.exists(src) do continue
 		dst := _project_unique_dest(filepath.dir(src), filepath.base(src))
-		if _project_copy_recursive(src, dst) do append(&dups, dst)
+		if engine.asset_fs_copy_recursive(src, dst) do append(&dups, dst)
 	}
 	asset_pipeline.asset_db_refresh()
 	project_dir_cache_invalidate()

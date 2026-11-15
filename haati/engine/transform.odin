@@ -719,3 +719,20 @@ transform_set_render_layer_recursive :: proc(tH: Transform_Handle, layer_mask: u
     }
 }
 
+// Depth-first walk over `root` and its descendants matching `name` (`==` or `strings.equal_fold`).
+transform_find_descendant_by_name :: proc(root: Transform_Handle, name: string, case_insensitive := false) -> (Transform_Handle, bool) {
+    if root == {} || name == "" do return {}, false
+    w := ctx_world()
+    if w == nil do return {}, false
+    t := pool_get(&w.transforms, Handle(root))
+    if t == nil do return {}, false
+    matched := strings.equal_fold(t.name, name) if case_insensitive else (t.name == name)
+    if matched do return root, true
+    for ch in t.children {
+        if got, ok := transform_find_descendant_by_name(Transform_Handle(ch.handle), name, case_insensitive); ok {
+            return got, true
+        }
+    }
+    return {}, false
+}
+

@@ -14,7 +14,6 @@ package editor
 import "base:runtime"
 import im "haati:external/odin-imgui"
 import "menu"
-import "inspector"
 import wnd "haati:editor/window"
 import "haati:editor/icons"
 import thm "haati:editor/theme"
@@ -117,8 +116,13 @@ _tab_menu_node :: proc(node: ^im.DockNode) {
 			im.SetCursorScreenPos(undock_bmin)
 			undock_clicked := im.InvisibleButton(undock_id, {size, size})
 			undock_hovered := im.IsItemHovered({})
+			if undock_hovered && (im.IsMouseDown(.Left) || im.IsMouseClicked(.Left)) {
+				im.StopMouseMovingWindow()
+			}
 			widgets.tooltip(is_floating ? "Return active tab to main editor window" : "Dock out as external floating window")
 			if undock_clicked && active_title != nil {
+				im.StopMouseMovingWindow()
+				im.ClearActiveID()
 				if is_floating {
 					wnd.reunite(active_title)
 				} else {
@@ -145,9 +149,14 @@ _tab_menu_node :: proc(node: ^im.DockNode) {
 				im.SetCursorScreenPos(max_bmin)
 				max_clicked := im.InvisibleButton(max_id, {size, size})
 				max_hovered := im.IsItemHovered({})
+				if max_hovered && (im.IsMouseDown(.Left) || im.IsMouseClicked(.Left)) {
+					im.StopMouseMovingWindow()
+				}
 				is_max := wnd.is_dock_node_maximized(node)
 				widgets.tooltip(is_max ? "Restore Joined Window Size" : "Maximize Joined Window")
 				if max_clicked {
+					im.StopMouseMovingWindow()
+					im.ClearActiveID()
 					wnd.toggle_maximize_dock_node(node)
 				}
 				mbg := max_hovered ? im.GetColorU32ImVec4({0.26, 0.46, 0.58, 1.0}) : im.GetColorU32ImVec4({0.20, 0.25, 0.34, 0.88})
@@ -160,9 +169,14 @@ _tab_menu_node :: proc(node: ^im.DockNode) {
 			im.SetCursorScreenPos(bmin)
 			clicked := im.InvisibleButton(popup, {size, size})
 			hovered := im.IsItemHovered({})
+			if hovered && (im.IsMouseDown(.Left) || im.IsMouseClicked(.Left)) {
+				im.StopMouseMovingWindow()
+			}
 			widgets.tooltip("Tab & Window Options")
 			widgets.ui_origin_pop(origin_prev)
 			if clicked {
+				im.StopMouseMovingWindow()
+				im.ClearActiveID()
 				_context_tab_title = active_title
 				im.OpenPopup(popup)
 			}
@@ -181,8 +195,13 @@ _tab_menu_node :: proc(node: ^im.DockNode) {
 				im.SetCursorScreenPos(close_bmin)
 				close_clicked := im.InvisibleButton(close_id, {size, size})
 				close_hovered := im.IsItemHovered({})
+				if close_hovered && (im.IsMouseDown(.Left) || im.IsMouseClicked(.Left)) {
+					im.StopMouseMovingWindow()
+				}
 				widgets.tooltip("Close Active Tab")
 				if close_clicked && active_title != nil {
+					im.StopMouseMovingWindow()
+					im.ClearActiveID()
 					close_editor_view(active_title)
 				}
 				cbg := close_hovered ? im.GetColorU32ImVec4({0.96, 0.22, 0.22, 1.0}) : im.GetColorU32ImVec4({0.80, 0.16, 0.16, 0.90})
@@ -265,10 +284,6 @@ _builtin_view_loc :: proc(title: cstring) -> (loc: runtime.Source_Code_Location,
 		return #location(draw_scene_2d_view), true
 	case icons.TITLE_GAME:
 		return #location(draw_game_view), true
-	case icons.TITLE_INSPECTOR:
-		return #location(draw_hierarchy_inspector), true
-	case icons.TITLE_PROJECT_INSPECTOR:
-		return #location(inspector.view_inspector_draw), true
 	case icons.TITLE_CONSOLE:
 		return #location(draw_console_view), true
 	case icons.TITLE_OUTPUT:
@@ -343,7 +358,7 @@ _tab_menu_contents :: proc(node: ^im.DockNode) {
 			disp_s = raw_s[:h_idx]
 		}
 		p := thm.palette()
-		im.TextColored(p.accent, strings.clone_to_cstring(disp_s, context.temp_allocator))
+		widgets.text_colored(p.accent, disp_s)
 		im.Separator()
 
 		// The visible view's OWN options first: they are what this menu is for,
@@ -355,11 +370,11 @@ _tab_menu_contents :: proc(node: ^im.DockNode) {
 		// Script Inspector section for this Window / Tab!
 		orig := _window_origin(active_title)
 		if f_path, f_line, f_proc, ok := _parse_origin_file_line(orig); ok {
-			im.TextColored(p.text_secondary, "Script Inspector")
+			im.TextColoredUnformatted(p.text_secondary, "Script Inspector")
 			if len(f_proc) > 0 {
-				im.TextDisabled(fmt.ctprintf("%s:%d (%s)", f_path, f_line, f_proc))
+				widgets.text_disabledf("%s:%d (%s)", f_path, f_line, f_proc)
 			} else {
-				im.TextDisabled(fmt.ctprintf("%s:%d", f_path, f_line))
+				widgets.text_disabledf("%s:%d", f_path, f_line)
 			}
 			if im.MenuItem(fmt.ctprintf("%s  Inspect Window Code (.odin)", icons.ICON_MD_CODE)) {
 				if widgets.open_source_in_ide_fn != nil {

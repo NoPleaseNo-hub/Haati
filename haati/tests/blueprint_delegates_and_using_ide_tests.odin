@@ -526,9 +526,7 @@ test_bodin_unified_file_format_roundtrip_and_compiler_check :: proc(t: ^testing.
 	}
 
 	// Verify the combined `.bodin` text passes ground-truth `odin check` with zero errors!
-	odin_exe := "odin"
-	root_cand, _ := filepath.join({ODIN_ROOT, ODIN_OS == .Windows ? "odin.exe" : "odin"}, context.temp_allocator)
-	if os.exists(root_cand) do odin_exe = root_cand
+	odin_exe := engine.resolve_odin_binary(context.temp_allocator)
 	log_file, _ := filepath.join({tmp_dir, "bodin_check.log"}, context.temp_allocator)
 	defer _ = os.remove(log_file)
 

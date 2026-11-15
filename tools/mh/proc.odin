@@ -130,22 +130,27 @@ step :: proc(what: string, command: ..string) -> bool {
 	return true
 }
 
-// have reports whether an executable is on PATH. Replaces the shell's
-// `command -v`, which has no Windows equivalent — this is why the optional
-// shader step could only ever be guarded from sh.
-have :: proc(tool: string) -> bool {
-	_, ok := resolve_shader_tool(tool)
-	return ok
+// _bundled_tools_path resolves `<repo>/tools/...` so the bundled standalone
+// toolchain (`tools/odin`, `tools/shader_tools`) always takes priority over
+// global PATH or external ODIN_ROOT installs.
+@(private = "file")
+_bundled_tools_path :: proc(parts: ..string) -> (string, bool) {
+	base := ""
+	if root, ok := repo_root(); ok {
+		base = root
+	}
+	seg := make([dynamic]string, 0, len(parts) + 2, context.temp_allocator)
+	if base != "" do append(&seg, base)
+	append(&seg, "tools")
+	append(&seg, ..parts)
+	cand, err := filepath.join(seg[:], context.temp_allocator)
+	if err == nil && os.exists(cand) do return cand, true
+	return "", false
 }
 
-// resolve_shader_tool locates a CLI executable first under MH_SHADER_TOOLS_DIR
-// (so portable toolchains work without mutating system PATH) and then on PATH.
-resolve_shader_tool :: proc(tool: string) -> (string, bool) {
+@(private = "file")
+_resolve_on_path :: proc(tool: string) -> (string, bool) {
 	name := strings.concatenate({tool, EXE}, context.temp_allocator)
-	if custom_dir, custom_ok := os.lookup_env("MH_SHADER_TOOLS_DIR", context.temp_allocator); custom_ok && custom_dir != "" {
-		cand, cerr := filepath.join({custom_dir, name}, context.temp_allocator)
-		if cerr == nil && os.exists(cand) do return cand, true
-	}
 	path, found := os.lookup_env("PATH", context.temp_allocator)
 	if !found do return "", false
 	sep := ";" when ODIN_OS == .Windows else ":"
@@ -157,12 +162,49 @@ resolve_shader_tool :: proc(tool: string) -> (string, bool) {
 	return "", false
 }
 
-// odin_bin resolves the path to the odin executable: either "odin" if found on PATH,
-// or falling back to the ODIN_ROOT executable if PATH is not configured.
+@(private = "file")
+_resolve_tool :: proc(tool, bundled_subdir, env_var: string, check_odin_root := false) -> (string, bool) {
+	name := strings.concatenate({tool, EXE}, context.temp_allocator)
+	if bundled_subdir != "" {
+		if bundled, ok := _bundled_tools_path(bundled_subdir, name); ok {
+			return bundled, true
+		}
+	}
+	if env_var != "" {
+		if custom_dir, custom_ok := os.lookup_env(env_var, context.temp_allocator); custom_ok && custom_dir != "" {
+			cand, cerr := filepath.join({custom_dir, name}, context.temp_allocator)
+			if cerr == nil && os.exists(cand) do return cand, true
+		}
+	}
+	if check_odin_root {
+		root_bin, _ := filepath.join({ODIN_ROOT, name}, context.temp_allocator)
+		if os.exists(root_bin) do return root_bin, true
+	}
+	return _resolve_on_path(tool)
+}
+
+// have reports whether a tool is available via bundled tools/, env override, ODIN_ROOT, or PATH.
+have :: proc(tool: string) -> bool {
+	if tool == "odin" {
+		_, ok := _resolve_tool("odin", "odin", "", true)
+		return ok
+	}
+	_, ok := resolve_shader_tool(tool)
+	return ok
+}
+
+// resolve_shader_tool locates a CLI executable first in bundled `tools/shader_tools/`,
+// then under MH_SHADER_TOOLS_DIR, and finally on PATH.
+resolve_shader_tool :: proc(tool: string) -> (string, bool) {
+	return _resolve_tool(tool, "shader_tools", "MH_SHADER_TOOLS_DIR", false)
+}
+
+// odin_bin resolves the Odin compiler binary: bundled `tools/odin/` first,
+// then ODIN_ROOT, then PATH.
 odin_bin :: proc() -> string {
-	if have("odin") do return "odin"
-	root_odin, _ := filepath.join({ODIN_ROOT, "odin" + EXE}, context.temp_allocator)
-	if os.exists(root_odin) do return root_odin
+	if p, ok := _resolve_tool("odin", "odin", "", true); ok {
+		return p
+	}
 	return "odin"
 }
 
@@ -177,11 +219,15 @@ newer_than :: proc(out, src: string) -> bool {
 	return time.diff(src_t, out_t) > 0
 }
 
-// The Odin installation's vendor/ tree, for the libraries setup builds.
-// ODIN_ROOT is filled in by the compiler, so this needs no `odin root` call.
+// The Odin installation's vendor/ tree, preferring bundled `tools/odin/vendor/`
+// before falling back to compile-time `ODIN_ROOT/vendor/`.
 odin_vendor :: proc(rest: ..string) -> string {
 	parts := make([dynamic]string, context.temp_allocator)
-	append(&parts, ODIN_ROOT, "vendor")
+	if bundled_vendor, ok := _bundled_tools_path("odin", "vendor"); ok {
+		append(&parts, bundled_vendor)
+	} else {
+		append(&parts, ODIN_ROOT, "vendor")
+	}
 	append(&parts, ..rest)
 	joined, _ := filepath.join(parts[:], context.temp_allocator)
 	return joined

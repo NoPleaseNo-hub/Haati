@@ -1,0 +1,124 @@
+#pragma clang diagnostic ignored "-Wmissing-prototypes"
+
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+struct BloomDownUBO
+{
+    float4 params;
+    float4 threshold;
+};
+
+struct main0_out
+{
+    float4 out_color [[color(0)]];
+};
+
+struct main0_in
+{
+    float2 frag_uv [[user(locn0)]];
+};
+
+static inline __attribute__((always_inline))
+float3 sanitize_hdr(thread const float3& c)
+{
+    bool _24 = any(isnan(c));
+    bool _31;
+    if (!_24)
+    {
+        _31 = any(isinf(c));
+    }
+    else
+    {
+        _31 = _24;
+    }
+    if (_31)
+    {
+        return float3(0.0);
+    }
+    return fast::clamp(c, float3(0.0), float3(64.0));
+}
+
+static inline __attribute__((always_inline))
+float3 prefilter(thread float3& c, constant BloomDownUBO& v_65)
+{
+    float3 param = c;
+    c = sanitize_hdr(param);
+    float br = fast::max(c.x, fast::max(c.y, c.z));
+    float soft = br - v_65.threshold.y;
+    soft = fast::clamp(soft, 0.0, v_65.threshold.z);
+    soft = (soft * soft) * v_65.threshold.w;
+    float contrib = fast::max(soft, br - v_65.threshold.x) / fast::max(br, 9.9999997473787516355514526367188e-05);
+    return c * fast::max(contrib, 0.0);
+}
+
+static inline __attribute__((always_inline))
+float karis_weight(thread const float3& col)
+{
+    float luma = dot(col, float3(0.2125999927520751953125, 0.715200006961822509765625, 0.072200000286102294921875));
+    return 1.0 / (1.0 + fast::max(luma, 0.0));
+}
+
+fragment main0_out main0(main0_in in [[stage_in]], constant BloomDownUBO& v_65 [[buffer(0)]], texture2d<float> u_src [[texture(0)]], sampler u_srcSmplr [[sampler(0)]])
+{
+    main0_out out = {};
+    float2 ts = v_65.params.xy;
+    float3 a = u_src.sample(u_srcSmplr, (in.frag_uv + (float2(-2.0) * ts))).xyz;
+    float3 b = u_src.sample(u_srcSmplr, (in.frag_uv + (float2(0.0, -2.0) * ts))).xyz;
+    float3 c = u_src.sample(u_srcSmplr, (in.frag_uv + (float2(2.0, -2.0) * ts))).xyz;
+    float3 d = u_src.sample(u_srcSmplr, (in.frag_uv + (float2(-1.0) * ts))).xyz;
+    float3 e = u_src.sample(u_srcSmplr, in.frag_uv).xyz;
+    float3 f = u_src.sample(u_srcSmplr, (in.frag_uv + (float2(1.0, -1.0) * ts))).xyz;
+    float3 g = u_src.sample(u_srcSmplr, (in.frag_uv + (float2(-2.0, 0.0) * ts))).xyz;
+    float3 h = u_src.sample(u_srcSmplr, (in.frag_uv + (float2(2.0, 0.0) * ts))).xyz;
+    float3 i = u_src.sample(u_srcSmplr, (in.frag_uv + (float2(-1.0, 1.0) * ts))).xyz;
+    float3 j = u_src.sample(u_srcSmplr, (in.frag_uv + (float2(0.0) * ts))).xyz;
+    float3 k = u_src.sample(u_srcSmplr, (in.frag_uv + (float2(1.0) * ts))).xyz;
+    float3 l = u_src.sample(u_srcSmplr, (in.frag_uv + (float2(-2.0, 2.0) * ts))).xyz;
+    float3 m = u_src.sample(u_srcSmplr, (in.frag_uv + (float2(0.0, 2.0) * ts))).xyz;
+    float3 n = u_src.sample(u_srcSmplr, (in.frag_uv + (float2(2.0) * ts))).xyz;
+    if (v_65.params.z > 0.5)
+    {
+        float3 param = (((d + f) + i) + k) * 0.25;
+        float3 _270 = prefilter(param, v_65);
+        float3 q0 = _270;
+        float3 param_1 = (((a + b) + g) + j) * 0.25;
+        float3 _281 = prefilter(param_1, v_65);
+        float3 q1 = _281;
+        float3 param_2 = (((b + c) + j) + h) * 0.25;
+        float3 _292 = prefilter(param_2, v_65);
+        float3 q2 = _292;
+        float3 param_3 = (((g + j) + l) + m) * 0.25;
+        float3 _303 = prefilter(param_3, v_65);
+        float3 q3 = _303;
+        float3 param_4 = (((j + h) + m) + n) * 0.25;
+        float3 _314 = prefilter(param_4, v_65);
+        float3 q4 = _314;
+        float3 param_5 = q0;
+        float w0 = 0.5 * karis_weight(param_5);
+        float3 param_6 = q1;
+        float w1 = 0.125 * karis_weight(param_6);
+        float3 param_7 = q2;
+        float w2 = 0.125 * karis_weight(param_7);
+        float3 param_8 = q3;
+        float w3 = 0.125 * karis_weight(param_8);
+        float3 param_9 = q4;
+        float w4 = 0.125 * karis_weight(param_9);
+        float wsum = fast::max((((w0 + w1) + w2) + w3) + w4, 9.9999997473787516355514526367188e-06);
+        float3 res = (((((q0 * w0) + (q1 * w1)) + (q2 * w2)) + (q3 * w3)) + (q4 * w4)) / float3(wsum);
+        out.out_color = float4(res, 1.0);
+        return out;
+    }
+    float3 center = (((d + f) + i) + k) * 0.25;
+    float3 tl = (((a + b) + g) + e) * 0.25;
+    float3 tr = (((b + c) + e) + h) * 0.25;
+    float3 bl = (((g + e) + l) + m) * 0.25;
+    float3 br = (((e + h) + m) + n) * 0.25;
+    float3 res_1 = (center * 0.5) + ((((tl + tr) + bl) + br) * 0.125);
+    float3 param_10 = res_1;
+    out.out_color = float4(sanitize_hdr(param_10), 1.0);
+    return out;
+}
+

@@ -43,13 +43,28 @@ Mesh :: struct {
 }
 
 _Pipeline_Kind :: enum u8 {
-	Tris,          // alpha-blended, depth test, NO depth write (sprites)
-	Tris_Depth,    // opaque, depth test + write (meshes)
-	Tris_Overlay,  // alpha-blended, no depth test (gizmo solids, e.g. arrow cones)
-	Lines,         // depth-tested lines (selection outline)
-	Lines_Depth,   // depth test + WRITE (editor grid — occludes and is occluded
-	               // by meshes regardless of draw order; sprites still cover it)
-	Lines_Overlay, // no depth test (gizmos)
+	Tris,                // alpha-blended, depth test, NO depth write (sprites)
+	Tris_Depth,          // opaque, depth test + write, CCW backface-culled (meshes)
+	Tris_Depth_Front,    // opaque, depth test + write, CCW front-face culled (negative-scale mirrored meshes)
+	Tris_Depth_TwoSided, // opaque, depth test + write, cull NONE (double-sided meshes)
+	Tris_Overlay,        // alpha-blended, no depth test (gizmo solids, e.g. arrow cones)
+	Lines,               // depth-tested lines (selection outline)
+	Lines_Depth,         // depth test + WRITE (editor grid — occludes and is occluded
+	                     // by meshes regardless of draw order; sprites still cover it)
+	Lines_Overlay,       // no depth test (gizmos)
+}
+
+// Returns true when the model matrix's 3x3 linear transform flips handedness
+// (odd number of negative scale axes -> determinant < 0), inverting triangle winding.
+model_has_negative_scale :: proc(m: matrix[4, 4]f32) -> bool {
+	c0x, c0y, c0z := m[0, 0], m[1, 0], m[2, 0]
+	c1x, c1y, c1z := m[0, 1], m[1, 1], m[2, 1]
+	c2x, c2y, c2z := m[0, 2], m[1, 2], m[2, 2]
+	det :=
+		c0x * (c1y * c2z - c1z * c2y) -
+		c1x * (c0y * c2z - c0z * c2y) +
+		c2x * (c0y * c1z - c0z * c1y)
+	return det < 0.0
 }
 
 // One pipeline per kind, per registered shader. All shaders share the Vertex
@@ -68,10 +83,12 @@ _depth_format :: #force_inline proc() -> sdl.GPUTextureFormat {
 _gfx: struct {
 	device:           ^sdl.GPUDevice,
 	swapchain_format: sdl.GPUTextureFormat,
+	hdr_format:       sdl.GPUTextureFormat,
 	depth_format:     sdl.GPUTextureFormat,
 	cmd:              ^sdl.GPUCommandBuffer, // valid between frame_begin/frame_end
 	shader_sets:      map[string]_Shader_Set, // built-ins registered in init
 	shader_samplers:  map[string]u32,         // fragment sampler counts keyed by shader name
+	shader_ubos:      map[string]u32,         // fragment UBO counts keyed by shader name
 	pipelines:        _Shader_Set, // = shader_sets[DEFAULT_SHADER] (batch fast path)
 	skin_pipeline:    ^sdl.GPUComputePipeline,
 	sampler_linear:   ^sdl.GPUSampler,
@@ -80,12 +97,15 @@ _gfx: struct {
 	// 2x3 sampler table: [Linear/Nearest][0=Clamp, 1=Repeat, 2=Mirror] (`REV-08`)
 	samplers:         [Texture_Filter][3]^sdl.GPUSampler,
 	white_tex:        ^Texture,
+	window_hdr_rt:    ^Render_Target,
 	window_depth:     ^sdl.GPUTexture, // lazily sized to the swapchain
 	window_depth_w:   u32,
 	window_depth_h:   u32,
 	// SDL 3.4.14's Metal backend answers QueryGPUFence with the fence's BUSY
 	// state (3.4.16 answers signaled). Probed once at init, see _fence_probe.
-	fence_query_inverted: bool,
+	fence_query_inverted:   bool,
+	multi_viewport_present: bool,
+	main_mailbox_active:    bool,
 }
 
 // Window + GPU device + pipelines. show=false lets the caller apply saved
@@ -105,6 +125,10 @@ init :: proc(title: cstring, width, height: i32, show := true) -> bool {
 	if !sdl.ClaimWindowForGPUDevice(_gfx.device, _platform.window) do return false
 	_gfx.swapchain_format = sdl.GetGPUSwapchainTextureFormat(_gfx.device, _platform.window)
 	_ = sdl.SetGPUSwapchainParameters(_gfx.device, _platform.window, .SDR, .VSYNC)
+	_gfx.hdr_format = _gfx.swapchain_format
+	if sdl.GPUTextureSupportsFormat(_gfx.device, .R16G16B16A16_FLOAT, .D2, {.COLOR_TARGET, .SAMPLER}) {
+		_gfx.hdr_format = .R16G16B16A16_FLOAT
+	}
 	// Probe hardware depth format support (`REV-02`): D32_FLOAT -> D24_UNORM -> D16_UNORM
 	_gfx.depth_format = _DEPTH_FORMAT
 	for candidate in ([?]sdl.GPUTextureFormat{.D32_FLOAT, .D24_UNORM, .D16_UNORM}) {
@@ -141,6 +165,7 @@ init :: proc(title: cstring, width, height: i32, show := true) -> bool {
 	_gfx.sampler_nearest = _gfx.samplers[.Nearest][0]
 
 	if !_create_pipelines() do return false
+	if !_post_fx_init() do return false
 	if !_skinning_init() do return false
 	if !_shadow_init() do return false
 
@@ -153,10 +178,12 @@ shutdown :: proc() {
 	if _gfx.device != nil {
 		_ = sdl.WaitForGPUIdle(_gfx.device)
 		_pass_shutdown()
+		_post_fx_shutdown()
 		_debug_text_shutdown()
 		_shadow_shutdown()
 		_skinning_shutdown()
 		if _gfx.white_tex != nil do texture_destroy(_gfx.white_tex)
+		if _gfx.window_hdr_rt != nil do rt_destroy(_gfx.window_hdr_rt)
 		if _gfx.window_depth != nil do sdl.ReleaseGPUTexture(_gfx.device, _gfx.window_depth)
 		for name, set in _gfx.shader_sets {
 			for p in set {
@@ -169,6 +196,10 @@ shutdown :: proc() {
 			delete(name)
 		}
 		delete(_gfx.shader_samplers)
+		for name, _ in _gfx.shader_ubos {
+			delete(name)
+		}
+		delete(_gfx.shader_ubos)
 		for f in Texture_Filter {
 			for s in _gfx.samplers[f] {
 				if s != nil do sdl.ReleaseGPUSampler(_gfx.device, s)
@@ -197,13 +228,16 @@ frame_index: u64
 
 frame_begin :: proc() -> bool {
 	frame_index += 1
+	swapchain_waited_this_frame = false
 	_platform_frame_tick()
+	if _gfx.device == nil do return false
 	_gfx.cmd = sdl.AcquireGPUCommandBuffer(_gfx.device)
 	return _gfx.cmd != nil
 }
 
 frame_end :: proc() {
 	if _gfx.cmd != nil {
+		_flush_pending_skinning(_gfx.cmd)
 		// A pending swapchain capture rides THIS buffer, so it needs the fence
 		// this submit produces — the ordinary path takes the cheaper submit.
 		if d := _swapchain_take_pending(); d != nil {
@@ -212,6 +246,8 @@ frame_end :: proc() {
 			_ = sdl.SubmitGPUCommandBuffer(_gfx.cmd)
 		}
 		_gfx.cmd = nil
+	} else {
+		clear(&_pending_skin_dispatches)
 	}
 	// The swapchain image belongs to this frame only — a capture must not reach
 	// for it after submit.
@@ -225,8 +261,9 @@ command_buffer :: proc() -> ^sdl.GPUCommandBuffer {
 _create_pipelines :: proc() -> bool {
 	_gfx.shader_sets = make(map[string]_Shader_Set)
 	_gfx.shader_samplers = make(map[string]u32)
+	_gfx.shader_ubos = make(map[string]u32)
 	if !shader_register(DEFAULT_SHADER, _WORLD_VERT_SPV, _WORLD_VERT_MSL, _WORLD_FRAG_SPV, _WORLD_FRAG_MSL) do return false
-	if !shader_register("lit", _WORLD_VERT_SPV, _WORLD_VERT_MSL, _LIT_FRAG_SPV, _LIT_FRAG_MSL, frag_samplers = 8, frag_uniform_buffers = 1) do return false
+	if !shader_register("lit", _WORLD_VERT_SPV, _WORLD_VERT_MSL, _LIT_FRAG_SPV, _LIT_FRAG_MSL, frag_samplers = 8, frag_uniform_buffers = 2) do return false
 	_gfx.pipelines = _gfx.shader_sets[DEFAULT_SHADER]
 	return true
 }
@@ -255,6 +292,8 @@ shader_unregister :: proc(name: string) {
 	delete(key)
 	skey, _ := delete_key(&_gfx.shader_samplers, name)
 	delete(skey)
+	ukey, _ := delete_key(&_gfx.shader_ubos, name)
+	delete(ukey)
 }
 
 // Builds the full pipeline set for a vertex+fragment shader pair and registers
@@ -291,7 +330,7 @@ shader_register :: proc(name: string, vert_spv, vert_msl, frag_spv, frag_msl: []
 		enable_blend          = true,
 	}
 	color_target := sdl.GPUColorTargetDescription{
-		format      = _gfx.swapchain_format,
+		format      = _gfx.hdr_format,
 		blend_state = alpha_blend,
 	}
 
@@ -306,6 +345,7 @@ shader_register :: proc(name: string, vert_spv, vert_msl, frag_spv, frag_msl: []
 		},
 		primitive_type = .TRIANGLELIST,
 		rasterizer_state = {
+			front_face        = .COUNTER_CLOCKWISE,
 			enable_depth_clip = true,
 		},
 		target_info = {
@@ -316,8 +356,15 @@ shader_register :: proc(name: string, vert_spv, vert_msl, frag_spv, frag_msl: []
 		},
 	}
 
-	make_pipeline :: proc(info: ^sdl.GPUGraphicsPipelineCreateInfo, primitive: sdl.GPUPrimitiveType, depth_test, depth_write: bool) -> ^sdl.GPUGraphicsPipeline {
+	make_pipeline :: proc(
+		info: ^sdl.GPUGraphicsPipelineCreateInfo,
+		primitive: sdl.GPUPrimitiveType,
+		depth_test, depth_write: bool,
+		cull_mode: sdl.GPUCullMode = .NONE,
+	) -> ^sdl.GPUGraphicsPipeline {
 		info.primitive_type = primitive
+		info.rasterizer_state.cull_mode = cull_mode
+		info.rasterizer_state.front_face = .COUNTER_CLOCKWISE
 		info.depth_stencil_state = {
 			compare_op         = .LESS_OR_EQUAL,
 			enable_depth_test  = depth_test,
@@ -327,12 +374,14 @@ shader_register :: proc(name: string, vert_spv, vert_msl, frag_spv, frag_msl: []
 	}
 
 	set: _Shader_Set
-	set[.Tris]          = make_pipeline(&info, .TRIANGLELIST, true, false)
-	set[.Tris_Depth]    = make_pipeline(&info, .TRIANGLELIST, true, true)
-	set[.Tris_Overlay]  = make_pipeline(&info, .TRIANGLELIST, false, false)
-	set[.Lines]         = make_pipeline(&info, .LINELIST, true, false)
-	set[.Lines_Depth]   = make_pipeline(&info, .LINELIST, true, true)
-	set[.Lines_Overlay] = make_pipeline(&info, .LINELIST, false, false)
+	set[.Tris]                = make_pipeline(&info, .TRIANGLELIST, true, false, .NONE)
+	set[.Tris_Depth]          = make_pipeline(&info, .TRIANGLELIST, true, true,  .BACK)
+	set[.Tris_Depth_Front]    = make_pipeline(&info, .TRIANGLELIST, true, true,  .FRONT)
+	set[.Tris_Depth_TwoSided] = make_pipeline(&info, .TRIANGLELIST, true, true,  .NONE)
+	set[.Tris_Overlay]        = make_pipeline(&info, .TRIANGLELIST, false, false, .NONE)
+	set[.Lines]               = make_pipeline(&info, .LINELIST, true, false, .NONE)
+	set[.Lines_Depth]         = make_pipeline(&info, .LINELIST, true, true,  .NONE)
+	set[.Lines_Overlay]       = make_pipeline(&info, .LINELIST, false, false, .NONE)
 	for p in set {
 		if p == nil {
 			for q in set {
@@ -343,12 +392,14 @@ shader_register :: proc(name: string, vert_spv, vert_msl, frag_spv, frag_msl: []
 	}
 	_gfx.shader_sets[strings.clone(name)] = set
 	_gfx.shader_samplers[strings.clone(name)] = frag_samplers
+	_gfx.shader_ubos[strings.clone(name)] = frag_uniform_buffers
 	return true
 }
 
 // Uploads RGBA8 pixels into a new sampled texture. Uses its OWN short-lived
 // command buffer so lazy loads mid-frame (between passes) stay legal.
 texture_create :: proc(pixels: []u8, width, height: i32, mipmaps := true) -> ^Texture {
+	if _gfx.device == nil || width < 1 || height < 1 do return nil
 	assert(len(pixels) == int(width * height * 4))
 	levels := u32(1)
 	usage := sdl.GPUTextureUsageFlags{.SAMPLER}
@@ -378,11 +429,24 @@ texture_create :: proc(pixels: []u8, width, height: i32, mipmaps := true) -> ^Te
 	defer sdl.ReleaseGPUTransferBuffer(_gfx.device, transfer)
 
 	mapped := sdl.MapGPUTransferBuffer(_gfx.device, transfer, false)
+	if mapped == nil {
+		sdl.ReleaseGPUTexture(_gfx.device, gpu_tex)
+		return nil
+	}
 	runtime.mem_copy_non_overlapping(mapped, raw_data(pixels), len(pixels))
 	sdl.UnmapGPUTransferBuffer(_gfx.device, transfer)
 
 	cmd := sdl.AcquireGPUCommandBuffer(_gfx.device)
+	if cmd == nil {
+		sdl.ReleaseGPUTexture(_gfx.device, gpu_tex)
+		return nil
+	}
 	copy_pass := sdl.BeginGPUCopyPass(cmd)
+	if copy_pass == nil {
+		_ = sdl.SubmitGPUCommandBuffer(cmd)
+		sdl.ReleaseGPUTexture(_gfx.device, gpu_tex)
+		return nil
+	}
 	sdl.UploadToGPUTexture(copy_pass,
 		{transfer_buffer = transfer, pixels_per_row = u32(width), rows_per_layer = u32(height)},
 		{texture = gpu_tex, w = u32(width), h = u32(height), d = 1},
@@ -404,17 +468,22 @@ texture_create :: proc(pixels: []u8, width, height: i32, mipmaps := true) -> ^Te
 // Overwrites a region of a sampled RGBA8 texture (a dynamic font atlas adding
 // a glyph). Own command buffer, like texture_create.
 texture_upload_region :: proc(tex: ^Texture, x, y, width, height: i32, pixels: []u8) -> bool {
-	if tex == nil || tex.gpu == nil do return false
+	if _gfx.device == nil || tex == nil || tex.gpu == nil || width < 1 || height < 1 do return false
 	assert(len(pixels) == int(width * height * 4))
 	transfer := sdl.CreateGPUTransferBuffer(_gfx.device, sdl.GPUTransferBufferCreateInfo{usage = .UPLOAD, size = u32(len(pixels))})
 	if transfer == nil do return false
 	defer sdl.ReleaseGPUTransferBuffer(_gfx.device, transfer)
 	mapped := sdl.MapGPUTransferBuffer(_gfx.device, transfer, false)
+	if mapped == nil do return false
 	runtime.mem_copy_non_overlapping(mapped, raw_data(pixels), len(pixels))
 	sdl.UnmapGPUTransferBuffer(_gfx.device, transfer)
 	cmd := sdl.AcquireGPUCommandBuffer(_gfx.device)
 	if cmd == nil do return false
 	copy_pass := sdl.BeginGPUCopyPass(cmd)
+	if copy_pass == nil {
+		_ = sdl.SubmitGPUCommandBuffer(cmd)
+		return false
+	}
 	sdl.UploadToGPUTexture(copy_pass,
 		{transfer_buffer = transfer, pixels_per_row = u32(width), rows_per_layer = u32(height)},
 		{texture = tex.gpu, x = u32(x), y = u32(y), w = u32(width), h = u32(height), d = 1},
@@ -443,6 +512,7 @@ Texture_Download :: struct {
 // the copy sees the finished pixels. Follow with texture_download_ready polls,
 // then texture_download_take (or _cancel). nil on failure.
 texture_download_begin :: proc(tex: ^Texture) -> ^Texture_Download {
+	if _gfx.device == nil || tex == nil || tex.gpu == nil || tex.width < 1 || tex.height < 1 do return nil
 	byte_count := u32(tex.width * tex.height * 4)
 	transfer := sdl.CreateGPUTransferBuffer(_gfx.device, {usage = .DOWNLOAD, size = byte_count})
 	if transfer == nil do return nil
@@ -452,6 +522,11 @@ texture_download_begin :: proc(tex: ^Texture) -> ^Texture_Download {
 		return nil
 	}
 	copy_pass := sdl.BeginGPUCopyPass(cmd)
+	if copy_pass == nil {
+		_ = sdl.CancelGPUCommandBuffer(cmd)
+		sdl.ReleaseGPUTransferBuffer(_gfx.device, transfer)
+		return nil
+	}
 	sdl.DownloadFromGPUTexture(copy_pass,
 		{texture = tex.gpu, w = u32(tex.width), h = u32(tex.height), d = 1},
 		{transfer_buffer = transfer, pixels_per_row = u32(tex.width), rows_per_layer = u32(tex.height)})
@@ -539,10 +614,12 @@ texture_destroy :: proc(tex: ^Texture) {
 // SDL_GPUTexture pointer (NOT a sampler-binding struct — passing one crashes,
 // see the backend's 2025-08-08 breaking change).
 texture_imgui_id :: proc(tex: ^Texture) -> rawptr {
+	if tex == nil do return nil
 	return tex.gpu
 }
 
 mesh_create :: proc(vertices: []Vertex, indices: []u32) -> Mesh {
+	if _gfx.device == nil || len(vertices) == 0 || len(indices) == 0 do return {}
 	vsize := u32(len(vertices) * size_of(Vertex))
 	isize := u32(len(indices) * size_of(u32))
 	vbuf := sdl.CreateGPUBuffer(_gfx.device, {usage = {.VERTEX}, size = vsize})
@@ -557,12 +634,28 @@ mesh_create :: proc(vertices: []Vertex, indices: []u32) -> Mesh {
 	defer sdl.ReleaseGPUTransferBuffer(_gfx.device, transfer)
 
 	mapped := sdl.MapGPUTransferBuffer(_gfx.device, transfer, false)
+	if mapped == nil {
+		sdl.ReleaseGPUBuffer(_gfx.device, vbuf)
+		sdl.ReleaseGPUBuffer(_gfx.device, ibuf)
+		return {}
+	}
 	runtime.mem_copy_non_overlapping(mapped, raw_data(vertices), int(vsize))
 	runtime.mem_copy_non_overlapping(rawptr(uintptr(mapped) + uintptr(vsize)), raw_data(indices), int(isize))
 	sdl.UnmapGPUTransferBuffer(_gfx.device, transfer)
 
 	cmd := sdl.AcquireGPUCommandBuffer(_gfx.device)
+	if cmd == nil {
+		sdl.ReleaseGPUBuffer(_gfx.device, vbuf)
+		sdl.ReleaseGPUBuffer(_gfx.device, ibuf)
+		return {}
+	}
 	copy_pass := sdl.BeginGPUCopyPass(cmd)
+	if copy_pass == nil {
+		_ = sdl.CancelGPUCommandBuffer(cmd)
+		sdl.ReleaseGPUBuffer(_gfx.device, vbuf)
+		sdl.ReleaseGPUBuffer(_gfx.device, ibuf)
+		return {}
+	}
 	sdl.UploadToGPUBuffer(copy_pass, {transfer_buffer = transfer}, {buffer = vbuf, size = vsize}, false)
 	sdl.UploadToGPUBuffer(copy_pass, {transfer_buffer = transfer, offset = vsize}, {buffer = ibuf, size = isize}, false)
 	sdl.EndGPUCopyPass(copy_pass)
@@ -587,7 +680,7 @@ Dynamic_Mesh :: struct {
 dynamic_mesh_create :: proc(vertex_capacity: int, indices: []u32) -> Dynamic_Mesh {
 	vsize := u32(vertex_capacity * size_of(Vertex))
 	isize := u32(len(indices) * size_of(u32))
-	if vsize == 0 || isize == 0 do return {}
+	if _gfx.device == nil || vsize == 0 || isize == 0 do return {}
 
 	vbuf := sdl.CreateGPUBuffer(_gfx.device, {usage = {.VERTEX}, size = vsize})
 	ibuf := sdl.CreateGPUBuffer(_gfx.device, {usage = {.INDEX}, size = isize})
@@ -601,10 +694,29 @@ dynamic_mesh_create :: proc(vertex_capacity: int, indices: []u32) -> Dynamic_Mes
 
 	// Indices go up once.
 	mapped := sdl.MapGPUTransferBuffer(_gfx.device, transfer, false)
+	if mapped == nil {
+		sdl.ReleaseGPUBuffer(_gfx.device, vbuf)
+		sdl.ReleaseGPUBuffer(_gfx.device, ibuf)
+		sdl.ReleaseGPUTransferBuffer(_gfx.device, transfer)
+		return {}
+	}
 	runtime.mem_copy_non_overlapping(mapped, raw_data(indices), int(isize))
 	sdl.UnmapGPUTransferBuffer(_gfx.device, transfer)
 	cmd := sdl.AcquireGPUCommandBuffer(_gfx.device)
+	if cmd == nil {
+		sdl.ReleaseGPUBuffer(_gfx.device, vbuf)
+		sdl.ReleaseGPUBuffer(_gfx.device, ibuf)
+		sdl.ReleaseGPUTransferBuffer(_gfx.device, transfer)
+		return {}
+	}
 	copy_pass := sdl.BeginGPUCopyPass(cmd)
+	if copy_pass == nil {
+		_ = sdl.CancelGPUCommandBuffer(cmd)
+		sdl.ReleaseGPUBuffer(_gfx.device, vbuf)
+		sdl.ReleaseGPUBuffer(_gfx.device, ibuf)
+		sdl.ReleaseGPUTransferBuffer(_gfx.device, transfer)
+		return {}
+	}
 	sdl.UploadToGPUBuffer(copy_pass, {transfer_buffer = transfer}, {buffer = ibuf, size = isize}, false)
 	sdl.EndGPUCopyPass(copy_pass)
 	_ = sdl.SubmitGPUCommandBuffer(cmd)
@@ -619,12 +731,13 @@ dynamic_mesh_create :: proc(vertex_capacity: int, indices: []u32) -> Dynamic_Mes
 // Replace the vertex data. Silently does nothing past the capacity the mesh was
 // created with, which is the bind mesh's vertex count and never changes.
 dynamic_mesh_update :: proc(m: ^Dynamic_Mesh, vertices: []Vertex) {
-	if m.vbuf == nil || m.transfer == nil do return
+	if _gfx.device == nil || m == nil || m.vbuf == nil || m.transfer == nil do return
 	n := min(u32(len(vertices)), m.vertex_capacity)
 	if n == 0 do return
 	vsize := n * size_of(Vertex)
 
 	mapped := sdl.MapGPUTransferBuffer(_gfx.device, m.transfer, true) // cycle
+	if mapped == nil do return
 	runtime.mem_copy_non_overlapping(mapped, raw_data(vertices), int(vsize))
 	sdl.UnmapGPUTransferBuffer(_gfx.device, m.transfer)
 
@@ -647,21 +760,25 @@ dynamic_mesh_update :: proc(m: ^Dynamic_Mesh, vertices: []Vertex) {
 }
 
 dynamic_mesh_destroy :: proc(m: ^Dynamic_Mesh) {
-	if m.transfer != nil do sdl.ReleaseGPUTransferBuffer(_gfx.device, m.transfer)
+	if m == nil do return
+	if _gfx.device != nil && m.transfer != nil do sdl.ReleaseGPUTransferBuffer(_gfx.device, m.transfer)
 	mesh_destroy(&m.mesh)
 	m^ = {}
 }
 
 mesh_destroy :: proc(mesh: ^Mesh) {
-	if mesh.vbuf != nil do sdl.ReleaseGPUBuffer(_gfx.device, mesh.vbuf)
-	if mesh.ibuf != nil do sdl.ReleaseGPUBuffer(_gfx.device, mesh.ibuf)
+	if mesh == nil do return
+	if _gfx.device != nil {
+		if mesh.vbuf != nil do sdl.ReleaseGPUBuffer(_gfx.device, mesh.vbuf)
+		if mesh.ibuf != nil do sdl.ReleaseGPUBuffer(_gfx.device, mesh.ibuf)
+	}
 	mesh^ = {}
 }
 
 // Builds a GPU line index buffer for wireframe rendering of triangle indices.
 // Deduplicates shared triangle edges so every edge is rendered exactly once with uniform alpha.
 dynamic_mesh_create_wire_indices :: proc(triangle_indices: []u32, vbuf: ^sdl.GPUBuffer) -> Mesh {
-	if len(triangle_indices) < 3 || vbuf == nil do return {}
+	if _gfx.device == nil || len(triangle_indices) < 3 || vbuf == nil do return {}
 
 	seen_edges := make(map[u64]bool, len(triangle_indices), context.temp_allocator)
 	lines := make([dynamic]u32, 0, len(triangle_indices) * 2, context.temp_allocator)
@@ -694,11 +811,27 @@ dynamic_mesh_create_wire_indices :: proc(triangle_indices: []u32, vbuf: ^sdl.GPU
 	}
 
 	mapped := sdl.MapGPUTransferBuffer(_gfx.device, transfer, false)
+	if mapped == nil {
+		sdl.ReleaseGPUBuffer(_gfx.device, ibuf)
+		sdl.ReleaseGPUTransferBuffer(_gfx.device, transfer)
+		return {}
+	}
 	runtime.mem_copy_non_overlapping(mapped, raw_data(lines), int(isize))
 	sdl.UnmapGPUTransferBuffer(_gfx.device, transfer)
 
 	cmd := sdl.AcquireGPUCommandBuffer(_gfx.device)
+	if cmd == nil {
+		sdl.ReleaseGPUBuffer(_gfx.device, ibuf)
+		sdl.ReleaseGPUTransferBuffer(_gfx.device, transfer)
+		return {}
+	}
 	copy_pass := sdl.BeginGPUCopyPass(cmd)
+	if copy_pass == nil {
+		_ = sdl.CancelGPUCommandBuffer(cmd)
+		sdl.ReleaseGPUBuffer(_gfx.device, ibuf)
+		sdl.ReleaseGPUTransferBuffer(_gfx.device, transfer)
+		return {}
+	}
 	sdl.UploadToGPUBuffer(copy_pass, {transfer_buffer = transfer}, {buffer = ibuf, size = isize}, false)
 	sdl.EndGPUCopyPass(copy_pass)
 	_ = sdl.SubmitGPUCommandBuffer(cmd)
@@ -713,9 +846,33 @@ dynamic_mesh_create_wire_indices :: proc(triangle_indices: []u32, vbuf: ^sdl.GPU
 
 dynamic_mesh_destroy_wire_indices :: proc(wire_mesh: ^Mesh) {
 	if wire_mesh == nil do return
-	if wire_mesh.ibuf != nil do sdl.ReleaseGPUBuffer(_gfx.device, wire_mesh.ibuf)
+	if _gfx.device != nil && wire_mesh.ibuf != nil do sdl.ReleaseGPUBuffer(_gfx.device, wire_mesh.ibuf)
 	wire_mesh.ibuf = nil
 	wire_mesh.vbuf = nil
 	wire_mesh.index_count = 0
+}
+
+// Switches the main swapchain to non-blocking MAILBOX while secondary OS viewports are active
+// so higher-Hz secondary monitors never hit the 4-frame FIFO queue backpressure stall.
+set_multi_viewport_present_mode :: proc(multi_active: bool) {
+	if multi_active == _gfx.multi_viewport_present do return
+	if _gfx.device == nil || _platform.window == nil do return
+	_gfx.multi_viewport_present = multi_active
+	if multi_active {
+		if sdl.WindowSupportsGPUPresentMode(_gfx.device, _platform.window, .MAILBOX) {
+			if sdl.SetGPUSwapchainParameters(_gfx.device, _platform.window, .SDR, .MAILBOX) {
+				_gfx.main_mailbox_active = true
+				return
+			}
+		}
+		_gfx.main_mailbox_active = false
+	} else {
+		_ = sdl.SetGPUSwapchainParameters(_gfx.device, _platform.window, .SDR, .VSYNC)
+		_gfx.main_mailbox_active = false
+	}
+}
+
+is_main_mailbox_active :: proc() -> bool {
+	return _gfx.main_mailbox_active
 }
 

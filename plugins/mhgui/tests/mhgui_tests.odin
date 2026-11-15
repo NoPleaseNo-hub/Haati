@@ -4,8 +4,10 @@ package mhgui_tests
 
 import "core:math/linalg"
 import "core:testing"
+import sdl "vendor:sdl3"
 import "haati:engine"
 import "haati:engine/gizmos"
+import input "haati:engine/input"
 import editor "haati:editor"
 import "haati:editor/handles"
 import "haati:editor/undo"
@@ -810,4 +812,113 @@ test_move_tool_on_ui_undoes :: proc(t: ^testing.T) {
 	testing.expect_value(t, s.top, steps + 1)
 	undo.apply_undo(s)
 	testing.expect_value(t, c.rt.anchored_position, before)
+}
+
+@(private = "file")
+_ui_test_cb_hits: int
+
+@(private = "file")
+_ui_test_sibling_to_destroy: engine.Transform_Handle
+
+@(private = "file")
+_ui_test_inject_motion :: proc(x, y: f32) {
+	e := sdl.Event{type = .MOUSE_MOTION}
+	e.motion.x = x
+	e.motion.y = y
+	input.apply_event(&e)
+}
+
+@(private = "file")
+_ui_test_inject_key_down :: proc(sc: sdl.Scancode) {
+	e := sdl.Event{type = .KEY_DOWN}
+	e.key.scancode = sc
+	input.apply_event(&e)
+}
+
+@(test)
+test_ui_pointer_capture_keyboard_nav_and_deferred_callbacks :: proc(t: ^testing.T) {
+	tc := new(common.TestCtx)
+	defer free(tc)
+	common.setup(tc)
+	context.user_ptr = &tc.uc
+	defer common.teardown(tc)
+	mhgui.mhgui_package_init()
+
+	defer {
+		mhgui.button_clear_callbacks(true)
+		input.frame_reset()
+		input.set_mouse_relative(false)
+		_ui_test_cb_hits = 0
+		_ui_test_sibling_to_destroy = {}
+	}
+
+	canvas := engine.transform_new("Canvas")
+	_add(canvas, .Canvas)
+	rc := cast(^engine.GraphicRaycaster)_add(canvas, .GraphicRaycaster)
+	engine.reset_GraphicRaycaster(rc)
+
+	make_btn :: proc(canvas: engine.Transform_Handle, name: string, cy: f32) -> (engine.Transform_Handle, ^mhgui.Button) {
+		node := engine.transform_new(name, canvas)
+		rt := cast(^engine.RectTransform)_add(node, .RectTransform)
+		engine.reset_RectTransform(rt)
+		rt.size_delta = {80, 30}
+		rt.anchored_position = {0, cy, 0}
+		_add(node, .CanvasRenderer)
+		img := cast(^mhgui.Image)_add(node, .Image)
+		mhgui.reset_Image(img)
+		btn := cast(^mhgui.Button)_add(node, .Button)
+		mhgui.reset_Button(btn)
+		return node, btn
+	}
+
+	btn1_t, b1 := make_btn(canvas, "Btn1", 20)
+	btn2_t, b2 := make_btn(canvas, "Btn2", -20)
+
+	input.set_viewport({0, 0}, {200, 100})
+	input.set_app_focused(true)
+	input.set_mouse_relative(false)
+	input.frame_reset()
+
+	// 1. Pointer over UI vs empty canvas space
+	_ui_test_inject_motion(100, 30)
+	engine.canvas_pointer_update()
+	testing.expect(t, engine.ui_is_pointer_over_ui(), "pointer over Btn1 should report ui_is_pointer_over_ui=true")
+	testing.expect_value(t, engine.ui_pointer().hovered, btn1_t)
+
+	_ui_test_inject_motion(10, 10)
+	engine.canvas_pointer_update()
+	testing.expect(t, !engine.ui_is_pointer_over_ui(), "pointer over empty space should report ui_is_pointer_over_ui=false")
+
+	// 2. Keyboard/gamepad focus navigation (DOWN -> selects first focusable, TAB -> advances to sibling)
+	engine.ui_set_selected({})
+	input.frame_reset()
+	_ui_test_inject_key_down(.DOWN)
+	mhgui.ui_tick(1.0 / 60.0)
+	first_sel := engine.ui_pointer().selected
+	testing.expect(t, first_sel == btn1_t || first_sel == btn2_t, "DOWN from unselected must select a valid button")
+
+	input.frame_reset()
+	_ui_test_inject_key_down(.TAB)
+	mhgui.ui_tick(1.0 / 60.0)
+	second_sel := engine.ui_pointer().selected
+	testing.expect(t, (second_sel == btn1_t || second_sel == btn2_t) && second_sel != first_sel, "TAB must advance selection to the sibling button")
+
+	// 3. Submit activation & deferred callback safely destroying the other sibling button
+	target_btn := b1 if second_sel == btn1_t else b2
+	_ui_test_cb_hits = 0
+	_ui_test_sibling_to_destroy = first_sel
+	mhgui.button_set_on_click(target_btn, proc(b: ^mhgui.Button) {
+		_ui_test_cb_hits += 1
+		if _ui_test_sibling_to_destroy != {} {
+			engine.transform_destroy(_ui_test_sibling_to_destroy)
+			_ui_test_sibling_to_destroy = {}
+		}
+	})
+
+	input.frame_reset()
+	_ui_test_inject_key_down(.RETURN)
+	mhgui.ui_tick(1.0 / 60.0)
+	testing.expect(t, target_btn.clicked, "RETURN should activate currently selected button")
+	testing.expect_value(t, _ui_test_cb_hits, 1)
+	testing.expect(t, !engine.pool_valid(&tc.world.transforms, engine.Handle(first_sel)), "deferred click callback should safely destroy sibling without iterator corruption")
 }

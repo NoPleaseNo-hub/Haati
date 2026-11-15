@@ -139,37 +139,13 @@ camera_active :: proc() -> ^Camera {
 	return best
 }
 
-_extract_frustum_planes :: proc(vp: matrix[4, 4]f32) -> (planes: [6][4]f32, valid: bool) {
-	r0 := [4]f32{vp[0, 0], vp[0, 1], vp[0, 2], vp[0, 3]}
-	r1 := [4]f32{vp[1, 0], vp[1, 1], vp[1, 2], vp[1, 3]}
-	r2 := [4]f32{vp[2, 0], vp[2, 1], vp[2, 2], vp[2, 3]}
-	r3 := [4]f32{vp[3, 0], vp[3, 1], vp[3, 2], vp[3, 3]}
-
-	raw_planes := [6][4]f32{
-		r3 + r0, // Left
-		r3 - r0, // Right
-		r3 + r1, // Bottom
-		r3 - r1, // Top
-		r2,      // Near (z01: 0 <= z_clip <= w_clip)
-		r3 - r2, // Far
-	}
-	for i in 0 ..< 6 {
-		p := raw_planes[i]
-		n_len := math.sqrt(p.x * p.x + p.y * p.y + p.z * p.z)
-		if n_len < 1e-6 do return {}, false
-		planes[i] = p / n_len
-	}
-	return planes, true
+_extract_frustum_planes :: #force_inline proc(vp: matrix[4, 4]f32) -> (planes: [6][4]f32, valid: bool) {
+	return gfx.frustum_extract_planes(vp)
 }
 
 // Tests whether a world-space sphere intersects or lies inside `view`'s frustum (`REV-10`).
 render_view_frustum_test_sphere :: #force_inline proc(view: Render_View, center: [3]f32, radius: f32) -> bool {
-	if !view.has_frustum do return true
-	for p in view.frustum_planes {
-		dist := p.x * center.x + p.y * center.y + p.z * center.z + p.w
-		if dist < -radius do return false
-	}
-	return true
+	return gfx.frustum_sphere_visible(view.frustum_planes, view.has_frustum, center, radius)
 }
 
 // Tests whether a local-space AABB (`aabb_min`, `aabb_max`) transformed by `model`
@@ -539,10 +515,14 @@ render_sort_commands :: proc(commands: []Render_Command, cam_pos: [3]f32) {
 		bm, b_mesh := b.variant.(Draw_Mesh)
 		if a_mesh != b_mesh do return a_mesh // meshes first
 		if a_mesh {
-			// Group by first material so same-material runs share binds, then front-to-back.
+			// Group by first material, then mesh+part so VBO/IBO/sampler binds coalesce, then front-to-back.
 			ak: u128 = len(am.materials) > 0 ? transmute(u128)am.materials[0] : 0
 			bk: u128 = len(bm.materials) > 0 ? transmute(u128)bm.materials[0] : 0
 			if ak != bk do return ak < bk
+			amk := transmute(u128)am.mesh
+			bmk := transmute(u128)bm.mesh
+			if amk != bmk do return amk < bmk
+			if am.part != bm.part do return am.part < bm.part
 			ap := [3]f32{am.model[0, 3], am.model[1, 3], am.model[2, 3]} - _sort_cam_pos
 			bp := [3]f32{bm.model[0, 3], bm.model[1, 3], bm.model[2, 3]} - _sort_cam_pos
 			da := ap.x * ap.x + ap.y * ap.y + ap.z * ap.z
@@ -553,7 +533,7 @@ render_sort_commands :: proc(commands: []Render_Command, cam_pos: [3]f32) {
 	})
 }
 
-render_execute :: proc(view: Render_View, commands: []Render_Command) {
+render_execute :: proc(view: Render_View, commands: []Render_Command, render_shadows: bool = true) {
 	// A command without its owner is a collector's bug: the editor could
 	// neither pick nor outline what it draws.
 	for c in commands do assert(c.owner != {}, "render_execute: a render command names no owner (its collector must set Render_Command.owner)")
@@ -592,18 +572,30 @@ render_execute :: proc(view: Render_View, commands: []Render_Command) {
 			mesh, ok := mesh_load(d.mesh, d.part)
 			if !ok do continue
 			gpu := d.skinned != nil ? d.skinned^ : mesh.gpu
+			bounds_center: [3]f32
+			bounds_radius: f32
+			if mesh.aabb_min != mesh.aabb_max {
+				local_center := (mesh.aabb_min + mesh.aabb_max) * 0.5
+				local_half := (mesh.aabb_max - mesh.aabb_min) * 0.5
+				wc := d.model * [4]f32{local_center.x, local_center.y, local_center.z, 1.0}
+				bounds_center = wc.xyz
+				sx := abs(d.model[0, 0]) * local_half.x + abs(d.model[0, 1]) * local_half.y + abs(d.model[0, 2]) * local_half.z
+				sy := abs(d.model[1, 0]) * local_half.x + abs(d.model[1, 1]) * local_half.y + abs(d.model[1, 2]) * local_half.z
+				sz := abs(d.model[2, 0]) * local_half.x + abs(d.model[2, 1]) * local_half.y + abs(d.model[2, 2]) * local_half.z
+				bounds_radius = math.sqrt(sx * sx + sy * sy + sz * sz) * (d.skinned != nil ? 2.5 : 1.05)
+			}
 			for sub, i in mesh.submeshes {
 				if sub.index_count == 0 do continue
 				if d.unlit_heatmap {
 					// Weight Heatmap / Inspection mode:
 					// Draw unlit with white texture so vertex heat colors (Red = 1.0, Yellow = 0.75, Green = 0.5, Blue = 0.25)
 					// display at 100% full, vibrant brightness without being darkened by scene shadows, ambient falloff, or material textures!
-					gfx.draw_mesh(gpu, nil, d.model, {1, 1, 1, 1}, "", sub.first_index, sub.index_count, no_shadow = true)
+					gfx.draw_mesh(gpu, nil, d.model, {1, 1, 1, 1}, "", sub.first_index, sub.index_count, no_shadow = true, bounds_center = bounds_center, bounds_radius = bounds_radius, double_sided = true)
 				} else {
 					mat_guid: Asset_GUID
 					if i < len(d.materials) do mat_guid = d.materials[i]
-					shader, gpu_tex, color, mat_data, extra_tex := _resolve_material(mat_guid, .Lit)
-					gfx.draw_mesh(gpu, gpu_tex, d.model, color, shader, sub.first_index, sub.index_count, mat_data, extra_tex, no_shadow = d.no_shadow)
+					shader, gpu_tex, color, mat_data, extra_tex, double_sided := _resolve_material_ex(mat_guid, .Lit)
+					gfx.draw_mesh(gpu, gpu_tex, d.model, color, shader, sub.first_index, sub.index_count, mat_data, extra_tex, no_shadow = d.no_shadow, bounds_center = bounds_center, bounds_radius = bounds_radius, double_sided = double_sided)
 				}
 			}
 			if d.wire_mesh != nil && d.wire_mesh.index_count > 0 && d.wire_color.a > 0.001 {
@@ -611,7 +603,7 @@ render_execute :: proc(view: Render_View, commands: []Render_Command) {
 			}
 		}
 	}
-	if gfx.command_buffer() != nil {
+	if render_shadows && gfx.command_buffer() != nil {
 		gfx.shadow_render_pass(view.cam_pos)
 	}
 }
@@ -651,13 +643,23 @@ render_world_cameras :: proc(target: ^gfx.Render_Target = nil) -> bool {
 		ws := gfx.window_size()
 		width, height = f32(ws.x), f32(ws.y)
 	}
+	if len(cams) > 0 {
+		gfx.set_post_fx(camera_post_fx_config(cams[0]))
+	} else {
+		gfx.set_post_fx(gfx.POST_FX_DEFAULT)
+	}
 	canvas_set_game_viewport({width, height}) // the canvas tree measures against the game viewport
 
-	for cam in cams {
+	primary_cam_pos := [3]f32{}
+	for cam, ci in cams {
 		view := camera_render_view(cam, width, height)
+		if ci == 0 do primary_cam_pos = view.cam_pos
 		commands := make([dynamic]Render_Command, 0, 64, context.temp_allocator)
 		render_collect_commands(view, &commands)
-		render_execute(view, commands[:])
+		render_execute(view, commands[:], render_shadows = false)
+	}
+	if len(cams) > 0 && gfx.command_buffer() != nil {
+		gfx.shadow_render_pass(primary_cam_pos)
 	}
 	return true
 }

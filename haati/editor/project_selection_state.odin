@@ -9,7 +9,7 @@ import engine "../engine"
 import "haati:engine_editor/asset_pipeline"
 import "inspector"
 import "undo"
-import file_explorer_editor "haati:packages/file_explorer/editor"
+import file_explorer_editor "haati:editor/file_explorer/editor"
 
 ProjectViewData :: struct {
 	currentPath:  string,
@@ -24,6 +24,8 @@ _project_rename_active: bool
 _project_rename_just_finished: bool
 
 @(private = "file") _last_fe_selected: string
+@(private = "file") _last_fe_epoch: u64
+@(private = "file") _was_asset_locked: bool
 
 init_project_view :: proc() {
 	context.allocator = runtime.default_allocator()
@@ -71,7 +73,7 @@ _is_inspector_asset :: proc(path: string) -> bool {
 }
 
 _project_inspect_path :: proc(full_path: string) {
-	if !project_inspector_accepts_target() do return
+	if inspector.is_locked() do return
 	if project_path_is_package_root(full_path) {
 		inspector.load_package(project_package_root_name(full_path), full_path, _project_package_asset_count(full_path))
 		return
@@ -135,7 +137,7 @@ _project_reveal_keep_selection :: proc(path: string) {
 _project_reveal_path :: proc(path: string, select: bool) {
 	parent := filepath.dir(path)
 	if parent == "" do parent = projectViewData.rootPath
-	if project_path_is_package_root(path) do parent = _PROJECT_PACKAGES_PATH
+	if project_path_is_package_root(path) do parent = project_packages_path()
 	_project_set_current(parent)
 	if select {
 		_project_set_selected(path)
@@ -152,14 +154,26 @@ project_selection_frame_sync :: proc() {
 		_project_set_current(fe_dir)
 	}
 	fe_sel := file_explorer_editor.fe_selected_asset_path()
-	if fe_sel != _last_fe_selected {
+	fe_epoch := file_explorer_editor.fe_selection_epoch()
+	if fe_sel != _last_fe_selected || fe_epoch != _last_fe_epoch {
 		context.allocator = runtime.default_allocator()
 		delete(_last_fe_selected)
 		_last_fe_selected = strings.clone(fe_sel)
-		if fe_sel != "" && fe_sel != projectViewData.selectedFile {
+		_last_fe_epoch = fe_epoch
+		if fe_sel != "" {
 			_project_set_selected(fe_sel)
 			_project_inspect_path(fe_sel)
 		}
+	}
+
+	asset_locked := inspector.is_locked()
+	if _was_asset_locked && !asset_locked && sel_in_project() && fe_sel != "" {
+		_project_inspect_path(fe_sel)
+	}
+	_was_asset_locked = asset_locked
+
+	if !asset_locked && !sel_in_project() && len(_sel_scene) > 0 && inspector.has_selected_asset() {
+		inspector.unload()
 	}
 
 	if ping_guid, ok := engine.inspector_take_pending_ping_asset(); ok {

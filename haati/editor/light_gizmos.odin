@@ -105,8 +105,7 @@ light_handles :: proc(l: ^engine.Light, ctx: handles.Gizmo_Context) {
 			undo.edit_target_pooled(h, &l.range, typeid_of(f32)),
 			undo.edit_target_pooled(h, &l.spot_angle, typeid_of(f32)),
 		}
-		_light_edit = undo.edit_session_begin(targets[:], "Edit Light")
-		handles.on_drag_lost(proc(_: rawptr) { undo.edit_session_end(&_light_edit) })
+		handles.begin_drag_edit(&_light_edit, targets[:], "Edit Light")
 	}
 	if d.dragging || d.released {
 		if range != l.range do l.range = range

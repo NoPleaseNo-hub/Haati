@@ -8,6 +8,7 @@ import "core:fmt"
 import "core:strings"
 import im "haati:external/odin-imgui"
 import icons "haati:editor/icons"
+import thm "haati:editor/theme"
 
 @(private = "file")
 _copied_feedback_id: string
@@ -43,10 +44,11 @@ copyable_text :: proc(
 	avail_w := im.GetContentRegionAvail().x
 	text_w := max(f32(60.0), avail_w - (copy_button ? (btn_w + spacing) : 0.0))
 
-	im.PushStyleColorImVec4(.FrameBg, {0.10, 0.12, 0.16, 0.85})
-	im.PushStyleColorImVec4(.FrameBgHovered, {0.13, 0.16, 0.22, 0.95})
-	im.PushStyleColorImVec4(.FrameBgActive, {0.16, 0.20, 0.28, 1.0})
-	im.PushStyleColorImVec4(.Text, {0.35, 0.85, 1.0, 1.0})
+	p := thm.palette()
+	im.PushStyleColorImVec4(.FrameBg, p.bg_recessed)
+	im.PushStyleColorImVec4(.FrameBgHovered, p.bg_hover)
+	im.PushStyleColorImVec4(.FrameBgActive, p.bg_active)
+	im.PushStyleColorImVec4(.Text, p.accent)
 	im.PushStyleVar(.FrameRounding, 4.0)
 
 	im.SetNextItemWidth(text_w)
@@ -60,31 +62,112 @@ copyable_text :: proc(
 	copied := false
 	if copy_button {
 		im.SameLine(0, spacing)
-		is_copied := is_copied_feedback_active(id)
-
-		if is_copied {
-			im.PushStyleColorImVec4(.Button, {0.18, 0.55, 0.25, 0.85})
-			im.PushStyleColorImVec4(.Text, {0.4, 1.0, 0.5, 1.0})
-			if im.Button(fmt.ctprintf("%s##CopyBtn", icons.ICON_MD_CHECK), {btn_w, 0}) {
-				set_clipboard_with_feedback(id, text)
-				copied = true
-			}
-			tooltip("Copied to clipboard!", {}, loc)
-			im.PopStyleColor(2)
-		} else {
-			im.PushStyleColorImVec4(.Button, {0.18, 0.22, 0.28, 0.85})
-			im.PushStyleColorImVec4(.ButtonHovered, {0.28, 0.35, 0.45, 1.0})
-			im.PushStyleColorImVec4(.Text, {0.8, 0.85, 0.9, 1.0})
-			if im.Button(fmt.ctprintf("%s##CopyBtn", icons.ICON_MD_CONTENT_COPY), {btn_w, 0}) {
-				set_clipboard_with_feedback(id, text)
-				copied = true
-			}
-			tooltip("Copy text to clipboard", {}, loc)
-			im.PopStyleColor(3)
-		}
+		copied = copy_flash_button(id, text, btn_id = "##CopyBtn", btn_w = btn_w, use_text_button = true, tooltip_idle = "Copy text to clipboard", tooltip_copied = "Copied to clipboard!", loc = loc)
 	}
 
 	return copied
+}
+
+// Reusable clipboard copy button with temporary green "Copied!" flash state.
+copy_flash_button :: proc(
+	id: string,
+	copy_payload: string,
+	btn_id: cstring = "##CopyFlash",
+	small := false,
+	show_label := false,
+	btn_w: f32 = 0,
+	use_text_button := false,
+	tooltip_idle: cstring = "Copy to clipboard",
+	tooltip_copied: cstring = "Copied!",
+	loc := #caller_location,
+) -> bool {
+	p := thm.palette()
+	is_copied := is_copied_feedback_active(id)
+	clicked := false
+
+	if small || show_label || use_text_button {
+		lbl: cstring
+		if show_label {
+			lbl = is_copied ? fmt.ctprintf("%s Copied!%s", icons.ICON_MD_CHECK, btn_id) : fmt.ctprintf("%s Copy%s", icons.ICON_MD_CONTENT_COPY, btn_id)
+		} else {
+			lbl = is_copied ? fmt.ctprintf("%s%s", icons.ICON_MD_CHECK, btn_id) : fmt.ctprintf("%s%s", icons.ICON_MD_CONTENT_COPY, btn_id)
+		}
+		if is_copied {
+			im.PushStyleColorImVec4(.Button, thm.with_alpha(p.status_success, 0.28))
+			im.PushStyleColorImVec4(.Text, p.status_success)
+			clicked = small ? im.SmallButton(lbl) : im.Button(lbl, {btn_w, 0})
+			im.PopStyleColor(2)
+		} else {
+			im.PushStyleColorImVec4(.Button, p.bg_elevated)
+			im.PushStyleColorImVec4(.ButtonHovered, p.bg_hover)
+			im.PushStyleColorImVec4(.Text, p.text_secondary)
+			clicked = small ? im.SmallButton(lbl) : im.Button(lbl, {btn_w, 0})
+			im.PopStyleColor(3)
+		}
+		tooltip(is_copied ? tooltip_copied : tooltip_idle, {}, loc)
+	} else {
+		btn_icon := cstring(is_copied ? icons.ICON_MD_CHECK : icons.ICON_MD_CONTENT_COPY)
+		if is_copied do im.PushStyleColorImVec4(.Text, p.status_success)
+		clicked = icon_button(btn_icon, btn_id, is_copied ? tooltip_copied : tooltip_idle, size = btn_w, loc = loc)
+		if is_copied do im.PopStyleColor()
+	}
+
+	if clicked {
+		set_clipboard_with_feedback(id, copy_payload)
+	}
+	return clicked
+}
+
+// Read-only multiline text field backed by a persistent byte buffer (`buf` must stay
+// valid and null-terminated for the draw call).
+readonly_multiline_buf :: proc(
+	id: cstring,
+	buf: []u8,
+	size := im.Vec2{-1, -1},
+	word_wrap := false,
+	frame_pad := im.Vec2{-1, -1},
+	bg_col := im.Vec4{-1, 0, 0, 0},
+	text_col := im.Vec4{-1, 0, 0, 0},
+) {
+	if len(buf) == 0 do return
+	flags: im.InputTextFlags = {.ReadOnly}
+	if word_wrap do flags += {.WordWrap}
+
+	var_cnt: i32 = 0
+	if frame_pad.x >= 0 {
+		im.PushStyleVarImVec2(.FramePadding, frame_pad)
+		var_cnt += 1
+	}
+	col_cnt: i32 = 0
+	if bg_col.x >= 0 {
+		im.PushStyleColorImVec4(.FrameBg, bg_col)
+		col_cnt += 1
+	}
+	if text_col.x >= 0 {
+		im.PushStyleColorImVec4(.Text, text_col)
+		col_cnt += 1
+	}
+
+	im.InputTextMultiline(id, cstring(raw_data(buf)), uint(len(buf)), size, flags)
+
+	if col_cnt > 0 do im.PopStyleColor(col_cnt)
+	if var_cnt > 0 do im.PopStyleVar(var_cnt)
+}
+
+// Read-only multiline text field cloned into temp storage for immediate drawing.
+readonly_multiline :: proc(
+	id: cstring,
+	text: string,
+	size := im.Vec2{-1, -1},
+	word_wrap := false,
+	frame_pad := im.Vec2{-1, -1},
+	bg_col := im.Vec4{-1, 0, 0, 0},
+	text_col := im.Vec4{-1, 0, 0, 0},
+) {
+	buf := make([]u8, len(text) + 1, context.temp_allocator)
+	if len(text) > 0 do copy(buf[:len(text)], text)
+	buf[len(text)] = 0
+	readonly_multiline_buf(id, buf, size, word_wrap, frame_pad, bg_col, text_col)
 }
 
 // Multi-line code block with optional title header and "Copy Code" button.
@@ -99,15 +182,15 @@ copyable_code_block :: proc(
 	im.PushID(strings.clone_to_cstring(id, context.temp_allocator))
 	defer im.PopID()
 
+	p := thm.palette()
 	copied := false
-	is_copied := is_copied_feedback_active(id)
 
 	avail_w := im.GetContentRegionAvail().x
-	btn_w: f32 = is_copied ? 86.0 : 76.0
+	btn_w: f32 = is_copied_feedback_active(id) ? 86.0 : 76.0
 
 	// Header bar with title on left and Copy button on right
 	if len(title) > 0 {
-		im.TextColored({1.0, 0.82, 0.3, 1.0}, fmt.ctprintf("%s", title))
+		text_colored(p.status_warning, title)
 		im.SameLine(0, 0)
 		if avail_w > btn_w + 40.0 {
 			im.SetCursorPosX(im.GetCursorPosX() + avail_w - btn_w - 4.0)
@@ -118,24 +201,8 @@ copyable_code_block :: proc(
 		}
 	}
 
-	if is_copied {
-		im.PushStyleColorImVec4(.Button, {0.18, 0.55, 0.25, 0.85})
-		im.PushStyleColorImVec4(.Text, {0.4, 1.0, 0.5, 1.0})
-		if im.SmallButton(fmt.ctprintf("%s Copied!##CopyBlock", icons.ICON_MD_CHECK)) {
-			set_clipboard_with_feedback(id, code)
-			copied = true
-		}
-		im.PopStyleColor(2)
-	} else {
-		im.PushStyleColorImVec4(.Button, {0.20, 0.24, 0.32, 0.85})
-		im.PushStyleColorImVec4(.ButtonHovered, {0.28, 0.36, 0.48, 1.0})
-		im.PushStyleColorImVec4(.Text, {0.85, 0.90, 0.95, 1.0})
-		if im.SmallButton(fmt.ctprintf("%s Copy##CopyBlock", icons.ICON_MD_CONTENT_COPY)) {
-			set_clipboard_with_feedback(id, code)
-			copied = true
-		}
-		tooltip("Copy entire snippet to clipboard", {}, loc)
-		im.PopStyleColor(3)
+	if copy_flash_button(id, code, btn_id = "##CopyBlock", small = true, show_label = true, tooltip_idle = "Copy entire snippet to clipboard", loc = loc) {
+		copied = true
 	}
 
 	// Calculate auto-height based on line count if not explicitly set
@@ -143,12 +210,11 @@ copyable_code_block :: proc(
 	line_h := im.GetTextLineHeightWithSpacing()
 	auto_h := height > 0 ? height : max(f32(40.0), f32(line_count) * line_h + 16.0)
 
-	im.PushStyleColorImVec4(.FrameBg, {0.09, 0.10, 0.14, 0.95})
-	im.PushStyleColorImVec4(.Text, {0.40, 0.90, 0.65, 1.0})
+	im.PushStyleColorImVec4(.FrameBg, p.bg_recessed)
+	im.PushStyleColorImVec4(.Text, p.text_primary)
 	im.PushStyleVar(.FrameRounding, 4.0)
 
-	code_cstr := strings.clone_to_cstring(code, context.temp_allocator)
-	im.InputTextMultiline("##CodeBox", code_cstr, uint(len(code) + 1), {-1, auto_h}, {.ReadOnly})
+	readonly_multiline("##CodeBox", code, {-1, auto_h})
 	tooltip("Drag across text to select and highlight, Ctrl+C to copy snippet", {}, loc)
 
 	im.PopStyleVar()

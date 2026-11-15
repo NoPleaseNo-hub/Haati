@@ -241,8 +241,7 @@ _se_toolbar :: proc(tex: ^engine.Texture2D) {
 
 	im.SameLine()
 	dirty := _se.doc.dirty ? " *" : ""
-	im.TextDisabled("%s%s — %d x %d, %d slices", strings.clone_to_cstring(_se.path, context.temp_allocator),
-		strings.clone_to_cstring(dirty, context.temp_allocator), tex.width, tex.height, i32(len(_se.ts.sprites)))
+	im.TextDisabledUnformatted(fmt.ctprintf("%s%s — %d x %d, %d slices", _se.path, dirty, tex.width, tex.height, len(_se.ts.sprites)))
 }
 
 _se_slice_popup :: proc(tex: ^engine.Texture2D) {
@@ -646,7 +645,7 @@ _se_panel :: proc(tex: ^engine.Texture2D) {
 		// Single mode: the texture is the sprite. Its borders are the one
 		// thing to author here.
 		im.Text("Sprite (whole texture)")
-		im.TextDisabled("%d x %d", tex.width, tex.height)
+		im.TextDisabledUnformatted(fmt.ctprintf("%d x %d", tex.width, tex.height))
 		_se_border_fields(&_se.ts.sprite_border, {f32(tex.width), f32(tex.height)})
 		im.Separator()
 		im.TextWrapped("Drag the green lines to set the 9-slice borders. Drag on the image to create slices (Multiple mode). Middle-drag pans, wheel zooms.")

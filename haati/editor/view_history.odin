@@ -166,9 +166,7 @@ _draw_history_entry_details :: proc(entry: ^undo.Entry) {
 	_append_command_details(&b, &entry.cmd, 0)
 
 	text := strings.to_string(b)
-	buf := strings.clone_to_cstring(text, context.temp_allocator)
-	im.InputTextMultiline("##history_detail_text", buf, uint(len(text) + 1),
-		im.Vec2{-1, -1}, {.ReadOnly, .WordWrap})
+	widgets.readonly_multiline("##history_detail_text", text, {-1, -1}, word_wrap = true)
 }
 
 @(private="file")
@@ -352,9 +350,4 @@ _indent :: proc(depth: int) -> string {
 _truncate :: proc(s: string, max: int) -> string {
 	if len(s) <= max do return s
 	return fmt.tprintf("%s ...(%d bytes)", s[:max], len(s))
-}
-
-@(private="file")
-cstr :: proc(s: string) -> cstring {
-	return strings.clone_to_cstring(s, context.temp_allocator)
 }

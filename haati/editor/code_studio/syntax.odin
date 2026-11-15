@@ -18,18 +18,7 @@ import "core:strings"
 import thm "haati:editor/theme"
 import im "haati:external/odin-imgui"
 
-Syntax_Role :: enum u8 {
-	Plain     = 0,
-	Keyword   = 1,
-	Type      = 2,
-	Attribute = 3,
-	String    = 4,
-	Number    = 5,
-	Comment   = 6,
-	Call      = 7,
-	Operator  = 8,
-	Pin_Ref   = 9, // `^` pointer/reference indicator
-}
+Syntax_Role :: thm.Studio_Syntax_Role
 
 Syntax_Span :: struct {
 	line:      int, // 1-based line number
@@ -39,30 +28,7 @@ Syntax_Span :: struct {
 }
 
 role_color :: proc(role: Syntax_Role, p: ^thm.Theme_Palette) -> im.Vec4 {
-	light := p.is_light
-	switch role {
-	case .Keyword:
-		return light ? im.Vec4{0.62, 0.14, 0.72, 1.0} : im.Vec4{0.78, 0.52, 0.98, 1.0}
-	case .Type:
-		return light ? im.Vec4{0.05, 0.48, 0.58, 1.0} : im.Vec4{0.36, 0.84, 0.94, 1.0}
-	case .Attribute:
-		return light ? im.Vec4{0.72, 0.42, 0.04, 1.0} : im.Vec4{0.98, 0.76, 0.32, 1.0}
-	case .String:
-		return light ? im.Vec4{0.14, 0.54, 0.22, 1.0} : im.Vec4{0.58, 0.88, 0.54, 1.0}
-	case .Number:
-		return light ? im.Vec4{0.76, 0.34, 0.08, 1.0} : im.Vec4{0.96, 0.64, 0.38, 1.0}
-	case .Comment:
-		return p.text_muted
-	case .Call:
-		return light ? im.Vec4{0.12, 0.38, 0.78, 1.0} : im.Vec4{0.46, 0.74, 1.00, 1.0}
-	case .Operator:
-		return p.text_secondary
-	case .Pin_Ref:
-		return light ? im.Vec4{0.82, 0.22, 0.38, 1.0} : im.Vec4{1.00, 0.48, 0.62, 1.0}
-	case .Plain:
-		return p.text_primary
-	}
-	return p.text_primary
+	return thm.studio_syntax_color(role, p)
 }
 
 @(private = "file")
@@ -199,25 +165,40 @@ Proc_Slice_Result :: struct {
 	body_first_line:  int,    // 1-based file line of first body line
 }
 
+// Parses `code` into `ast.File` inside `arena`, optionally wrapping a scoped node body
+// in a 2-line stub procedure with `(api, self, dt)` in scope.
+parse_odin_in_arena :: proc(
+	code:           string,
+	fullpath:       string,
+	is_scoped_body: bool,
+	arena:          ^mem.Dynamic_Arena,
+	err_cb:         parser.Error_Handler = nil,
+	warn_cb:        parser.Error_Handler = nil,
+) -> (file: ast.File, parsed_ok: bool, used_src: string) {
+	arena_alloc := mem.dynamic_arena_allocator(arena)
+	used_src = is_scoped_body \
+		? strings.concatenate({"package _mh_scoped\n_mh_body :: proc(api: ^hot.Engine_Hot_API, self: hot.Hot_Entity, dt: f32) {\n", code, "\n}\n"}, arena_alloc) \
+		: code
+	file = ast.File{
+		src      = used_src,
+		fullpath = fullpath,
+	}
+	p := parser.Parser{
+		err   = err_cb != nil ? err_cb : _silent_tok_err,
+		warn  = warn_cb != nil ? warn_cb : _silent_tok_err,
+		flags = {.Optional_Semicolons},
+	}
+	context.allocator = arena_alloc
+	parsed_ok = parser.parse_file(&p, &file)
+	return file, parsed_ok, used_src
+}
+
 slice_odin_procedure :: proc(full_src: string, proc_name: string, allocator := context.allocator) -> (res: Proc_Slice_Result, ok: bool) {
 	arena: mem.Dynamic_Arena
 	mem.dynamic_arena_init(&arena)
 	defer mem.dynamic_arena_destroy(&arena)
 
-	f := ast.File{
-		src      = full_src,
-		fullpath = "slice.odin",
-	}
-	p := parser.Parser{
-		err   = _silent_tok_err,
-		warn  = _silent_tok_err,
-		flags = {.Optional_Semicolons},
-	}
-	parsed_ok: bool
-	{
-		context.allocator = mem.dynamic_arena_allocator(&arena)
-		parsed_ok = parser.parse_file(&p, &f)
-	}
+	f, parsed_ok, _ := parse_odin_in_arena(full_src, "slice.odin", false, &arena)
 	if !parsed_ok && len(f.decls) == 0 {
 		return {}, false
 	}
@@ -287,4 +268,149 @@ splice_odin_procedure_body :: proc(full_src: string, proc_name: string, new_body
 	}
 	strings.write_string(&sb, full_src[sliced.close_brace_off:])
 	return strings.to_string(sb), true
+}
+
+// =============================================================================
+// UNUSED ODIN IMPORT DETECTION & 1-CLICK COMMENT CLEANUP
+// =============================================================================
+
+Unused_Import_Info :: struct {
+	line:        int,
+	alias:       string,
+	import_path: string,
+}
+
+@(private = "file")
+_derive_import_alias :: proc(import_path: string) -> string {
+	p := strings.trim(import_path, "\"`")
+	if idx := strings.last_index_byte(p, '/'); idx >= 0 {
+		p = p[idx + 1:]
+	}
+	if idx := strings.last_index_byte(p, ':'); idx >= 0 {
+		p = p[idx + 1:]
+	}
+	return p
+}
+
+// Scans Odin source with `core:odin/tokenizer` and returns every non-blank `import`
+// whose package alias never appears as an identifier elsewhere in the file.
+detect_unused_odin_imports :: proc(src: string, allocator := context.temp_allocator) -> [dynamic]Unused_Import_Info {
+	unused := make([dynamic]Unused_Import_Info, 0, 8, allocator)
+	if len(src) == 0 || !strings.contains(src, "import") do return unused
+
+	_Import_Decl :: struct {
+		line:        int,
+		alias:       string,
+		import_path: string,
+	}
+	decls := make([dynamic]_Import_Decl, 0, 16, context.temp_allocator)
+	used_idents := make(map[string]bool, 64, context.temp_allocator)
+
+	tok: tokenizer.Tokenizer
+	tokenizer.init(&tok, src, "buffer.odin", _silent_tok_err)
+	tok.flags = {}
+
+	prev_kind := tokenizer.Token_Kind.Invalid
+	cur := tokenizer.scan(&tok)
+	for cur.kind != .EOF {
+		if cur.kind == .Comment {
+			cur = tokenizer.scan(&tok)
+			continue
+		}
+		if cur.kind == .Import && prev_kind != .Foreign {
+			t1 := tokenizer.scan(&tok)
+			for t1.kind == .Comment {
+				t1 = tokenizer.scan(&tok)
+			}
+			if t1.kind == .Ident {
+				t2 := tokenizer.scan(&tok)
+				for t2.kind == .Comment {
+					t2 = tokenizer.scan(&tok)
+				}
+				if t2.kind == .String {
+					if t1.text != "_" {
+						append(&decls, _Import_Decl{
+							line        = cur.pos.line,
+							alias       = t1.text,
+							import_path = strings.trim(t2.text, "\"`"),
+						})
+					}
+					prev_kind = t2.kind
+					cur = tokenizer.scan(&tok)
+					continue
+				}
+				prev_kind = cur.kind
+				cur = t1
+				continue
+			} else if t1.kind == .String {
+				alias := _derive_import_alias(t1.text)
+				if alias != "" && alias != "_" {
+					append(&decls, _Import_Decl{
+						line        = cur.pos.line,
+						alias       = alias,
+						import_path = strings.trim(t1.text, "\"`"),
+					})
+				}
+				prev_kind = t1.kind
+				cur = tokenizer.scan(&tok)
+				continue
+			}
+		} else if cur.kind == .Ident && prev_kind != .Period {
+			used_idents[cur.text] = true
+		}
+
+		prev_kind = cur.kind
+		cur = tokenizer.scan(&tok)
+	}
+
+	for d in decls {
+		if !(d.alias in used_idents) {
+			append(&unused, Unused_Import_Info{
+				line        = d.line,
+				alias       = d.alias,
+				import_path = d.import_path,
+			})
+		}
+	}
+	return unused
+}
+
+// Comments out all unused `import` lines in `src` (preserving indentation) so `odin check` succeeds cleanly.
+comment_out_unused_odin_imports :: proc(src: string, allocator := context.temp_allocator) -> (updated: string, commented_count: int) {
+	unused := detect_unused_odin_imports(src, context.temp_allocator)
+	if len(unused) == 0 do return src, 0
+
+	unused_lines := make(map[int]bool, len(unused), context.temp_allocator)
+	for u in unused do unused_lines[u.line] = true
+
+	sb := strings.builder_make(allocator)
+	lines := strings.split_lines(src, context.temp_allocator)
+	has_trailing_nl := strings.has_suffix(src, "\n")
+	for ln_raw, i in lines {
+		ln := strings.trim_suffix(ln_raw, "\r")
+		if unused_lines[i + 1] {
+			ws_end := 0
+			for ws_end < len(ln) && (ln[ws_end] == ' ' || ln[ws_end] == '\t') {
+				ws_end += 1
+			}
+			if ws_end < len(ln) && !strings.has_prefix(ln[ws_end:], "//") {
+				strings.write_string(&sb, ln[:ws_end])
+				strings.write_string(&sb, "// ")
+				strings.write_string(&sb, ln[ws_end:])
+				commented_count += 1
+			} else {
+				strings.write_string(&sb, ln)
+			}
+		} else {
+			strings.write_string(&sb, ln)
+		}
+		if i + 1 < len(lines) || has_trailing_nl {
+			strings.write_byte(&sb, '\n')
+		}
+	}
+	if commented_count == 0 {
+		strings.builder_destroy(&sb)
+		return src, 0
+	}
+	return strings.to_string(sb), commented_count
 }

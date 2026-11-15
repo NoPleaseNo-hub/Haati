@@ -33,13 +33,17 @@ progress_overlay_install :: proc() {
 	progress.set_sink(_progress_pump)
 }
 
+progress_overlay_uninstall :: proc() {
+	progress.set_sink(nil)
+}
+
 progress_overlay_frame_scope :: proc(active: bool) {
 	_in_main_frame = active
 }
 
 @(private = "file")
 _progress_pump :: proc(title, info: string, fraction: f32) {
-	if _in_main_frame do return
+	if _in_main_frame || viewport_any_secondary_window() do return
 	now := time.tick_now()
 	if time.tick_diff(_progress_last_pump, now) < 33 * time.Millisecond do return
 	_progress_last_pump = now
@@ -75,10 +79,10 @@ _progress_pump :: proc(title, info: string, fraction: f32) {
 	im.End()
 
 	im.Render()
-	dd := im.GetDrawData()
-	im_sdlgpu.PrepareDrawData(dd, gfx.command_buffer())
 	swap_bg := thm.palette().bg_canvas
 	if gfx.pass_begin_swapchain([4]f32{swap_bg.x, swap_bg.y, swap_bg.z, 1}, depth = false) {
+		dd := im.GetDrawData()
+		im_sdlgpu.PrepareDrawData(dd, gfx.command_buffer())
 		gfx.pass_end(proc(cmd: ^sdl.GPUCommandBuffer, rp: ^sdl.GPURenderPass) {
 			im_sdlgpu.RenderDrawData(im.GetDrawData(), cmd, rp)
 		})

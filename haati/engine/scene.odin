@@ -292,7 +292,7 @@ scene_ref_resolve_transform :: proc(s: ^Scene, r: Ref, parent_for_local_id: Tran
 		}
 	}
 	if r.pptr.local_id == 0 do return {}, false
-	if !pptr_guid_is_empty(r.pptr.guid) do return {}, false
+	if !asset_guid_is_empty(r.pptr.guid) do return {}, false
 	if breadcrumb_is_placeholder(s, r.pptr.local_id) do return {}, false
 	count := 0
 	last: Transform_Handle

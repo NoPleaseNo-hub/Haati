@@ -4,6 +4,7 @@ package editor
 // machine lives in editor/simulate; this file is its view plus the hooks that
 // give it access to editor-root state (selection, phases, settings).
 
+import "base:runtime"
 import "core:fmt"
 import "core:strings"
 import im "haati:external/odin-imgui"
@@ -188,8 +189,8 @@ _sim_host_name_load :: proc() -> string {
 
 @(private="file")
 _sim_host_name_store :: proc(name: string) {
-    if editor_settings.sim_host != "" do delete(editor_settings.sim_host)
-    editor_settings.sim_host = strings.clone(name)
+    if editor_settings.sim_host != "" do delete(editor_settings.sim_host, runtime.default_allocator())
+    editor_settings.sim_host = strings.clone(name, runtime.default_allocator())
 }
 
 @(menu_item={path="Edit/Play", order=30, shortcut="Ctrl+P"})

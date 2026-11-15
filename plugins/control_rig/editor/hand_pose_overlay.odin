@@ -239,7 +239,8 @@ draw_hand_poses_top_bar :: proc(target_owner: engine.Transform_Handle, target_ad
 		if im.BeginCombo("##TopBarPoseFolderCombo", cur_label) {
 			for entry, idx in folder_entries {
 				is_sel := idx == _selected_folder_idx
-				if im.Selectable(fmt.ctprintf("%s", entry.display_name), is_sel) {
+				dname := entry.display_name != "" ? entry.display_name : "(Unnamed Pose)"
+				if im.Selectable(fmt.ctprintf("%s##PoseFolder_%d", dname, idx), is_sel) {
 					_selected_folder_idx = idx
 					_set_cstr_buf(_save_pose_name_buf[:], entry.display_name)
 					owned, _ := engine.transform_get_comp(hpd.owner, crig.HandPoseDriver)
@@ -288,7 +289,8 @@ draw_hand_poses_top_bar :: proc(target_owner: engine.Transform_Handle, target_ad
 @(private = "file")
 _draw_thumb_2d_pad :: proc(driver: ^crig.HandPoseDriver, pos_2d: ^[2]f32) -> bool {
 	changed := false
-	pad_size := im.Vec2{112.0 * _hand_toolbar_scale, 112.0 * _hand_toolbar_scale}
+	s := max(112.0 * _hand_toolbar_scale, 1.0)
+	pad_size := im.Vec2{s, s}
 
 	im.BeginGroup()
 	p0 := im.GetCursorScreenPos()
@@ -338,7 +340,7 @@ _draw_thumb_2d_pad :: proc(driver: ^crig.HandPoseDriver, pos_2d: ^[2]f32) -> boo
 	im.DrawList_AddCircleFilled(dl, {hx, hy}, 6.0 * _hand_toolbar_scale, dot_col)
 	im.DrawList_AddCircle(dl, {hx, hy}, 6.0 * _hand_toolbar_scale, im.GetColorU32ImVec4({0.05, 0.05, 0.05, 0.9}), 12, 1.5)
 
-	im.TextDisabled(fmt.ctprintf("X:%+.2f Y:%+.2f", pos_2d.x, pos_2d.y))
+	im.TextDisabledUnformatted(fmt.ctprintf("X:%+.2f Y:%+.2f", pos_2d.x, pos_2d.y))
 	im.EndGroup()
 	return changed
 }
@@ -483,7 +485,7 @@ draw_hand_poses_left_toolbar :: proc(target_owner: engine.Transform_Handle, adm:
 		active_dir := _get_active_pose_folder()
 		folder_entries := crig.hand_pose_scan_folder(active_dir, context.temp_allocator)
 
-		im.TextColored({0.35, 0.85, 1.0, 1.0}, fmt.ctprintf("1. Folder Pose Library (%d files):", len(folder_entries)))
+		im.TextColoredUnformatted({0.35, 0.85, 1.0, 1.0}, fmt.ctprintf("1. Folder Pose Library (%d files):", len(folder_entries)))
 
 		if im.TreeNode("Folder Path & Library Management##PoseFolderCfg") {
 			im.SetNextItemWidth(240 * _hand_toolbar_scale)
@@ -568,20 +570,26 @@ draw_hand_poses_left_toolbar :: proc(target_owner: engine.Transform_Handle, adm:
 			if _blend_from_folder_idx < 0 || _blend_from_folder_idx >= len(folder_entries) do _blend_from_folder_idx = 0
 			if _blend_to_folder_idx < 0 || _blend_to_folder_idx >= len(folder_entries) do _blend_to_folder_idx = min(1, len(folder_entries) - 1)
 
+			from_name := folder_entries[_blend_from_folder_idx].display_name
+			if from_name == "" do from_name = "(Unnamed)"
 			im.SetNextItemWidth(135 * _hand_toolbar_scale)
-			if im.BeginCombo("From##BlendA", fmt.ctprintf("%s", folder_entries[_blend_from_folder_idx].display_name)) {
+			if im.BeginCombo("From##BlendA", fmt.ctprintf("%s", from_name)) {
 				for e, i in folder_entries {
-					if im.Selectable(fmt.ctprintf("%s##From_%d", e.display_name, i), i == _blend_from_folder_idx) {
+					ename := e.display_name != "" ? e.display_name : "(Unnamed)"
+					if im.Selectable(fmt.ctprintf("%s##From_%d", ename, i), i == _blend_from_folder_idx) {
 						_blend_from_folder_idx = i
 					}
 				}
 				im.EndCombo()
 			}
 			im.SameLine(0, 6)
+			to_name := folder_entries[_blend_to_folder_idx].display_name
+			if to_name == "" do to_name = "(Unnamed)"
 			im.SetNextItemWidth(135 * _hand_toolbar_scale)
-			if im.BeginCombo("To##BlendB", fmt.ctprintf("%s", folder_entries[_blend_to_folder_idx].display_name)) {
+			if im.BeginCombo("To##BlendB", fmt.ctprintf("%s", to_name)) {
 				for e, i in folder_entries {
-					if im.Selectable(fmt.ctprintf("%s##To_%d", e.display_name, i), i == _blend_to_folder_idx) {
+					ename := e.display_name != "" ? e.display_name : "(Unnamed)"
+					if im.Selectable(fmt.ctprintf("%s##To_%d", ename, i), i == _blend_to_folder_idx) {
 						_blend_to_folder_idx = i
 					}
 				}

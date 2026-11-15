@@ -1,7 +1,6 @@
 package inspector
 
 import "core:fmt"
-import "core:mem"
 import "core:strings"
 import im "haati:external/odin-imgui"
 import "../../engine"
@@ -21,13 +20,18 @@ _picker_search_buf: [128]byte
 // Draw the popup's search input (focused on open) and return the lowercase
 // query (temp-allocated).
 _picker_search_bar :: proc() -> []string {
-	if im.IsWindowAppearing() {
-		mem.zero(&_picker_search_buf, len(_picker_search_buf))
-		im.SetKeyboardFocusHere()
+	appearing := im.IsWindowAppearing()
+	if appearing {
+		widgets.buf_clear(_picker_search_buf[:])
 	}
-	im.SetNextItemWidth(220)
-	im.InputTextWithHint("##picker_search", "Search", cstring(raw_data(_picker_search_buf[:])), uint(len(_picker_search_buf)))
-	return widgets.search_terms(string(cstring(raw_data(_picker_search_buf[:]))))
+	sr := widgets.search_bar(_picker_search_buf[:], widgets.Search_Bar_Opts{
+		id         = "##picker_search",
+		hint       = "Search",
+		mode       = .Popup,
+		width      = 220,
+		auto_focus = appearing,
+	})
+	return widgets.search_terms(sr.query)
 }
 
 // Unity-like reference field row: Label [value][x][pick]. Single click on the

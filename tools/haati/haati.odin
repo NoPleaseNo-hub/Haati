@@ -8,12 +8,28 @@ import "core:os"
 import "core:path/filepath"
 
 main :: proc() {
+	exe_name :: "odin.exe" when ODIN_OS == .Windows else "odin"
 	odin_exe := "odin"
-	when ODIN_OS == .Windows {
-		root_odin, _ := filepath.join({ODIN_ROOT, "odin.exe"}, context.temp_allocator)
-		if os.exists(root_odin) do odin_exe = root_odin
-	} else {
-		root_odin, _ := filepath.join({ODIN_ROOT, "odin"}, context.temp_allocator)
+	// Prefer bundled `<repo>/tools/odin/` first for zero-external-dependency portability.
+	if cwd, cerr := os.get_working_directory(context.temp_allocator); cerr == nil {
+		dir := cwd
+		for {
+			cand, jerr := filepath.join({dir, "tools", "odin", exe_name}, context.temp_allocator)
+			if jerr == nil && os.exists(cand) {
+				odin_exe = cand
+				break
+			}
+			parent: string
+			{
+				context.allocator = context.temp_allocator
+				parent = filepath.dir(dir)
+			}
+			if parent == dir do break
+			dir = parent
+		}
+	}
+	if odin_exe == "odin" {
+		root_odin, _ := filepath.join({ODIN_ROOT, exe_name}, context.temp_allocator)
 		if os.exists(root_odin) do odin_exe = root_odin
 	}
 

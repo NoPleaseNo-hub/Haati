@@ -11,7 +11,7 @@ draw_A_property :: proc(ptr: rawptr, tid: typeid, label: cstring) {
     label2 := fmt.tprintf("Hello, %s", label);
     c_label: cstring = strings.clone_to_cstring(label2)
     defer delete(c_label)
-    im.Text(c_label)
+    im.TextUnformatted(c_label)
 }
 
 @(context_menu={type=sprites.SpriteRenderer, menu="Log Sprite Values", order=-100})

@@ -51,8 +51,8 @@ draw_curve_property :: proc(ptr: rawptr, tid: typeid, label: cstring) {
 	c := cast(^engine.Curve)ptr
 	field_row(label)
 
-	w := im.GetContentRegionAvail().x
-	h := im.GetFrameHeight()
+	w := max(im.GetContentRegionAvail().x, 1.0)
+	h := max(im.GetFrameHeight(), 1.0)
 	p0 := im.GetCursorScreenPos()
 	p1 := im.Vec2{p0.x + w, p0.y + h}
 	popup_id := fmt.ctprintf("curve_edit##%s", label)

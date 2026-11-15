@@ -129,21 +129,116 @@ _any_editor_sdl_window_has_focus :: proc() -> bool {
 	return false
 }
 
+// Returns the refresh rate (Hz) of the main editor window's display.
+viewport_main_refresh_hz :: proc() -> f32 {
+	if w := gfx.window(); w != nil {
+		if did := sdl.GetDisplayForWindow(w); did != 0 {
+			dm := sdl.GetDesktopDisplayMode(did)
+			if dm != nil && dm.refresh_rate > 1.0 {
+				return clamp(dm.refresh_rate, 30.0, 500.0)
+			}
+		}
+	}
+	return 60.0
+}
+
+// Returns the target display refresh rate (Hz) of whichever editor OS window
+// currently owns focus, falling back across active ImGui viewports or 60 Hz.
+viewport_target_refresh_hz :: proc() -> f32 {
+	target_win := sdl.GetKeyboardFocus()
+	if target_win == nil do target_win = sdl.GetMouseFocus()
+	if target_win == nil do target_win = gfx.window()
+	if target_win != nil {
+		did := sdl.GetDisplayForWindow(target_win)
+		if did != 0 {
+			dm := sdl.GetDesktopDisplayMode(did)
+			if dm != nil && dm.refresh_rate > 1.0 {
+				return clamp(dm.refresh_rate, 30.0, 500.0)
+			}
+		}
+	}
+	pio := im.GetPlatformIO()
+	if pio != nil && pio.Viewports.Size > 0 && pio.Viewports.Data != nil {
+		max_hz := f32(0)
+		vps := ([^]^im.Viewport)(pio.Viewports.Data)[:pio.Viewports.Size]
+		for vp in vps {
+			w := _viewport_sdl_window(vp)
+			if w == nil do continue
+			did := sdl.GetDisplayForWindow(w)
+			if did == 0 do continue
+			dm := sdl.GetDesktopDisplayMode(did)
+			if dm != nil && dm.refresh_rate > max_hz {
+				max_hz = dm.refresh_rate
+			}
+		}
+		if max_hz > 1.0 do return clamp(max_hz, 30.0, 500.0)
+	}
+	return 60.0
+}
+
+viewport_main_covered_by_secondary :: proc() -> bool {
+	pio := im.GetPlatformIO()
+	if pio == nil || pio.Viewports.Size <= 1 || pio.Viewports.Data == nil do return false
+	main_vp := im.GetMainViewport()
+	if main_vp == nil || main_vp.Size.x <= 0 || main_vp.Size.y <= 0 do return false
+	vps := ([^]^im.Viewport)(pio.Viewports.Data)[:pio.Viewports.Size]
+	for i in 1 ..< int(pio.Viewports.Size) {
+		vp := vps[i]
+		w := _viewport_sdl_window(vp)
+		if vp == nil || w == nil do continue
+		flags := sdl.GetWindowFlags(w)
+		if .MINIMIZED in flags || .HIDDEN in flags do continue
+		if vp.Pos.x <= main_vp.Pos.x &&
+		   vp.Pos.y <= main_vp.Pos.y &&
+		   vp.Pos.x + vp.Size.x >= main_vp.Pos.x + main_vp.Size.x &&
+		   vp.Pos.y + vp.Size.y >= main_vp.Pos.y + main_vp.Size.y {
+			return true
+		}
+	}
+	return false
+}
+
+@(private = "file")
+_prev_global_left_down: bool
+
 // Samples the hardware OS cursor right before `im.NewFrame()` during active
 // editor mouse drags so window dragging has minimal intra-frame latency inside
 // the main window and never drops motion/release events when crossing into or
 // out of secondary OS viewports over the desktop.
 viewport_platform_sync_drag_mouse :: proc() {
 	io := im.GetIO()
-	if io == nil || .ViewportsEnable not_in io.ConfigFlags do return
+	if io == nil || .ViewportsEnable not_in io.ConfigFlags {
+		gfx.skip_swapchain_wait_on_drag = false
+		gfx.skip_swapchain_wait_secondary = false
+		gfx.skip_main_swapchain = false
+		return
+	}
 	if input.is_mouse_relative() {
 		_editor_mouse_drag_active = false
+		_prev_global_left_down = false
+		gfx.skip_swapchain_wait_on_drag = false
+		gfx.skip_swapchain_wait_secondary = viewport_any_secondary_window()
+		gfx.skip_main_swapchain = viewport_main_covered_by_secondary()
 		return
 	}
 
 	gx, gy: f32
 	btns := sdl.GetGlobalMouseState(&gx, &gy)
 	left_down := .LEFT in btns
+	left_clicked_edge := left_down && !_prev_global_left_down
+	_prev_global_left_down = left_down
+
+	if left_clicked_edge {
+		mf := sdl.GetMouseFocus()
+		if mf != nil && mf != sdl.GetKeyboardFocus() && _any_editor_sdl_window_has_focus() {
+			_ = sdl.RaiseWindow(mf)
+		}
+	}
+
+	g_ctx := im.GetCurrentContext()
+	moving_win := g_ctx != nil && g_ctx.MovingWindow != nil
+	drag_drop_active := g_ctx != nil && g_ctx.DragDropActive
+	active_drag := moving_win || drag_drop_active
 
 	if !_editor_mouse_drag_active {
 		if left_down && (_any_editor_sdl_window_has_focus() || im.IsMouseDown(.Left)) {
@@ -152,15 +247,29 @@ viewport_platform_sync_drag_mouse :: proc() {
 	}
 
 	if _editor_mouse_drag_active {
-		im.IO_AddMousePosEvent(io, gx, gy)
+		if active_drag {
+			im.IO_AddMousePosEvent(io, gx, gy)
+		}
 		if !left_down {
-			im.IO_AddMouseButtonEvent(io, 0, false)
+			if active_drag {
+				im.IO_AddMouseButtonEvent(io, 0, false)
+			}
 			_editor_mouse_drag_active = false
 		}
 	}
-	g_ctx := im.GetCurrentContext()
-	moving_win := g_ctx != nil && g_ctx.MovingWindow != nil
-	gfx.skip_swapchain_wait_on_drag = _editor_mouse_drag_active && moving_win && viewport_any_secondary_window()
+
+	if io.WantTextInput {
+		kf := sdl.GetKeyboardFocus()
+		if kf != nil && _any_editor_sdl_window_has_focus() && !sdl.TextInputActive(kf) {
+			_ = sdl.StartTextInput(kf)
+		}
+	}
+
+	has_secondary := viewport_any_secondary_window()
+	gfx.set_multi_viewport_present_mode(has_secondary)
+	gfx.skip_swapchain_wait_on_drag = _editor_mouse_drag_active && active_drag && has_secondary
+	gfx.skip_swapchain_wait_secondary = has_secondary
+	gfx.skip_main_swapchain = viewport_main_covered_by_secondary()
 }
 
 // Kept as a no-op hook point in imgui_present_platform_windows (previously toggled

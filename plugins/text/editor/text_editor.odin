@@ -18,9 +18,6 @@ _FONT_EXTS := []string{".ttf", ".otf"}
 
 @(phase={key=ImportersInit, order=1, mode=Editor})
 text_importers_init :: proc() {
-	@(static) done := false
-	if done do return
-	done = true
 	asset_pipeline.importer_register({
 		name         = "font",
 		version      = 3,
@@ -34,27 +31,12 @@ text_importers_init :: proc() {
 // rebuilds it with those values, not the reset defaults.
 @(private = "file")
 _add_comp :: proc(tH: engine.Transform_Handle, key: engine.TypeKey, init: proc(ptr: rawptr) = nil) -> rawptr {
-	w := engine.ctx_world()
-	t := engine.pool_get(&w.transforms, engine.Handle(tH))
-	if t == nil do return nil
-	if _, idx := engine.transform_find_comp(t, key); idx >= 0 do return nil
-	owned, ptr := engine.transform_add_comp(tH, key)
-	if ptr == nil do return nil
-	if init != nil do init(ptr)
-	undo.record_add_component(tH, owned.handle, len(t.components) - 1)
-	return ptr
+	return undo.record_ensure_component(tH, key, init)
 }
 
 @(private = "file")
 _create_canvas :: proc() -> engine.Transform_Handle {
-	scene := engine.sm_scene_get_active()
-	if scene == nil do return _NONE
-	tH := undo.record_create_child("Canvas", engine.Transform_Handle(scene.root.handle))
-	if tH != _NONE {
-		_add_comp(tH, .Canvas)
-		_add_comp(tH, .GraphicRaycaster)
-	}
-	return tH
+	return undo.record_create_ui_canvas()
 }
 
 // A Text node: under the selection when that sits in a canvas, else under a

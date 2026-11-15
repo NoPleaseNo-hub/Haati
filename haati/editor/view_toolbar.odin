@@ -35,6 +35,10 @@ toolbar_height :: proc() -> f32 {
 _PLAY_SCENE_SNAPSHOT_PATH :: "library/state_cache/play_scene_snapshot.scene"
 
 _play_thread: ^thread.Thread
+_play_proc_mu: sync.Mutex
+_play_active_proc: os.Process
+_play_has_proc: bool
+_play_shutting_down: bool
 
 // Which stage the play thread is in, so the toolbar can say "Compiling" for the
 // several seconds of `odin build` instead of claiming the game is already
@@ -72,7 +76,9 @@ _scan_run_configs :: proc() {
     }
     clear(&_run_configs)
 
-    pkgs_dir, err := os.open("packages")
+    pkgs_root := engine.engine_packages_dir(context.temp_allocator)
+    if pkgs_root == "" do pkgs_root = "packages"
+    pkgs_dir, err := os.open(pkgs_root)
     if err != nil do return
     defer os.close(pkgs_dir)
     pkgs, rerr := os.read_dir(pkgs_dir, -1, context.temp_allocator)
@@ -83,10 +89,10 @@ _scan_run_configs :: proc() {
         // Symlinked packages (samples installed via symlink) read as
         // .Symlink — follow them like every other package scan.
         if pkg.type != .Directory {
-            full, _ := filepath.join({"packages", pkg.name}, context.temp_allocator)
+            full, _ := filepath.join({pkgs_root, pkg.name}, context.temp_allocator)
             if pkg.type != .Symlink || !os.is_dir(full) do continue
         }
-        rc_path, _ := filepath.join({"packages", pkg.name, "run_configs"}, context.temp_allocator)
+        rc_path, _ := filepath.join({pkgs_root, pkg.name, "run_configs"}, context.temp_allocator)
         rc_dir, rc_err := os.open(rc_path)
         if rc_err != nil do continue
         defer os.close(rc_dir)
@@ -119,8 +125,8 @@ _selected_run_config :: proc() -> ^Run_Config {
 }
 
 _select_run_config :: proc(id: string) {
-    if editor_settings.run_config != "" do delete(editor_settings.run_config)
-    editor_settings.run_config = strings.clone(id)
+    if editor_settings.run_config != "" do delete(editor_settings.run_config, runtime.default_allocator())
+    editor_settings.run_config = strings.clone(id, runtime.default_allocator())
 }
 
 // --- Composition -------------------------------------------------------------
@@ -220,7 +226,10 @@ draw_tool_bar :: proc() {
     open := im.Begin("##ToolBar", nil, {.NoTitleBar, .NoResize, .NoMove, .NoScrollbar, .NoDocking})
     im.PopStyleColor()
     im.PopStyleVar(2)
-    if !open do return
+    if !open {
+        im.End()
+        return
+    }
     defer {
         // Crisp 1px hairline seam along bottom of toolbar (highlights in sim_running hue during Play)
         dl := im.GetWindowDrawList()
@@ -313,7 +322,7 @@ _toolbar_run_config :: proc() {
     }
     if phase_text != nil {
         im.AlignTextToFramePadding()
-        im.TextDisabled(phase_text)
+        im.TextDisabledUnformatted(phase_text)
         im.SameLine(0, im.GetStyle().ItemSpacing.x)
     }
 
@@ -457,6 +466,11 @@ _delete_command :: proc(cmd: []string, a: mem.Allocator) {
 // code (negative when it never started).
 @(private="file")
 _run_child :: proc(run_dir: string, command: []string, out_w, err_w: ^os.File) -> int {
+    sync.mutex_lock(&_play_proc_mu)
+    shutting_down := _play_shutting_down
+    sync.mutex_unlock(&_play_proc_mu)
+    if shutting_down do return -1
+
     process, err := os.process_start({
         working_dir = run_dir,
         command     = command,
@@ -467,12 +481,37 @@ _run_child :: proc(run_dir: string, command: []string, out_w, err_w: ^os.File) -
         output_view_append_line(fmt.tprintf("run error: %v (%v)", err, command))
         return -1
     }
-    state, wait_err := os.process_wait(process)
-    if wait_err != nil {
-        output_view_append_line(fmt.tprintf("--- wait error: %v ---", wait_err))
+
+    sync.mutex_lock(&_play_proc_mu)
+    if _play_shutting_down {
+        sync.mutex_unlock(&_play_proc_mu)
+        _ = os.process_kill(process)
+        _, _ = os.process_wait(process)
         return -1
     }
-    return state.exit_code
+    _play_active_proc = process
+    _play_has_proc = true
+    sync.mutex_unlock(&_play_proc_mu)
+
+    for {
+        sync.mutex_lock(&_play_proc_mu)
+        if _play_shutting_down && _play_has_proc {
+            _ = os.process_kill(process)
+        }
+        state, wait_err := os.process_wait(process, 20 * time.Millisecond)
+        if wait_err == os.General_Error.Timeout {
+            sync.mutex_unlock(&_play_proc_mu)
+            continue
+        }
+        _play_has_proc = false
+        _play_active_proc = {}
+        sync.mutex_unlock(&_play_proc_mu)
+        if wait_err != nil {
+            output_view_append_line(fmt.tprintf("--- wait error: %v ---", wait_err))
+            return -1
+        }
+        return state.exit_code
+    }
 }
 
 _run_play_thread_proc :: proc(user_data: rawptr) {
@@ -487,6 +526,9 @@ _run_play_thread_proc :: proc(user_data: rawptr) {
     defer _delete_command(run_command, a)
     // Every exit path clears the phase, including the pipe failures below.
     defer sync.atomic_store(&_play_phase, Play_Phase.Idle)
+
+    context.allocator = runtime.default_allocator()
+    defer free_all(context.temp_allocator)
 
     // The config binary is a build artifact of this one launch, so it is removed
     // at both ends: before the build so a crashed editor can never leave one
@@ -522,8 +564,11 @@ _run_play_thread_proc :: proc(user_data: rawptr) {
     // output_view_append is mutex-guarded and log.intake_remote is queued, so
     // both readers are safe off the main thread.
     stderr_thread := thread.create_and_start_with_poly_data(stderr_r, proc(fd: ^os.File) {
+        context.allocator = runtime.default_allocator()
+        defer free_all(context.temp_allocator)
         buf: [4096]byte
         for {
+            free_all(context.temp_allocator)
             n, read_err := os.read(fd, buf[:])
             if n > 0 {
                 output_view_append(nil, buf[:n])
@@ -531,14 +576,23 @@ _run_play_thread_proc :: proc(user_data: rawptr) {
             if read_err != nil || n == 0 do return
         }
     })
+    if stderr_thread == nil {
+        os.close(stdout_w)
+        os.close(stderr_w)
+        output_view_append_line("Failed to start stderr reader thread")
+        return
+    }
 
     // stdout is consumed line-wise: the app's mh_log prints a machine-tagged
     // format that routes into the editor console, untagged lines go to Output.
     stdout_thread := thread.create_and_start_with_poly_data(stdout_r, proc(fd: ^os.File) {
+        context.allocator = runtime.default_allocator()
+        defer free_all(context.temp_allocator)
         linebuf := make([dynamic]byte)
         defer delete(linebuf)
         buf: [4096]byte
         for {
+            free_all(context.temp_allocator)
             n, read_err := os.read(fd, buf[:])
             if n > 0 {
                 _play_consume_stdout(&linebuf, buf[:n])
@@ -551,6 +605,14 @@ _run_play_thread_proc :: proc(user_data: rawptr) {
             }
         }
     })
+    if stdout_thread == nil {
+        os.close(stdout_w)
+        os.close(stderr_w)
+        thread.join(stderr_thread)
+        thread.destroy(stderr_thread)
+        output_view_append_line("Failed to start stdout reader thread")
+        return
+    }
 
     // Compile the run config, then run it. A config that fails to compile never
     // launches, and its diagnostics are already in the console by then.
@@ -569,14 +631,10 @@ _run_play_thread_proc :: proc(user_data: rawptr) {
     // before reporting so the exit line lands after the output it describes.
     os.close(stdout_w)
     os.close(stderr_w)
-    if stdout_thread != nil {
-        thread.join(stdout_thread)
-        thread.destroy(stdout_thread)
-    }
-    if stderr_thread != nil {
-        thread.join(stderr_thread)
-        thread.destroy(stderr_thread)
-    }
+    thread.join(stdout_thread)
+    thread.destroy(stdout_thread)
+    thread.join(stderr_thread)
+    thread.destroy(stderr_thread)
 
     if build_ok {
         output_view_append_line(fmt.tprintf("--- exit code %d ---", code))
@@ -662,11 +720,9 @@ run_app_play :: proc(id: string, source: string, with_current_scene := false, mo
         _play_thread = nil
     }
     console_clear_on_play()
-    // Configs run from the REPO ROOT (parent of the editor's normalized
-    // moonhug/ cwd) — the one canonical build cwd. The app normalizes its own
-    // runtime cwd back to moonhug/.
-    cwd, _ := os.get_working_directory(context.temp_allocator)
-    repo_root := filepath.dir(cwd) // slice into the temp cwd string
+    // Configs run from the REPO ROOT — the one canonical build cwd.
+    // The app normalizes its own runtime cwd back to haati/.
+    repo_root := engine.resolve_repo_root(context.temp_allocator)
 
     // Config binaries sit in builds/ beside the game binaries they produce.
     // Always rebuilt, so there is no staleness to invalidate and nothing to
@@ -747,9 +803,20 @@ run_app_play :: proc(id: string, source: string, with_current_scene := false, mo
 }
 
 join_play_thread :: proc() {
+    sync.mutex_lock(&_play_proc_mu)
+    _play_shutting_down = true
+    if _play_has_proc {
+        _ = os.process_kill(_play_active_proc)
+    }
+    sync.mutex_unlock(&_play_proc_mu)
     if _play_thread != nil {
         thread.join(_play_thread)
         thread.destroy(_play_thread)
         _play_thread = nil
     }
+    sync.mutex_lock(&_play_proc_mu)
+    _play_has_proc = false
+    _play_active_proc = {}
+    _play_shutting_down = false
+    sync.mutex_unlock(&_play_proc_mu)
 }

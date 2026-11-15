@@ -251,9 +251,7 @@ _draw_selector_modal :: proc() {
 	im.PushFontFloat(nil, st.FontSizeBase * wnd.get_modal_scale())
 	defer im.PopFont()
 
-	vp := im.GetMainViewport()
-	center := im.Vec2{vp.Pos.x + vp.Size.x * 0.5, vp.Pos.y + vp.Size.y * 0.5}
-	im.SetNextWindowPos(center, .Appearing, im.Vec2{0.5, 0.5})
+	widgets.center_next_window_on_active_monitor(.Appearing)
 	im.SetNextWindowSize({580, 520}, .Appearing)
 
 	if im.BeginPopupModal("Select Input Binding", &_selector_open, {}) {
@@ -262,7 +260,7 @@ _draw_selector_modal :: proc() {
 		if _selector_slot == 1 do slot_name = "Secondary PC Key"
 		else if _selector_slot == 2 do slot_name = "Gamepad / Controller"
 
-		im.TextColored({0.3, 0.75, 1.0, 1.0}, fmt.ctprintf("Action: %s  |  Slot: %s", action_item.name, slot_name))
+		im.TextColoredUnformatted({0.3, 0.75, 1.0, 1.0}, fmt.ctprintf("Action: %s  |  Slot: %s", action_item.name, slot_name))
 		im.TextDisabled("Type below to filter, select from list, or switch to Direct Key / Mouse Listener.")
 		im.Separator()
 
@@ -285,17 +283,15 @@ _draw_selector_modal :: proc() {
 		// Search Filter & Category Chips
 		im.Text("Search Filter:")
 		im.SameLine()
-		if _selector_focus_search {
-			im.SetKeyboardFocusHere()
-			_selector_focus_search = false
-		}
-		im.SetNextItemWidth(200)
-		im.InputTextWithHint("##KeySearchInput", "e.g. Escape, Space, Shift...", cstring(raw_data(_selector_search_buf[:])), len(_selector_search_buf))
-
-		im.SameLine()
-		if im.Button("Clear##Search") {
-			_selector_search_buf[0] = 0
-		}
+		focus_now := _selector_focus_search
+		_selector_focus_search = false
+		sr := widgets.search_bar(_selector_search_buf[:], widgets.Search_Bar_Opts{
+			id         = "##KeySearchInput",
+			hint       = "e.g. Escape, Space, Shift...",
+			mode       = .Toolbar,
+			width      = 230,
+			auto_focus = focus_now,
+		})
 
 		im.SameLine()
 		im.TextDisabled("|")
@@ -308,9 +304,8 @@ _draw_selector_modal :: proc() {
 		im.SameLine()
 		if im.RadioButton("Gamepad", _selector_filter_cat == 3) do _selector_filter_cat = 3
 
-		// Query lowercase string
-		query_str := strings.trim_space(string(cstring(raw_data(_selector_search_buf[:]))))
-		query_lower := strings.to_lower(query_str, context.temp_allocator)
+		// Query terms
+		terms := widgets.search_terms(sr.query)
 
 		// Filtered scrollable list
 		im.BeginChild("##KeySearchResults", {-1, 230}, {.Borders})
@@ -321,11 +316,8 @@ _draw_selector_modal :: proc() {
 			if _selector_filter_cat == 2 && choice.kind != .Mouse do continue
 			if _selector_filter_cat == 3 && choice.kind != .Gamepad do continue
 
-			if len(query_lower) > 0 {
-				name_lower := strings.to_lower(choice.name, context.temp_allocator)
-				if !strings.contains(name_lower, query_lower) && !strings.contains(choice.search_terms, query_lower) {
-					continue
-				}
+			if len(terms) > 0 && !widgets.search_match(choice.name, terms) && !widgets.search_match(choice.search_terms, terms) {
+				continue
 			}
 
 			match_count += 1
@@ -341,7 +333,7 @@ _draw_selector_modal :: proc() {
 				tag_str = "[Pad]"
 			}
 
-			im.TextColored(tag_col, tag_str)
+			im.TextColoredUnformatted(tag_col, tag_str)
 			im.SameLine(75)
 
 			label := fmt.ctprintf("%s##choice", choice.name)
@@ -395,9 +387,7 @@ _draw_listener_modal :: proc() {
 	im.PushFontFloat(nil, st.FontSizeBase * wnd.get_modal_scale())
 	defer im.PopFont()
 
-	vp := im.GetMainViewport()
-	center := im.Vec2{vp.Pos.x + vp.Size.x * 0.5, vp.Pos.y + vp.Size.y * 0.5}
-	im.SetNextWindowPos(center, .Appearing, im.Vec2{0.5, 0.5})
+	widgets.center_next_window_on_active_monitor(.Appearing)
 	im.SetNextWindowSize({500, 260}, .Appearing)
 
 	if im.BeginPopupModal("Listening for Input", &_listener_open, {.NoResize}) {
@@ -517,13 +507,11 @@ _draw_listener_modal :: proc() {
 _draw_manual_input_modal :: proc() {
 	if !_manual_modal_open do return
 
-	vp := im.GetMainViewport()
-	center := im.Vec2{vp.Pos.x + vp.Size.x * 0.5, vp.Pos.y + vp.Size.y * 0.5}
-	im.SetNextWindowPos(center, .Appearing, im.Vec2{0.5, 0.5})
+	widgets.center_next_window_on_active_monitor(.Appearing)
 	im.SetNextWindowSize({380, 200}, .Appearing)
 
 	if im.BeginPopupModal("Manual Number Input", &_manual_modal_open, {.NoResize}) {
-		im.TextColored({0.3, 0.75, 1.0, 1.0}, fmt.ctprintf("%s  Manual Number Input", icons.ICON_MD_EDIT))
+		im.TextColoredUnformatted({0.3, 0.75, 1.0, 1.0}, fmt.ctprintf("%s  Manual Number Input", icons.ICON_MD_EDIT))
 		im.TextUnformatted(fmt.ctprintf("Setting: %s", _manual_modal_label))
 		im.Separator()
 		im.Spacing()
@@ -602,7 +590,7 @@ _draw_slider_with_dropdown :: proc(
 			_quick_input_val = val_ptr^
 		}
 
-		im.TextColored({0.3, 0.75, 1.0, 1.0}, fmt.ctprintf("%s  %s", icons.ICON_MD_TUNE, label))
+		im.TextColoredUnformatted({0.3, 0.75, 1.0, 1.0}, fmt.ctprintf("%s  %s", icons.ICON_MD_TUNE, label))
 		im.Separator()
 
 		// 1. Dropdown Option: "Input Number Manually..."
@@ -738,12 +726,12 @@ input_manager_window_draw :: proc() {
 
 		im.NextColumn()
 		im.Text("Movement Vector:")
-		im.TextColored({0.2, 0.9, 0.5, 1.0}, fmt.ctprintf("  X: %+.2f", mv.x))
-		im.TextColored({0.2, 0.9, 0.5, 1.0}, fmt.ctprintf("  Y: %+.2f", mv.y))
+		im.TextColoredUnformatted({0.2, 0.9, 0.5, 1.0}, fmt.ctprintf("  X: %+.2f", mv.x))
+		im.TextColoredUnformatted({0.2, 0.9, 0.5, 1.0}, fmt.ctprintf("  Y: %+.2f", mv.y))
 		im.Spacing()
 		im.Text("Mouse Look Delta:")
-		im.TextColored({0.4, 0.8, 1.0, 1.0}, fmt.ctprintf("  dX: %+.2f", lk.x))
-		im.TextColored({0.4, 0.8, 1.0, 1.0}, fmt.ctprintf("  dY: %+.2f", lk.y))
+		im.TextColoredUnformatted({0.4, 0.8, 1.0, 1.0}, fmt.ctprintf("  dX: %+.2f", lk.x))
+		im.TextColoredUnformatted({0.4, 0.8, 1.0, 1.0}, fmt.ctprintf("  dY: %+.2f", lk.y))
 		im.Columns(1)
 	}
 

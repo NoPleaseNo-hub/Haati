@@ -12,10 +12,17 @@ package editor
 import "core:os"
 import "core:strings"
 import wnd "window"
+import "../engine"
 
 @(private = "file") _IMGUI_INI :: "imgui.ini"
 
 migrate_imgui_ini :: proc() {
+	if !os.exists(_IMGUI_INI) && engine.has_active_project() {
+		eng_ini := strings.concatenate({engine.engine_haati_dir(context.temp_allocator), "/", _IMGUI_INI}, context.temp_allocator)
+		if eng_data, eng_err := os.read_entire_file(eng_ini, context.temp_allocator); eng_err == nil && len(eng_data) > 0 {
+			_ = os.write_entire_file(_IMGUI_INI, eng_data)
+		}
+	}
 	data, err := os.read_entire_file(_IMGUI_INI, context.temp_allocator)
 	if err != nil do return
 	text := string(data)

@@ -208,7 +208,7 @@ control_rig_window_draw :: proc() {
 					actor_name := ot != nil ? ot.name : "Character Actor"
 
 					// Status header
-					im.TextColored({1.0, 0.85, 0.2, 1.0}, fmt.ctprintf("Target Character: %s", actor_name))
+					im.TextColoredUnformatted({1.0, 0.85, 0.2, 1.0}, fmt.ctprintf("Target Character: %s", actor_name))
 
 					im.Spacing()
 					// Row 1: Bind Pose Reset & Rebind
@@ -303,7 +303,7 @@ control_rig_window_draw :: proc() {
 							if (slot_idx == 3 || slot_idx == 4) && !crig.smart_rig_async_state.has_breasts {
 								continue
 							}
-							im.TextDisabled(fmt.ctprintf("  - %s: (Not found in skeleton)", slot.label))
+							im.TextDisabledUnformatted(fmt.ctprintf("  - %s: (Not found in skeleton)", slot.label))
 							continue
 						}
 
@@ -416,9 +416,9 @@ control_rig_window_draw :: proc() {
 							for j, ji in target_adm.joints {
 								if j == {} || !engine.pool_valid(&w.transforms, engine.Handle(j)) do continue
 								t := engine.pool_get(&w.transforms, engine.Handle(j))
-								name := t != nil ? t.name : fmt.tprintf("Bone_%d", ji)
+								name := t != nil && t.name != "" ? t.name : fmt.tprintf("Bone_%d", ji)
 								is_selected := (i32(ji) == custom_bone_idx)
-								if im.Selectable(strings.clone_to_cstring(name, context.temp_allocator), is_selected) {
+								if im.Selectable(fmt.ctprintf("%s##bone_%d", name, ji), is_selected) {
 									custom_bone_idx = i32(ji)
 								}
 								if is_selected do im.SetItemDefaultFocus()

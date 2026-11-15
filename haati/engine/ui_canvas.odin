@@ -910,6 +910,33 @@ ui_pointer :: proc() -> UI_Pointer {
 	return _ui_pointer
 }
 
+ui_is_pointer_over_ui :: proc() -> bool {
+	return _ui_pointer.hovered != {} || _ui_pointer.pressed != {}
+}
+
+ui_set_selected :: proc(node: Transform_Handle) {
+	_ui_pointer.selected = node
+}
+
+ui_submit_pressed :: proc() -> bool {
+	return input.key_pressed(.RETURN) || input.key_pressed(.KP_ENTER) || input.key_pressed(.SPACE) || input.gamepad_pressed(.SOUTH)
+}
+
+ui_nav_move_pressed :: proc() -> [2]i32 {
+	dir: [2]i32
+	if input.key_pressed(.LEFT) || input.gamepad_pressed(.DPAD_LEFT)   do dir.x -= 1
+	if input.key_pressed(.RIGHT) || input.gamepad_pressed(.DPAD_RIGHT) do dir.x += 1
+	if input.key_pressed(.UP) || input.gamepad_pressed(.DPAD_UP)       do dir.y -= 1
+	if input.key_pressed(.DOWN) || input.gamepad_pressed(.DPAD_DOWN)   do dir.y += 1
+	if input.key_pressed(.TAB) {
+		if input.key_down(.LSHIFT) || input.key_down(.RSHIFT) do dir.y -= 1
+		else do dir.y += 1
+	}
+	dir.x = clamp(dir.x, -1, 1)
+	dir.y = clamp(dir.y, -1, 1)
+	return dir
+}
+
 canvas_pointer_update :: proc() {
 	p := &_ui_pointer
 	p.clicked = {}

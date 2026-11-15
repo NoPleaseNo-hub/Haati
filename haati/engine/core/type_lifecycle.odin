@@ -26,6 +26,19 @@ import "core:mem"
 import "core:reflect"
 import "core:strings"
 
+Value_Unmarshaler :: #type proc(v: json.Value, dst: any, allocator: runtime.Allocator) -> json.Unmarshal_Error
+
+@(private = "file")
+_value_unmarshalers: map[typeid]Value_Unmarshaler
+
+register_value_unmarshaler :: proc(tid: typeid, fn: Value_Unmarshaler) {
+	if tid == nil || fn == nil do return
+	if _value_unmarshalers == nil {
+		_value_unmarshalers = make(map[typeid]Value_Unmarshaler, runtime.default_allocator())
+	}
+	_value_unmarshalers[tid] = fn
+}
+
 type_reset_procs:       [TypeKey]proc(rawptr)
 type_cleanup_procs:     [TypeKey]proc(rawptr)
 type_on_validate_procs: [TypeKey]proc(rawptr)
@@ -149,8 +162,9 @@ unmarshal_over_reset_object :: proc(
 	return nil
 }
 
-// unmarshal_over_reset for a caller that holds a json.Value: marshals `v` once
-// for the unmarshal and takes the key set from `v` itself.
+// unmarshal_over_reset for a caller that holds a json.Value: decodes directly
+// from the in-memory json.Value tree when supported, avoiding JSON text
+// re-marshaling and re-tokenization while preserving exact reset defaults.
 unmarshal_value_over_reset :: proc(
 	v: json.Value,
 	ptr: rawptr,
@@ -158,6 +172,45 @@ unmarshal_value_over_reset :: proc(
 	spec := json.DEFAULT_SPECIFICATION,
 	allocator := context.allocator,
 ) -> json.Unmarshal_Error {
+	if _value_unmarshalers != nil {
+		if fn, ok := _value_unmarshalers[tid]; ok && fn != nil {
+			return fn(v, any{ptr, tid}, allocator)
+		}
+	}
+
+	if _can_unmarshal_value_direct(tid) {
+		if !_needs_reset_defaults(tid) {
+			if handled, derr := _unmarshal_value_direct(v, ptr, tid, allocator); handled {
+				return derr
+			}
+		} else if obj, is_obj := v.(json.Object); is_obj {
+			key, _ := get_type_key_by_typeid(tid)
+			if len(obj) == 0 {
+				type_reset(key, ptr)
+				return nil
+			}
+			info := runtime.type_info_base(type_info_of(tid)).variant.(runtime.Type_Info_Struct)
+			prev_alloc := context.allocator
+			context.allocator = allocator
+			defer context.allocator = prev_alloc
+			ti := type_info_of(tid)
+			scratch, aerr := mem.alloc(ti.size, ti.align)
+			fmt.assertf(aerr == nil, "out of memory for a %v scratch", tid)
+			defer mem.free(scratch)
+			type_reset(key, scratch)
+			defer type_cleanup(key, scratch)
+
+			if handled, derr := _unmarshal_value_direct(v, ptr, tid, allocator); handled {
+				if derr != nil do return derr
+				_take_absent_fields(ptr, scratch, info, obj)
+				return nil
+			}
+			if key != INVALID_TYPE_KEY {
+				type_cleanup(key, ptr)
+			}
+		}
+	}
+
 	data, merr := json.marshal(v, {spec = .JSON}, context.temp_allocator)
 	if merr != nil do return json.Unmarshal_Data_Error.Invalid_Data
 	obj, is_obj := v.(json.Object)
@@ -166,6 +219,288 @@ unmarshal_value_over_reset :: proc(
 		return _unmarshal_plain(data, ptr, tid, spec, allocator)
 	}
 	return unmarshal_over_reset_object(data, obj, ptr, tid, spec, allocator)
+}
+
+@(private = "file")
+_can_unmarshal_value_direct :: proc(tid: typeid, depth := 0) -> bool {
+	if tid == nil || depth > 24 do return false
+	if _value_unmarshalers != nil {
+		if fn, ok := _value_unmarshalers[tid]; ok && fn != nil {
+			return true
+		}
+	}
+	if json._user_unmarshalers != nil {
+		if fn, ok := json._user_unmarshalers[tid]; ok && fn != nil {
+			return false
+		}
+	}
+	if tid == typeid_of(json.Value) do return false
+
+	ti := type_info_of(tid)
+	if ti == nil do return false
+	base := runtime.type_info_base(ti)
+	#partial switch v in base.variant {
+	case runtime.Type_Info_Boolean, runtime.Type_Info_Float:
+		return true
+	case runtime.Type_Info_Integer:
+		return v.endianness == .Platform && ti.size <= 8
+	case runtime.Type_Info_String:
+		return !v.is_cstring
+	case runtime.Type_Info_Enum:
+		return v.base != nil && runtime.type_info_base(v.base).size <= 8
+	case runtime.Type_Info_Array:
+		return _can_unmarshal_value_direct(v.elem.id, depth + 1)
+	case runtime.Type_Info_Slice:
+		return _can_unmarshal_value_direct(v.elem.id, depth + 1)
+	case runtime.Type_Info_Dynamic_Array:
+		return _can_unmarshal_value_direct(v.elem.id, depth + 1)
+	case runtime.Type_Info_Struct:
+		if .raw_union in v.flags do return false
+		for i in 0 ..< int(v.field_count) {
+			if !_can_unmarshal_value_direct(v.types[i].id, depth + 1) do return false
+		}
+		return true
+	}
+	return false
+}
+
+@(private = "file")
+_write_int_to_ptr :: proc(ptr: rawptr, size: int, signed: bool, val: i64) -> bool {
+	switch size {
+	case 1:
+		if signed { (cast(^i8)ptr)^ = i8(val) } else { (cast(^u8)ptr)^ = u8(val) }
+	case 2:
+		if signed { (cast(^i16)ptr)^ = i16(val) } else { (cast(^u16)ptr)^ = u16(val) }
+	case 4:
+		if signed { (cast(^i32)ptr)^ = i32(val) } else { (cast(^u32)ptr)^ = u32(val) }
+	case 8:
+		if signed { (cast(^i64)ptr)^ = val } else { (cast(^u64)ptr)^ = u64(val) }
+	case:
+		return false
+	}
+	return true
+}
+
+@(private = "file")
+_write_float_to_ptr :: proc(ptr: rawptr, size: int, val: f64) -> bool {
+	switch size {
+	case 2:
+		(cast(^f16)ptr)^ = f16(val)
+	case 4:
+		(cast(^f32)ptr)^ = f32(val)
+	case 8:
+		(cast(^f64)ptr)^ = val
+	case:
+		return false
+	}
+	return true
+}
+
+@(private = "file")
+_write_bool_to_ptr :: proc(ptr: rawptr, size: int, b: bool) -> bool {
+	switch size {
+	case 1:
+		(cast(^u8)ptr)^ = b ? 1 : 0
+	case 2:
+		(cast(^u16)ptr)^ = b ? 1 : 0
+	case 4:
+		(cast(^u32)ptr)^ = b ? 1 : 0
+	case 8:
+		(cast(^u64)ptr)^ = b ? 1 : 0
+	case:
+		return false
+	}
+	return true
+}
+
+@(private = "file")
+_unmarshal_value_direct :: proc(
+	v: json.Value,
+	ptr: rawptr,
+	tid: typeid,
+	allocator: runtime.Allocator,
+) -> (handled: bool, err: json.Unmarshal_Error) {
+	if tid == nil || ptr == nil do return false, nil
+	if _value_unmarshalers != nil {
+		if fn, ok := _value_unmarshalers[tid]; ok && fn != nil {
+			return true, fn(v, any{ptr, tid}, allocator)
+		}
+	}
+	if json._user_unmarshalers != nil {
+		if fn, ok := json._user_unmarshalers[tid]; ok && fn != nil {
+			return false, nil
+		}
+	}
+
+	ti := type_info_of(tid)
+	base := runtime.type_info_base(ti)
+
+	if v == nil {
+		mem.zero(ptr, ti.size)
+		return true, nil
+	}
+	if _, is_null := v.(json.Null); is_null {
+		mem.zero(ptr, ti.size)
+		return true, nil
+	}
+
+	#partial switch info in base.variant {
+	case runtime.Type_Info_Boolean:
+		b, ok := v.(json.Boolean)
+		if !ok do return true, json.Unmarshal_Data_Error.Invalid_Data
+		if !_write_bool_to_ptr(ptr, ti.size, b) do return false, nil
+		return true, nil
+
+	case runtime.Type_Info_Integer:
+		if info.endianness != .Platform || ti.size > 8 do return false, nil
+		#partial switch iv in v {
+		case json.Integer:
+			_ = _write_int_to_ptr(ptr, ti.size, info.signed, i64(iv))
+			return true, nil
+		case json.Float:
+			_ = _write_int_to_ptr(ptr, ti.size, info.signed, i64(iv))
+			return true, nil
+		}
+		return true, json.Unmarshal_Data_Error.Invalid_Data
+
+	case runtime.Type_Info_Float:
+		#partial switch fv in v {
+		case json.Float:
+			if !_write_float_to_ptr(ptr, ti.size, f64(fv)) do return false, nil
+			return true, nil
+		case json.Integer:
+			if !_write_float_to_ptr(ptr, ti.size, f64(fv)) do return false, nil
+			return true, nil
+		}
+		return true, json.Unmarshal_Data_Error.Invalid_Data
+
+	case runtime.Type_Info_String:
+		if info.is_cstring do return false, nil
+		s, ok := v.(json.String)
+		if !ok do return true, json.Unmarshal_Data_Error.Invalid_Data
+		dst := cast(^string)ptr
+		dst^ = strings.clone(s, allocator)
+		return true, nil
+
+	case runtime.Type_Info_Enum:
+		ebase := runtime.type_info_base(info.base)
+		eint, is_int := ebase.variant.(runtime.Type_Info_Integer)
+		if !is_int || ebase.size > 8 do return false, nil
+		#partial switch ev in v {
+		case json.String:
+			for name, idx in info.names {
+				if name == ev {
+					_ = _write_int_to_ptr(ptr, ebase.size, eint.signed, i64(info.values[idx]))
+					return true, nil
+				}
+			}
+			return true, nil
+		case json.Integer:
+			_ = _write_int_to_ptr(ptr, ebase.size, eint.signed, i64(ev))
+			return true, nil
+		case json.Float:
+			_ = _write_int_to_ptr(ptr, ebase.size, eint.signed, i64(ev))
+			return true, nil
+		}
+		return true, json.Unmarshal_Data_Error.Invalid_Data
+
+	case runtime.Type_Info_Array:
+		arr, ok := v.(json.Array)
+		if !ok do return true, json.Unmarshal_Data_Error.Invalid_Data
+		if len(arr) > info.count do return true, json.Unmarshal_Data_Error.Invalid_Data
+		for elem_v, i in arr {
+			elem_ptr := rawptr(uintptr(ptr) + uintptr(i * info.elem_size))
+			eh, eerr := _unmarshal_value_direct(elem_v, elem_ptr, info.elem.id, allocator)
+			if !eh do return false, nil
+			if eerr != nil do return true, eerr
+		}
+		return true, nil
+
+	case runtime.Type_Info_Slice:
+		arr, ok := v.(json.Array)
+		if !ok do return true, json.Unmarshal_Data_Error.Invalid_Data
+		raw := cast(^mem.Raw_Slice)ptr
+		if len(arr) == 0 {
+			raw.data = nil
+			raw.len = 0
+			return true, nil
+		}
+		buf, berr := mem.alloc_bytes(len(arr) * info.elem_size, info.elem.align, allocator)
+		if berr != nil do return true, json.Unmarshal_Data_Error.Invalid_Data
+		mem.zero_slice(buf)
+		raw.data = raw_data(buf)
+		raw.len = len(arr)
+		for elem_v, i in arr {
+			elem_ptr := rawptr(uintptr(raw.data) + uintptr(i * info.elem_size))
+			eh, eerr := _unmarshal_value_direct(elem_v, elem_ptr, info.elem.id, allocator)
+			if !eh {
+				mem.free_bytes(buf, allocator)
+				raw^ = {}
+				return false, nil
+			}
+			if eerr != nil do return true, eerr
+		}
+		return true, nil
+
+	case runtime.Type_Info_Dynamic_Array:
+		arr, ok := v.(json.Array)
+		if !ok do return true, json.Unmarshal_Data_Error.Invalid_Data
+		raw := cast(^mem.Raw_Dynamic_Array)ptr
+		raw.allocator = allocator
+		if len(arr) == 0 {
+			raw.data = nil
+			raw.len = 0
+			raw.cap = 0
+			return true, nil
+		}
+		buf, berr := mem.alloc_bytes(len(arr) * info.elem_size, info.elem.align, allocator)
+		if berr != nil do return true, json.Unmarshal_Data_Error.Invalid_Data
+		mem.zero_slice(buf)
+		raw.data = raw_data(buf)
+		raw.len = len(arr)
+		raw.cap = len(arr)
+		for elem_v, i in arr {
+			elem_ptr := rawptr(uintptr(raw.data) + uintptr(i * info.elem_size))
+			eh, eerr := _unmarshal_value_direct(elem_v, elem_ptr, info.elem.id, allocator)
+			if !eh {
+				mem.free_bytes(buf, allocator)
+				raw^ = {allocator = allocator}
+				return false, nil
+			}
+			if eerr != nil do return true, eerr
+		}
+		return true, nil
+
+	case runtime.Type_Info_Struct:
+		if .raw_union in info.flags do return false, nil
+		obj, ok := v.(json.Object)
+		if !ok do return true, json.Unmarshal_Data_Error.Invalid_Data
+		for i in 0 ..< int(info.field_count) {
+			off := info.offsets[i]
+			ftype := info.types[i]
+			name := info.names[i]
+			if info.usings[i] && name == "_" {
+				if _, is_sub := runtime.type_info_base(ftype).variant.(runtime.Type_Info_Struct); is_sub {
+					eh, eerr := _unmarshal_value_direct(v, rawptr(uintptr(ptr) + off), ftype.id, allocator)
+					if !eh do return false, nil
+					if eerr != nil do return true, eerr
+					continue
+				}
+			}
+			json_name := reflect.struct_tag_get(reflect.Struct_Tag(info.tags[i]), "json")
+			if comma := strings.index_byte(json_name, ','); comma >= 0 do json_name = json_name[:comma]
+			if json_name == "-" do continue
+			if json_name == "" do json_name = name
+			if fv, has := obj[json_name]; has {
+				eh, eerr := _unmarshal_value_direct(fv, rawptr(uintptr(ptr) + off), ftype.id, allocator)
+				if !eh do return false, nil
+				if eerr != nil do return true, eerr
+			}
+		}
+		return true, nil
+	}
+
+	return false, nil
 }
 
 // True when a load of `tid` keeps reset defaults for absent fields: the

@@ -25,6 +25,7 @@ package editor
 // with the material's shader/block), .scene (the instantiated prefab framed by
 // its bounds). Everything else keeps its type icon.
 
+import "base:runtime"
 import "core:encoding/uuid"
 import "core:fmt"
 import "core:math"
@@ -131,6 +132,9 @@ _thumb_lookup :: proc(path: string, sub: engine.Local_ID) -> (id: rawptr, ok: bo
 	th, has := _thumbs[key]
 	if !has || th.mtime != mtime {
 		if !(key in _thumb_queued) {
+			prev := context.allocator
+			context.allocator = runtime.default_allocator()
+			defer context.allocator = prev
 			_thumb_queued[key] = true
 			append(&_thumb_queue, key)
 		}
@@ -144,6 +148,9 @@ _thumb_lookup :: proc(path: string, sub: engine.Local_ID) -> (id: rawptr, ok: bo
 // Budgeted generation, called once per frame before any view draws (the frame
 // command buffer must be live, no pass active).
 thumbnails_tick :: proc() {
+	prev := context.allocator
+	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev
 	if !_thumb_pruned {
 		_thumb_pruned = true
 		_thumb_disk_prune()
@@ -201,6 +208,9 @@ thumbnails_tick :: proc() {
 }
 
 thumbnails_shutdown :: proc() {
+	prev := context.allocator
+	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev
 	for _, th in _thumbs {
 		if th.tex != nil do gfx.texture_destroy(th.tex)
 	}

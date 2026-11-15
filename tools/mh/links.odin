@@ -16,6 +16,7 @@ package mh
 
 import "core:fmt"
 import "core:os"
+import "core:path/filepath"
 import "core:strings"
 
 PACKAGES_DIR :: "haati/packages"
@@ -81,6 +82,29 @@ repair_link :: proc(e: Link_Entry) -> bool {
 // zero Developer Mode or admin elevation is ever required, and `ln -s` on Unix).
 ensure_package_links :: proc() -> bool {
 	os.make_directory_all(PACKAGES_DIR)
+
+	// Prune dangling symlinks/junctions inside packages/ whose target directory no longer exists.
+	if ph, perr := os.open(PACKAGES_DIR); perr == nil {
+		if pentries, prerr := os.read_dir(ph, -1, context.temp_allocator); prerr == nil {
+			for pe in pentries {
+				if strings.has_prefix(pe.name, ".") do continue
+				cand := fmt.tprintf("%s/%s", PACKAGES_DIR, pe.name)
+				_, lerr := os.read_link(cand, context.temp_allocator)
+				is_link := pe.type == .Symlink || lerr == nil
+				if !is_link do continue
+				if _, sterr := os.stat(cand, context.temp_allocator); sterr != nil && !os.is_dir(cand) {
+					when ODIN_OS == .Windows {
+						win_cand, _ := strings.replace_all(cand, "/", "\\", context.temp_allocator)
+						_ = run("cmd", "/C", "rmdir", win_cand)
+					} else {
+						_ = os.remove(cand)
+					}
+				}
+			}
+		}
+		os.close(ph)
+	}
+
 	h, err := os.open("plugins")
 	if err != nil do return true
 	defer os.close(h)
@@ -91,7 +115,7 @@ ensure_package_links :: proc() -> bool {
 	for e in entries {
 		if strings.has_prefix(e.name, ".") || e.name == "plugin_example" do continue
 		plug_dir := fmt.tprintf("plugins/%s", e.name)
-		if info, serr := os.stat(plug_dir, context.temp_allocator); serr != nil || info.type != .Directory do continue
+		if !os.is_dir(plug_dir) do continue
 
 		dst_link := fmt.tprintf("%s/%s", PACKAGES_DIR, e.name)
 		if !os.is_dir(dst_link) {
@@ -125,7 +149,13 @@ ensure_package_links :: proc() -> bool {
 _create_dir_link :: proc(dst_path: string, win_src_rel: string, unix_target: string) -> bool {
 	when ODIN_OS == .Windows {
 		win_dst, _ := strings.replace_all(dst_path, "/", "\\", context.temp_allocator)
-		win_src, _ := strings.replace_all(win_src_rel, "/", "\\", context.temp_allocator)
+		target_src := win_src_rel
+		if resolved, rerr := os.read_link(win_src_rel, context.temp_allocator); rerr == nil && os.is_dir(resolved) {
+			target_src = resolved
+		} else if abs_p, aerr := filepath.abs(win_src_rel, context.temp_allocator); aerr == nil {
+			target_src = abs_p
+		}
+		win_src, _ := strings.replace_all(target_src, "/", "\\", context.temp_allocator)
 		return run("cmd", "/C", "mklink", "/J", win_dst, win_src) == 0
 	} else {
 		return run("ln", "-s", unix_target, dst_path) == 0

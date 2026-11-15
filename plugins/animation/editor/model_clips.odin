@@ -107,9 +107,10 @@ _model_clip_section :: proc(ctx: ^inspector.Asset_Ctx) {
 	if clip.orphan {
 		im.TextDisabled("Not in the model any more. Remap it and every reference follows.")
 		if im.BeginCombo("Remap to", "choose a clip") {
-			for &c in ms.clips {
+			for &c, ci in ms.clips {
 				if c.orphan do continue
-				if im.Selectable(strings.clone_to_cstring(c.name, context.temp_allocator)) {
+				sel_lbl := c.name != "" ? fmt.ctprintf("%s##remap_%d", c.name, ci) : fmt.ctprintf("(Unnamed Clip)##remap_%d", ci)
+				if im.Selectable(sel_lbl) {
 					// The orphan's guid is the one scenes hold, so it moves to
 					// the chosen clip. That clip's own guid, minted at import
 					// and referenced by nothing yet, goes.
@@ -118,8 +119,10 @@ _model_clip_section :: proc(ctx: ^inspector.Asset_Ctx) {
 						c.settings = clip.settings
 						clip.settings = nil
 					}
+					prev_alloc := context.allocator
 					context.allocator = runtime.default_allocator()
 					if clip.settings != nil do json.destroy_value(clip.settings)
+					context.allocator = prev_alloc
 					ordered_remove(&ms.clips, idx)
 					inspector.mark_inspector_changed()
 					_clip_edit.valid = false

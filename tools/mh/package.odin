@@ -6,9 +6,17 @@ package mh
 //
 // Imports ONLY `core:*` (never `moonhug:`!).
 
+import "core:encoding/json"
 import "core:fmt"
 import "core:os"
+import "core:path/filepath"
 import "core:strings"
+
+@(private = "file")
+_Pkg_Manifest :: struct {
+	name:       string,
+	main_scene: string,
+}
 
 RUNTIME_DLLS := []string{
 	"SDL3.dll",
@@ -72,20 +80,54 @@ cmd_package :: proc(args: []string) -> int {
 	out_dir := flag_value(args, "--out")
 	if out_dir == "" do out_dir = "builds/dist"
 	app_name := flag_value(args, "--name")
-	if app_name == "" do app_name = "HaatiGame"
 	scene := flag_value(args, "--scene")
-	if scene == "" do scene = "packages/app/assets/demo_menu/menu.scene"
 	want_console := has_flag(args, "--console")
 
-	if !prebuild() do return 1
+	mount := mount_project_for_compile(args)
+	defer unmount_project_for_compile(&mount)
+
+	src_catalog := "haati/library/catalog.json"
+	if mount.project_dir != "" {
+		manifest := _Pkg_Manifest{}
+		mpath := fmt.tprintf("%s/haati.project", mount.project_dir)
+		if mdata, merr := os.read_entire_file(mpath, context.temp_allocator); merr == nil && len(mdata) > 0 {
+			_ = json.unmarshal(mdata, &manifest, allocator = context.temp_allocator)
+		}
+		if app_name == "" {
+			if manifest.name != "" {
+				app_name = manifest.name
+			} else {
+				context.allocator = context.temp_allocator
+				app_name = filepath.base(mount.project_dir)
+			}
+		}
+		if scene == "" && manifest.main_scene != "" {
+			scene = manifest.main_scene
+		}
+		src_catalog = fmt.tprintf("%s/library/catalog.json", mount.project_dir)
+	} else {
+		if app_name == "" do app_name = "HaatiGame"
+		if scene == "" do scene = "packages/app/assets/demo_menu/menu.scene"
+	}
+
+	if !prebuild_for_project(mount.compiled_project_dir) do return 1
 	if !shaders_if_available() do return 1
-	if cmd_hot({"--fast"}) != 0 do return 1
+	{
+		hot_args := make([dynamic]string, context.temp_allocator)
+		append(&hot_args, "--fast", "--release")
+		if mount.project_dir != "" {
+			append(&hot_args, fmt.tprintf("--project=%s", mount.project_dir))
+		}
+		if cmd_hot_res := hot_build_internal(hot_args[:], manage_mount = false); cmd_hot_res != 0 do return 1
+	}
 
 	os.make_directory_all(out_dir)
 
 	exe_out := fmt.tprintf("%s/%s%s", out_dir, app_name, EXE)
 	build_cmd := make([dynamic]string, context.temp_allocator)
-	append(&build_cmd, odin_bin(), "build", "haati/packages/app", IGNORE_ATTRS, COLLECTION_HAATI, COLLECTION_COMPAT, VET, "-o:speed", fmt.tprintf("-out:%s", exe_out))
+	append(&build_cmd, odin_bin(), "build", "haati/packages/app", IGNORE_ATTRS, COLLECTION_HAATI, COLLECTION_COMPAT)
+	if mount.collection_flag != "" do append(&build_cmd, mount.collection_flag)
+	append(&build_cmd, VET, "-o:speed", fmt.tprintf("-out:%s", exe_out))
 	when ODIN_OS == .Windows {
 		if !want_console {
 			append(&build_cmd, "-subsystem:windows")
@@ -96,9 +138,8 @@ cmd_package :: proc(args: []string) -> int {
 	}
 	if !step("shipping executable build", ..build_cmd[:]) do return 1
 
-	if !os.exists("haati/library/catalog.json") {
-		fmt.eprintln("mh: missing haati/library/catalog.json — run the editor or pre-populate the catalog before packaging")
-		return 1
+	if !os.exists(src_catalog) {
+		fmt.printfln("mh: %s missing — bootstrapping headlessly from .meta files", src_catalog)
 	}
 
 	pack_bin, pok := tool_bin("pack_assets", "haati/prebuild/pack_assets", {"haati/engine/catalog"}, COLLECTION_HAATI, COLLECTION_COMPAT)
@@ -109,19 +150,21 @@ cmd_package :: proc(args: []string) -> int {
 	defer if os.exists(stage_dir) do os.remove_all(stage_dir)
 
 	pak_out := fmt.tprintf("%s/%s.pak", out_dir, app_name)
-	if !step("asset pak archive", pack_bin, "haati/library/catalog.json", stage_dir, pak_out, scene) {
+	pak_args := make([dynamic]string, context.temp_allocator)
+	append(&pak_args, pack_bin)
+	if mount.project_dir != "" {
+		append(&pak_args, fmt.tprintf("--project=%s", mount.project_dir))
+	}
+	append(&pak_args, src_catalog, stage_dir, pak_out)
+	if scene != "" {
+		append(&pak_args, scene)
+	}
+	if !step("asset pak archive", ..pak_args[:]) {
 		return 1
 	}
 
 	when ODIN_OS == .Windows {
 		if !sync_runtime_dlls(out_dir, strict = true) do return 1
-		if os.exists("builds/hot_cartridge_latest.dll") {
-			dst_hot := fmt.tprintf("%s/hot_cartridge_latest.dll", out_dir)
-			if !_copy_file("builds/hot_cartridge_latest.dll", dst_hot) {
-				fmt.eprintfln("mh: failed to copy builds/hot_cartridge_latest.dll -> %s", dst_hot)
-				return 1
-			}
-		}
 	}
 
 	// Strip debug & linker artifacts from the shipping directory.

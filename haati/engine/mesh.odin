@@ -11,7 +11,6 @@ import gfx "gfx"
 import "log"
 import "base:runtime"
 import "core:encoding/uuid"
-import "core:os"
 import "core:strings"
 
 Mesh :: struct {
@@ -81,17 +80,28 @@ mesh_cache_init :: proc() {
     }
 }
 
+@(private = "file")
+_mesh_destroy :: proc(mesh: ^Mesh) {
+    prev_alloc := context.allocator
+    context.allocator = mesh_cache.allocator if mesh_cache.allocator.procedure != nil else runtime.default_allocator()
+    defer context.allocator = prev_alloc
+    gfx.mesh_destroy(&mesh.gpu)
+    delete(mesh.submeshes)
+    gfx.skin_source_destroy(&mesh.skin_gpu)
+    delete(mesh.skin)
+    delete(mesh.bind_vertices)
+    delete(mesh.bind_indices)
+    delete(mesh.inverse_binds)
+    for n in mesh.joint_names do delete(n)
+    delete(mesh.joint_names)
+}
+
 mesh_cache_shutdown :: proc() {
+    prev_alloc := context.allocator
+    context.allocator = runtime.default_allocator()
+    defer context.allocator = prev_alloc
     for _, &mesh in mesh_cache {
-        gfx.mesh_destroy(&mesh.gpu)
-        delete(mesh.submeshes)
-        gfx.skin_source_destroy(&mesh.skin_gpu)
-        delete(mesh.skin)
-        delete(mesh.bind_vertices)
-        delete(mesh.bind_indices)
-        delete(mesh.inverse_binds)
-        for n in mesh.joint_names do delete(n)
-        delete(mesh.joint_names)
+        _mesh_destroy(&mesh)
     }
     delete(mesh_cache)
     mesh_cache = nil
@@ -129,6 +139,9 @@ mesh_parts :: proc(guid: Asset_GUID) -> []Mesh_Part {
     // per call onto the temp allocator instead of caching.
     cached := _mesh_cache_ready
     alloc := cached ? runtime.default_allocator() : context.temp_allocator
+    prev_alloc := context.allocator
+    if cached do context.allocator = runtime.default_allocator()
+    defer context.allocator = prev_alloc
 
     out: []Mesh_Part
     if path, pok := asset_db_get_path(uuid.Identifier(guid)); pok {
@@ -171,6 +184,9 @@ mesh_clips :: proc(guid: Asset_GUID) -> []Mesh_Clip {
     }
     cached := _mesh_cache_ready
     alloc := cached ? runtime.default_allocator() : context.temp_allocator
+    prev_alloc := context.allocator
+    if cached do context.allocator = runtime.default_allocator()
+    defer context.allocator = prev_alloc
 
     out: []Mesh_Clip
     if path, pok := asset_db_get_path(uuid.Identifier(guid)); pok {
@@ -235,6 +251,10 @@ mesh_load :: proc(guid: Asset_GUID, part: i32 = 0) -> (^Mesh, bool) {
     // Headless contexts (tests, scene tooling) have no GPU device.
     if gfx.device() == nil do return nil, false
 
+    prev_alloc := context.allocator
+    context.allocator = runtime.default_allocator()
+    defer context.allocator = prev_alloc
+
     whole := _artifact_path(uuid.Identifier(guid))
     defer delete(whole)
     artifact := whole
@@ -247,7 +267,7 @@ mesh_load :: proc(guid: Asset_GUID, part: i32 = 0) -> (^Mesh, bool) {
     indices: []u32
     submeshes: []Mesh_Submesh
     parse_ok := false
-    blob, read_err := os.read_entire_file(artifact, context.temp_allocator)
+    blob, read_err := vfs_read_entire_file(artifact, context.temp_allocator)
     if read_err == nil {
         header, vertices, indices, submeshes, parse_ok = _mesh_artifact_parse(blob)
     }
@@ -264,7 +284,7 @@ mesh_load :: proc(guid: Asset_GUID, part: i32 = 0) -> (^Mesh, bool) {
             _mesh_failed[key] = true
             return nil, false
         }
-        blob, read_err = os.read_entire_file(artifact, context.temp_allocator)
+        blob, read_err = vfs_read_entire_file(artifact, context.temp_allocator)
         if read_err != nil {
             log.errorf("[Mesh] artifact unreadable after re-import: %s (part %d)", artifact, part)
             _mesh_failed[key] = true
@@ -317,6 +337,9 @@ mesh_load :: proc(guid: Asset_GUID, part: i32 = 0) -> (^Mesh, bool) {
 // Drops every cached part of the asset, and lets failed parts try again — this
 // is the call a re-import makes, and the new artifact deserves a fresh attempt.
 mesh_unload :: proc(guid: Asset_GUID) {
+    prev_alloc := context.allocator
+    context.allocator = runtime.default_allocator()
+    defer context.allocator = prev_alloc
     _mesh_parts_free(guid)
     delete_key(&_mesh_parts, guid)
     _mesh_clips_free(guid)
@@ -327,15 +350,7 @@ mesh_unload :: proc(guid: Asset_GUID) {
     }
     for key in keys {
         mesh := &mesh_cache[key]
-        gfx.mesh_destroy(&mesh.gpu)
-        delete(mesh.submeshes)
-        gfx.skin_source_destroy(&mesh.skin_gpu)
-        delete(mesh.skin)
-        delete(mesh.bind_vertices)
-        delete(mesh.bind_indices)
-        delete(mesh.inverse_binds)
-        for n in mesh.joint_names do delete(n)
-        delete(mesh.joint_names)
+        _mesh_destroy(mesh)
         delete_key(&mesh_cache, key)
     }
 
@@ -372,15 +387,7 @@ mesh_upsert_procedural :: proc(
     delete_key(&_mesh_failed, key)
 
     if existing, ok := &mesh_cache[key]; ok {
-        gfx.mesh_destroy(&existing.gpu)
-        delete(existing.submeshes)
-        gfx.skin_source_destroy(&existing.skin_gpu)
-        delete(existing.skin)
-        delete(existing.bind_vertices)
-        delete(existing.bind_indices)
-        delete(existing.inverse_binds)
-        for n in existing.joint_names do delete(n)
-        delete(existing.joint_names)
+        _mesh_destroy(existing)
         delete_key(&mesh_cache, key)
     }
 
@@ -459,7 +466,7 @@ mesh_read_cpu_geometry :: proc(mf: ^MeshFilter, alloc := context.temp_allocator)
     if part > 0 {
         artifact = mesh_part_artifact_path(whole, int(part - 1), context.temp_allocator)
     }
-    blob, read_err := os.read_entire_file(artifact, alloc)
+    blob, read_err := vfs_read_entire_file(artifact, alloc)
     if read_err != nil do return nil, nil, false
     _, verts, inds, _, parse_ok := _mesh_artifact_parse(blob)
     if !parse_ok || len(verts) == 0 || len(inds) == 0 do return nil, nil, false

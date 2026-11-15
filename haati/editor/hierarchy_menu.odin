@@ -14,7 +14,7 @@ import "undo"
 import cs "haati:editor/code_studio"
 import vs "haati:editor/visual_script"
 import cad_csg_editor "haati:packages/cad_csg/editor"
-import file_explorer_editor "haati:packages/file_explorer/editor"
+import file_explorer_editor "haati:editor/file_explorer/editor"
 
 @(private)
 _studio_or_graph_owns_shortcuts :: proc() -> bool {

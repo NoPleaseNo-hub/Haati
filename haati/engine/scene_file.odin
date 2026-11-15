@@ -7,6 +7,7 @@ import "core:os"
 import "core:fmt"
 import "core:slice"
 import "core:strings"
+import "core:time"
 import "base:runtime"
 
 // Walks `ptr` of type `ti` and, for every PPtr / Ref / Ref_Local / Owned found,
@@ -65,14 +66,14 @@ _resolve_refs_in_value :: proc(ptr: rawptr, ti: ^runtime.Type_Info, s: ^Scene, f
 		}
 		if tid == typeid_of(Ref) {
 			ref := cast(^Ref)ptr
-			if ref.pptr.local_id != 0 && pptr_guid_is_empty(ref.pptr.guid) {
+			if ref.pptr.local_id != 0 && asset_guid_is_empty(ref.pptr.guid) {
 				if only_unbound && world_pool_valid(ctx_world(), ref.handle) do return
 				if h, ok := _resolve_lid(s, file_local, ref.pptr.local_id); ok {
 					ref.handle = h
 				} else if authoritative {
 					ref.handle = {}
 				}
-			} else if authoritative && pptr_guid_is_empty(ref.pptr.guid) {
+			} else if authoritative && asset_guid_is_empty(ref.pptr.guid) {
 				ref.handle = {} // cleared ref: serialized state says none
 			}
 			return
@@ -242,7 +243,7 @@ _remap_refs_in_value :: proc(ptr: rawptr, ti: ^runtime.Type_Info, remap: ^map[Lo
 		// prefab retargeted one MeshFilter at a nonexistent part).
 		if tid == typeid_of(PPtr) {
 			pptr := cast(^PPtr)ptr
-			if pptr.local_id != 0 && pptr_guid_is_empty(pptr.guid) {
+			if pptr.local_id != 0 && asset_guid_is_empty(pptr.guid) {
 				if new_id, ok := remap[pptr.local_id]; ok {
 					pptr.local_id = new_id
 				}
@@ -251,7 +252,7 @@ _remap_refs_in_value :: proc(ptr: rawptr, ti: ^runtime.Type_Info, remap: ^map[Lo
 		}
 		if tid == typeid_of(Ref) {
 			ref := cast(^Ref)ptr
-			if ref.pptr.local_id != 0 && pptr_guid_is_empty(ref.pptr.guid) {
+			if ref.pptr.local_id != 0 && asset_guid_is_empty(ref.pptr.guid) {
 				if new_id, ok := remap[ref.pptr.local_id]; ok {
 					ref.pptr.local_id = new_id
 				}
@@ -986,26 +987,11 @@ _collect_prefab_local_ids :: proc(base_raw: []byte, allocator := context.allocat
 		for item in arr {
 			obj, ok := item.(json.Object)
 			if !ok do continue
-			lid, lid_ok := _scene_file_local_id_of(obj)
+			lid, lid_ok := _json_local_id_of(obj)
 			if lid_ok do out[lid] = true
 		}
 	}
 	return out, true
-}
-
-_scene_file_local_id_of :: proc(obj: json.Object) -> (Local_ID, bool) {
-	from_value :: proc(v: json.Value) -> (Local_ID, bool) {
-		if f, ok := v.(json.Float);   ok do return Local_ID(f), true
-		if i, ok := v.(json.Integer); ok do return Local_ID(i), true
-		return 0, false
-	}
-	if v, ok := obj["local_id"]; ok do return from_value(v)
-	if bv, ok := obj["base"]; ok {
-		if bo, ok2 := bv.(json.Object); ok2 {
-			if v, ok3 := bo["local_id"]; ok3 do return from_value(v)
-		}
-	}
-	return 0, false
 }
 
 _drop_overrides_with_missing_targets :: proc(overrides: ^[dynamic]Override, base_raw: []byte) {
@@ -1024,13 +1010,6 @@ _drop_overrides_with_missing_targets :: proc(overrides: ^[dynamic]Override, base
 		}
 	}
 	resize(overrides, write)
-}
-
-_find_ns_by_local_id :: proc(s: ^Scene, ns_local_id: Local_ID) -> (^NestedScene, bool) {
-	for &ns in s.nested_scenes {
-		if ns.local_id == ns_local_id do return &ns, true
-	}
-	return nil, false
 }
 
 // Walks `inner_m`'s ancestry (via expand_parent) and returns the chain of
@@ -1201,7 +1180,7 @@ scene_serialize :: proc(s: ^Scene) -> ([]byte, bool) {
 	for i in 0 ..< len(kept) {
 		ov := kept[i]
 		restored := false
-		if ns, ns_ok := _find_ns_by_local_id(s, kept_owner[i]); ns_ok && ns != nil {
+		if ns, ns_ok := scene_nested_scene_by_local_id(s, kept_owner[i]); ns_ok && ns != nil {
 			if !nested_scene_has_override(ns, ov.target, ov.property_path) {
 				append(&ns.overrides, ov)
 				restored = true
@@ -1226,7 +1205,7 @@ scene_serialize :: proc(s: ^Scene) -> ([]byte, bool) {
 		}
 		to_drop := make([dynamic]Local_ID, 0, 8, context.temp_allocator)
 		for lid, bc in s.breadcrumb_data {
-			if _, has_owner := _find_ns_by_local_id(s, bc.scene_instance); !has_owner do continue
+			if _, has_owner := scene_nested_scene_by_local_id(s, bc.scene_instance); !has_owner do continue
 			if ns_referenced[lid] do continue
 			if h, ok := bimap_get(&s.local_ids, lid); ok && h.type_key != INVALID_TYPE_KEY do continue
 			append(&to_drop, lid)
@@ -1277,7 +1256,7 @@ scene_serialize :: proc(s: ^Scene) -> ([]byte, bool) {
 		// that aren't host pegs at all — cross-scene Handle pegs survive).
 		if native_ns_lids[bc.scene_instance] {
 			append(&sf.breadcrumbs, bc)
-		} else if _, has_owner := _find_ns_by_local_id(s, bc.scene_instance); !has_owner {
+		} else if _, has_owner := scene_nested_scene_by_local_id(s, bc.scene_instance); !has_owner {
 			append(&sf.breadcrumbs, bc)
 		}
 	}
@@ -1423,7 +1402,13 @@ scene_save :: proc(s: ^Scene, path: string) -> bool {
 	if !ok do return false
 	defer delete(data)
 
-	if write_err := os.write_entire_file(path, data); write_err != nil {
+	write_err: os.Error
+	for _ in 0 ..< 5 {
+		write_err = os.write_entire_file(path, data)
+		if write_err == nil do break
+		time.sleep(5 * time.Millisecond)
+	}
+	if write_err != nil {
 		fmt.printf("[Scene] Failed to write file: %s — %v\n", path, write_err)
 		return false
 	}
@@ -1608,7 +1593,7 @@ _propagate_prefab_save :: proc(saved_guid: Asset_GUID) {
 }
 
 scene_file_load :: proc(filepath: string) -> (SceneFile, bool) {
-	data, read_ok := os.read_entire_file(filepath, context.allocator)
+	data, read_ok := vfs_read_entire_file(filepath, context.allocator)
 	if read_ok != nil {
 		fmt.printf("[Scene] Failed to read file: %s\n", filepath)
 		return {}, false
@@ -1651,17 +1636,20 @@ resolve_handle :: proc(local_id: Local_ID, id_map: map[Local_ID]Handle) -> (Hand
 }
 
 scene_load_single_path :: proc(path: string) -> ^Scene {
-	sf, ok := scene_file_load(path)
+	// Callers may pass an active scene's own path, which _scene_load_single
+	// frees when unloading loaded scenes. Clone first so reads stay valid.
+	p := strings.clone(path, context.temp_allocator)
+	sf, ok := scene_file_load(p)
 	if !ok do return nil
 	defer scene_file_destroy(&sf)
 
 	scene_guid: Asset_GUID = {}
-	if g, gok := asset_db_get_guid(path); gok {
+	if g, gok := asset_db_get_guid(p); gok {
 		scene_guid = Asset_GUID(g)
 	}
 	s := _scene_load_single(&sf, scene_guid)
 	if s != nil {
-		s.path = strings.clone(path)
+		s.path = strings.clone(p)
 	}
 	return s
 }
@@ -1729,17 +1717,18 @@ scene_reload_in_place_path :: proc(target: ^Scene, path: string) -> ^Scene {
 }
 
 scene_load_additive_path :: proc(path: string) -> ^Scene {
-	sf, ok := scene_file_load(path)
+	p := strings.clone(path, context.temp_allocator)
+	sf, ok := scene_file_load(p)
 	if !ok do return nil
 	defer scene_file_destroy(&sf)
 
 	scene_guid: Asset_GUID = {}
-	if g, gok := asset_db_get_guid(path); gok {
+	if g, gok := asset_db_get_guid(p); gok {
 		scene_guid = Asset_GUID(g)
 	}
 	s := _scene_load_additive(&sf, scene_guid)
 	if s != nil {
-		s.path = strings.clone(path)
+		s.path = strings.clone(p)
 	}
 	return s
 }

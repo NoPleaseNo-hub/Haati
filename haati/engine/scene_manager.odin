@@ -2,7 +2,6 @@ package engine
 
 import "base:runtime"
 import "core:fmt"
-import "core:os"
 import "core:slice"
 import "core:encoding/uuid"
 import "core:path/filepath"
@@ -44,6 +43,25 @@ sm_scene_active_in_world :: proc(w: ^World) -> ^Scene {
     return s
 }
 
+@(private = "file")
+_sm_trim_count :: proc(scene_manager: ^SceneManager) {
+    if scene_manager == nil do return
+    for scene_manager.count > 0 && scene_manager.loaded[scene_manager.count - 1] == nil {
+        scene_manager.count -= 1
+    }
+}
+
+sm_loaded_scene_count :: proc() -> int {
+    scene_manager := ctx_scene_manager()
+    if scene_manager == nil do return 0
+    n := 0
+    limit := min(scene_manager.count, MAX_SCENES)
+    for i in 0 ..< limit {
+        if scene_manager.loaded[i] != nil do n += 1
+    }
+    return n
+}
+
 sm_scene_set_active :: proc(s: ^Scene) {
     scene_manager := ctx_scene_manager()
     if s == nil {
@@ -56,10 +74,13 @@ sm_scene_set_active :: proc(s: ^Scene) {
             return
         }
     }
-    if scene_manager.count < MAX_SCENES {
-        scene_manager.loaded[scene_manager.count] = s
-        scene_manager.active_scene = Scene_ID(scene_manager.count)
-        scene_manager.count += 1
+    slot := sm_find_free_slot()
+    if slot >= 0 {
+        scene_manager.loaded[slot] = s
+        scene_manager.active_scene = slot
+        if int(slot) >= scene_manager.count {
+            scene_manager.count = int(slot) + 1
+        }
     }
 }
 
@@ -77,15 +98,38 @@ sm_scene_unload :: proc(scene: ^Scene) {
     if scene == nil do return
     if !sm_scene_is_valid(scene) do return
     scene_manager := ctx_scene_manager()
+    w := scene.world
 
+    found := false
+    was_active := false
     for i in 0..<scene_manager.count {
         if scene_manager.loaded[i] == scene {
+            was_active = scene_manager.active_scene == Scene_ID(i)
             scene_destroy(scene)
             scene_manager.loaded[i] = nil
-            if scene_manager.active_scene == Scene_ID(i) {
+            if was_active {
                 scene_manager.active_scene = -1
             }
+            found = true
             break
+        }
+    }
+    if !found do return
+    _sm_trim_count(scene_manager)
+    if was_active {
+        for i in 0..<scene_manager.count {
+            cand := scene_manager.loaded[i]
+            if cand != nil && sm_scene_is_valid(cand) && cand.world == w {
+                scene_manager.active_scene = Scene_ID(i)
+                return
+            }
+        }
+        for i in 0..<scene_manager.count {
+            cand := scene_manager.loaded[i]
+            if cand != nil && sm_scene_is_valid(cand) {
+                scene_manager.active_scene = Scene_ID(i)
+                return
+            }
         }
     }
 }
@@ -190,6 +234,7 @@ scene_reload_in_place :: proc(target: ^Scene, scene_file: ^SceneFile, scene_asse
     s := _scene_load_additive(scene_file, scene_asset_guid)
     if s == nil {
         // The old scene is already gone; the slot stays empty.
+        _sm_trim_count(scene_manager)
         return nil
     }
     s.session_id = session_id // the same scene to everything that outlives the reload
@@ -207,6 +252,7 @@ scene_reload_in_place :: proc(target: ^Scene, scene_file: ^SceneFile, scene_asse
         }
     }
     if int(slot) >= scene_manager.count do scene_manager.count = int(slot) + 1
+    _sm_trim_count(scene_manager)
     if was_active do scene_manager.active_scene = Scene_ID(slot)
     return s
 }
@@ -265,7 +311,7 @@ _variant_materialize_root :: proc(s: ^Scene, root_ns: ^NestedScene, file_root_li
     nested_before := len(s.nested_scenes)
     base_root_tH := _scene_load_as_child(&base_sf, {}, s, guid, true)
     if base_root_tH == {} do return {}
-    rns, rns_ok := _find_ns_by_local_id(s, root_ns_lid)
+    rns, rns_ok := scene_nested_scene_by_local_id(s, root_ns_lid)
     if !rns_ok do return {}
     rns.source_root_id = base_root_lid
 
@@ -427,7 +473,7 @@ _scene_load_additive :: proc(scene_file: ^SceneFile, scene_asset_guid: Asset_GUI
 _scene_resolve_breadcrumb_targets :: proc(s: ^Scene) {
     if s == nil do return
     for lid, bc in s.breadcrumb_data {
-        if pptr_guid_is_empty(bc.scene_source.guid) do continue
+        if asset_guid_is_empty(bc.scene_source.guid) do continue
         real := nested_resolve_breadcrumb_to_handle(s, bc)
         if real == {} do continue
         bimap_remove_by_key(&s.local_ids, lid)
@@ -511,7 +557,7 @@ scene_lib_register :: proc(guid: Asset_GUID) -> bool {
 	context.allocator = runtime.default_allocator()
 	path, ok := asset_db_get_path(uuid.Identifier(guid))
 	if !ok do return false
-	data, err := os.read_entire_file(path, context.allocator)
+	data, err := vfs_read_entire_file(path, context.allocator)
 	if err != nil do return false
 	scene_lib[guid] = data
 	return true

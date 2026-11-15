@@ -17,6 +17,8 @@ import "core:os"
 import "core:path/filepath"
 import "core:strings"
 import "core:time"
+import "crash_journal"
+import "gfx"
 import hot "hot_api"
 import "log"
 
@@ -42,6 +44,9 @@ _Hot_Registry :: struct {
 	entries:             [dynamic]Hot_Proc_Entry,
 	by_name:             map[string]int,
 	loaded_libs:         [dynamic]dynlib.Library,
+	sig_metas:           [dynamic]hot.Hot_Proc_Sig_Meta,
+	sig_by_name:         map[string]int,
+	sig_defaults_seeded: bool,
 	generation:          int,
 	boot_schema_hash:    u64,
 	status:              Hot_Reload_Status,
@@ -233,6 +238,12 @@ _cb_set_time_scale :: proc "c" (scale: f32) {
 }
 
 @(private = "file")
+_cb_get_unscaled_dt :: proc "c" () -> f32 {
+	context = _hot_restore_ctx()
+	return gfx.delta_time()
+}
+
+@(private = "file")
 _cb_get_object_dt :: proc "c" (self: hot.Hot_Entity, raw_dt: f32) -> f32 {
 	context = _hot_restore_ctx()
 	return transform_dt(hot_entity_to_transform(self), raw_dt)
@@ -357,10 +368,156 @@ _cb_get_blueprint_var_ptr :: proc "c" (self: hot.Hot_Entity, var_index: i32) -> 
 }
 
 @(private = "file")
+_cb_var_blob_ptr :: proc "c" (self: hot.Hot_Entity, var_name: cstring, byte_size: i32) -> rawptr {
+	context = _hot_restore_ctx()
+	if var_name == nil do return nil
+	return visual_script_get_entity_var_blob_ptr(hot_entity_to_transform(self), string(var_name), int(byte_size))
+}
+
+@(private = "file")
+_cb_var_ptr_raw :: proc "c" (self: hot.Hot_Entity, var_name: cstring, pin_type: hot.Hot_Pin_Type) -> rawptr {
+	context = _hot_restore_ctx()
+	if var_name == nil do return nil
+	return visual_script_get_entity_var_ptr_raw(hot_entity_to_transform(self), string(var_name), pin_type)
+}
+
+@(private = "file")
+_cb_timer_step :: proc "c" (self: hot.Hot_Entity, node_uid: u32, duration: f32, dt: f32, reset: bool, is_cooldown: bool, out_remaining: ^f32) -> bool {
+	context = _hot_restore_ctx()
+	ready, rem := visual_script_timer_step_runtime(hot_entity_to_transform(self), node_uid, duration, dt, reset, is_cooldown)
+	if out_remaining != nil do out_remaining^ = rem
+	return ready
+}
+
+@(private = "file")
+_cb_report_loop_fuse :: proc "c" (self: hot.Hot_Entity, node_uid: u32) {
+	context = _hot_restore_ctx()
+	visual_script_report_loop_fuse(hot_entity_to_transform(self), node_uid)
+}
+
+@(private = "file")
+_cb_spawn_prefab :: proc "c" (prefab_guid_str: cstring, world_pos: [3]f32, world_rot: [4]f32) -> hot.Hot_Entity {
+	context = _hot_restore_ctx()
+	if prefab_guid_str == nil do return {}
+	tH := visual_script_spawn_prefab_runtime(string(prefab_guid_str), world_pos, world_rot)
+	return transform_to_hot_entity(tH)
+}
+
+@(private = "file")
+_cb_destroy_entity :: proc "c" (target: hot.Hot_Entity) {
+	context = _hot_restore_ctx()
+	visual_script_destroy_entity_runtime(hot_entity_to_transform(target))
+}
+
+@(private = "file")
+_cb_ai_find_path_move :: proc "c" (self: hot.Hot_Entity, goal_pos: [3]f32) -> bool {
+	context = _hot_restore_ctx()
+	return visual_script_ai_move_runtime(hot_entity_to_transform(self), goal_pos, -1.0)
+}
+
+@(private = "file")
+_cb_ai_check_arrival :: proc "c" (self: hot.Hot_Entity, goal_pos: [3]f32, accept_radius: f32) -> bool {
+	context = _hot_restore_ctx()
+	_ = goal_pos
+	return visual_script_ai_arrived_runtime(hot_entity_to_transform(self), accept_radius)
+}
+
+@(private = "file")
+_cb_physics_raycast :: proc "c" (ignore_self: hot.Hot_Entity, origin: [3]f32, dir: [3]f32, max_dist: f32, channel_mask: u32, out_hit: ^hot.Hot_Raycast_Hit) -> bool {
+	context = _hot_restore_ctx()
+	hit := visual_script_physics_raycast_runtime(hot_entity_to_transform(ignore_self), origin, dir, max_dist, channel_mask)
+	if out_hit != nil do out_hit^ = hit
+	return hit.hit
+}
+
+@(private = "file")
+_cb_physics_overlap_sphere :: proc "c" (ignore_self: hot.Hot_Entity, center: [3]f32, radius: f32, channel_mask: u32, out_closest: ^hot.Hot_Entity) -> i32 {
+	context = _hot_restore_ctx()
+	cnt, closest := visual_script_physics_overlap_sphere_runtime(hot_entity_to_transform(ignore_self), center, radius, channel_mask)
+	if out_closest != nil do out_closest^ = transform_to_hot_entity(closest)
+	return cnt
+}
+
+@(private = "file")
+_cb_physics_add_impulse :: proc "c" (target: hot.Hot_Entity, impulse: [3]f32, is_vel_change: bool) {
+	context = _hot_restore_ctx()
+	visual_script_physics_add_impulse_runtime(hot_entity_to_transform(target), impulse, is_vel_change)
+}
+
+@(private = "file")
+_cb_audio_play_spatial_3d :: proc "c" (self: hot.Hot_Entity, cue_str: cstring, world_pos: [3]f32, volume: f32, pitch: f32) {
+	context = _hot_restore_ctx()
+	visual_script_audio_play_3d_runtime(hot_entity_to_transform(self), cue_str != nil ? string(cue_str) : "", world_pos, volume, pitch)
+}
+
+@(private = "file")
+_cb_audio_set_bus_send :: proc "c" (bus_name: cstring, send_level: f32, lowpass_hz: f32) {
+	context = _hot_restore_ctx()
+	visual_script_audio_bus_send_runtime(bus_name != nil ? string(bus_name) : "Master", send_level, lowpass_hz)
+}
+
+@(private = "file")
+_cb_vfx_emitter_spawn :: proc "c" (self: hot.Hot_Entity, vfx_str: cstring, spawn_rate: f32, burst_count: i32) {
+	context = _hot_restore_ctx()
+	visual_script_vfx_spawn_runtime(hot_entity_to_transform(self), vfx_str != nil ? string(vfx_str) : "", spawn_rate, burst_count)
+}
+
+@(private = "file")
+_cb_anim_set_ik_target :: proc "c" (self: hot.Hot_Entity, effector_name: cstring, world_target: [3]f32, weight: f32) {
+	context = _hot_restore_ctx()
+	visual_script_anim_ik_target_runtime(hot_entity_to_transform(self), effector_name != nil ? string(effector_name) : "Right_Hand", world_target, weight)
+}
+
+@(private = "file")
+_cb_csg_stamp_brush :: proc "c" (world_pos: [3]f32, radius: f32, impulse: f32, cut_mat_str: cstring) -> i32 {
+	context = _hot_restore_ctx()
+	return visual_script_csg_stamp_runtime(world_pos, radius, impulse, cut_mat_str != nil ? string(cut_mat_str) : "")
+}
+
+// Best-effort sweep of stale `hot_cartridge_<N>.*` files from previous crashed/closed runs.
+// Leaves `hot_cartridge_latest.*` untouched and ignores locked DLLs in active sessions.
+@(private = "file")
+_sweep_stale_hot_cartridge_files :: proc() {
+	repo_root := resolve_repo_root(context.temp_allocator)
+	if repo_root == "" do return
+	builds_dir, _ := filepath.join({repo_root, "builds"}, context.temp_allocator)
+	if !os.is_dir(builds_dir) do return
+
+	dh, derr := os.open(builds_dir)
+	if derr != nil do return
+	entries, rerr := os.read_dir(dh, -1, context.temp_allocator)
+	os.close(dh)
+	if rerr != nil do return
+
+	prefix :: "hot_cartridge_"
+	sweep_exts := [?]string{".dll", ".pdb", ".exp", ".lib", ".rdi", ".err", ".dylib", ".so"}
+	for e in entries {
+		if e.type == .Directory do continue
+		lower := strings.to_lower(e.name, context.temp_allocator)
+		if !strings.has_prefix(lower, prefix) || len(lower) <= len(prefix) do continue
+		first := lower[len(prefix)]
+		if first < '0' || first > '9' do continue
+
+		match_ext := false
+		for ext in sweep_exts {
+			if strings.has_suffix(lower, ext) {
+				match_ext = true
+				break
+			}
+		}
+		if !match_ext do continue
+		if full, jerr := filepath.join({builds_dir, e.name}, context.temp_allocator); jerr == nil {
+			_ = os.remove(full)
+		}
+	}
+}
+
+@(private = "file")
 _ensure_hot_init :: proc() {
 	if _hot_reg.initialized do return
 	context.allocator = runtime.default_allocator()
 	_hot_reg.initialized = true
+	_sweep_stale_hot_cartridge_files()
 	_hot_api_table = hot.Engine_Hot_API{
 		version                   = hot.ENGINE_HOT_API_VERSION,
 		entity_valid              = _cb_entity_valid,
@@ -396,7 +553,135 @@ _ensure_hot_init :: proc() {
 		unbind_custom_delegate    = _cb_unbind_custom_delegate,
 		broadcast_custom_delegate = _cb_broadcast_custom_delegate,
 		get_blueprint_var_ptr     = _cb_get_blueprint_var_ptr,
+		var_blob_ptr              = _cb_var_blob_ptr,
+		var_ptr_raw               = _cb_var_ptr_raw,
+		timer_step                = _cb_timer_step,
+		report_loop_fuse          = _cb_report_loop_fuse,
+		spawn_prefab              = _cb_spawn_prefab,
+		destroy_entity            = _cb_destroy_entity,
+		ai_find_path_move         = _cb_ai_find_path_move,
+		ai_check_arrival          = _cb_ai_check_arrival,
+		physics_raycast           = _cb_physics_raycast,
+		physics_overlap_sphere    = _cb_physics_overlap_sphere,
+		physics_add_impulse       = _cb_physics_add_impulse,
+		audio_play_spatial_3d     = _cb_audio_play_spatial_3d,
+		audio_set_bus_send        = _cb_audio_set_bus_send,
+		vfx_emitter_spawn         = _cb_vfx_emitter_spawn,
+		anim_set_ik_target        = _cb_anim_set_ik_target,
+		csg_stamp_brush           = _cb_csg_stamp_brush,
+		get_unscaled_dt           = _cb_get_unscaled_dt,
 	}
+	if !_hot_reg.sig_defaults_seeded {
+		_hot_reg.sig_defaults_seeded = true
+		_seed_builtin_hot_sig_metas()
+	}
+}
+
+@(private = "file")
+_seed_builtin_hot_sig_metas :: proc() {
+	hot_proc_register_sig_meta(hot.Hot_Proc_Sig_Meta{
+		proc_name      = "hot_harmonic_hover",
+		display_title  = "Harmonic Hover",
+		namespace_name = "Odin_Hot",
+		doc_comment    = "Smooth harmonic vertical oscillation mutating Phase Ref in-place.",
+		pins = []hot.Hot_Proc_Pin_Meta{
+			{name = "Amp",       pin_type = .Float, is_output = false, by_ref = false, default_f32 = 0.25},
+			{name = "Freq",      pin_type = .Float, is_output = false, by_ref = false, default_f32 = 2.00},
+			{name = "Phase Ref", pin_type = .Float, is_output = false, by_ref = true,  default_f32 = 0.00},
+			{name = "Out",       pin_type = .Float, is_output = true},
+		},
+	})
+	hot_proc_register_sig_meta(hot.Hot_Proc_Sig_Meta{
+		proc_name      = "hot_spring_vec3_ref",
+		display_title  = "Spring Vec3 Ref",
+		namespace_name = "Odin_Hot",
+		doc_comment    = "Damped spring mutating a ^[3]f32 vector in-place toward Target.",
+		pins = []hot.Hot_Proc_Pin_Meta{
+			{name = "Vec Ref", pin_type = .Vec3,  is_output = false, by_ref = true},
+			{name = "Target",  pin_type = .Vec3,  is_output = false, by_ref = false},
+			{name = "Speed",   pin_type = .Float, is_output = false, by_ref = false, default_f32 = 8.0},
+			{name = "Out",     pin_type = .Vec3,  is_output = true},
+		},
+	})
+	hot_proc_register_sig_meta(hot.Hot_Proc_Sig_Meta{
+		proc_name      = "hot_apply_timescale_zone",
+		display_title  = "Apply TimeScale Zone",
+		namespace_name = "Odin_Hot",
+		doc_comment    = "Sets custom per-object time scale on self.",
+		pins = []hot.Hot_Proc_Pin_Meta{
+			{name = "Scale", pin_type = .Float, is_output = false, by_ref = false, default_f32 = 0.5},
+		},
+	})
+}
+
+// Registers self-describing pin signature metadata for `@(bp_node)` / `@(hot_proc)` nodes.
+hot_proc_register_sig_meta :: proc(sig: hot.Hot_Proc_Sig_Meta) {
+	_ensure_hot_init()
+	if sig.proc_name == "" do return
+	context.allocator = runtime.default_allocator()
+
+	cloned_pins: []hot.Hot_Proc_Pin_Meta
+	if len(sig.pins) > 0 {
+		cloned_pins = make([]hot.Hot_Proc_Pin_Meta, len(sig.pins))
+		for p, i in sig.pins {
+			cloned_pins[i] = p
+			cloned_pins[i].name        = strings.clone(p.name)
+			cloned_pins[i].custom_type = p.custom_type != "" ? strings.clone(p.custom_type) : ""
+		}
+	}
+	entry := hot.Hot_Proc_Sig_Meta{
+		proc_name        = strings.clone(sig.proc_name),
+		display_title    = strings.clone(sig.display_title != "" ? sig.display_title : sig.proc_name),
+		namespace_name   = strings.clone(sig.namespace_name != "" ? sig.namespace_name : "Odin_Hot"),
+		doc_comment      = sig.doc_comment != "" ? strings.clone(sig.doc_comment) : "",
+		source_proc_name = sig.source_proc_name != "" ? strings.clone(sig.source_proc_name) : "",
+		is_pure          = sig.is_pure,
+		pins             = cloned_pins,
+	}
+
+	if idx, exists := _hot_reg.sig_by_name[sig.proc_name]; exists {
+		old := _hot_reg.sig_metas[idx]
+		if old.source_proc_name != "" {
+			delete_key(&_hot_reg.sig_by_name, old.source_proc_name)
+		}
+		delete(old.display_title)
+		delete(old.namespace_name)
+		if old.doc_comment != "" do delete(old.doc_comment)
+		if old.source_proc_name != "" do delete(old.source_proc_name)
+		for p in old.pins {
+			delete(p.name)
+			if p.custom_type != "" do delete(p.custom_type)
+		}
+		delete(old.pins)
+		// Keep existing map key string alive for `entry.proc_name`
+		delete(entry.proc_name)
+		entry.proc_name = old.proc_name
+		_hot_reg.sig_metas[idx] = entry
+		if entry.source_proc_name != "" {
+			_hot_reg.sig_by_name[entry.source_proc_name] = idx
+		}
+		return
+	}
+
+	idx := len(_hot_reg.sig_metas)
+	append(&_hot_reg.sig_metas, entry)
+	_hot_reg.sig_by_name[entry.proc_name] = idx
+	if entry.source_proc_name != "" {
+		_hot_reg.sig_by_name[entry.source_proc_name] = idx
+	}
+}
+
+hot_proc_find_sig_meta :: proc(name: string) -> (meta: hot.Hot_Proc_Sig_Meta, ok: bool) {
+	_ensure_hot_init()
+	if name == "" do return {}, false
+	idx, found := _hot_reg.sig_by_name[name]
+	if !found || idx < 0 || idx >= len(_hot_reg.sig_metas) do return {}, false
+	return _hot_reg.sig_metas[idx], true
+}
+
+hot_proc_all_sig_metas :: proc() -> []hot.Hot_Proc_Sig_Meta {
+	_ensure_hot_init()
+	return _hot_reg.sig_metas[:]
 }
 
 // =============================================================================
@@ -569,13 +854,21 @@ hot_cartridge_load_dll :: proc(dll_path: string) -> (swapped_count: int, ok: boo
 		}
 	}
 
+	crash_journal.refresh_symbols()
 	return swapped_count, true
 }
 
 // Unloads all dynamically loaded cartridge DLLs and reverts active pointers to static procs.
 hot_cartridge_unload_all :: proc() {
 	if !_hot_reg.initialized do return
+	prev_alloc := context.allocator
 	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev_alloc
+	if _hot_reg.build_pending {
+		bg_process_kill(&_hot_reg.build_proc)
+		_hot_reg.build_pending = false
+	}
+	visual_script_scrub_external_cstrings()
 	for &e in _hot_reg.entries {
 		e.active_fn = e.static_fn
 		e.hot_gen   = 0
@@ -584,6 +877,44 @@ hot_cartridge_unload_all :: proc() {
 		_ = dynlib.unload_library(lib)
 	}
 	clear(&_hot_reg.loaded_libs)
+}
+
+// Frees all hot-cartridge registry allocations and unloads loaded cartridge DLLs at shutdown.
+hot_cartridge_shutdown :: proc() {
+	if !_hot_reg.initialized do return
+	hot_cartridge_unload_all()
+	prev_alloc := context.allocator
+	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev_alloc
+
+	for e in _hot_reg.entries {
+		if e.name != "" do delete(e.name)
+		if e.source_file != "" do delete(e.source_file)
+	}
+	delete(_hot_reg.entries)
+	delete(_hot_reg.by_name)
+	delete(_hot_reg.loaded_libs)
+
+	for m in _hot_reg.sig_metas {
+		if m.proc_name != "" do delete(m.proc_name)
+		if m.display_title != "" do delete(m.display_title)
+		if m.namespace_name != "" do delete(m.namespace_name)
+		if m.doc_comment != "" do delete(m.doc_comment)
+		if m.source_proc_name != "" do delete(m.source_proc_name)
+		for p in m.pins {
+			if p.name != "" do delete(p.name)
+			if p.custom_type != "" do delete(p.custom_type)
+		}
+		if len(m.pins) > 0 do delete(m.pins)
+	}
+	delete(_hot_reg.sig_metas)
+	delete(_hot_reg.sig_by_name)
+
+	if _hot_reg.last_message != "" do delete(_hot_reg.last_message)
+	if _hot_reg.last_stderr != "" do delete(_hot_reg.last_stderr)
+	if _hot_reg.build_target_dll != "" do delete(_hot_reg.build_target_dll)
+	if _hot_reg.build_err_file != "" do delete(_hot_reg.build_err_file)
+	_hot_reg = {}
 }
 
 @(private = "file")
@@ -605,40 +936,11 @@ hot_cartridge_next_generation :: proc() -> int {
 	return _hot_reg.generation + 1
 }
 
-// Resolves Odin compiler binary (`PATH` first, then `ODIN_ROOT`).
+// Resolves Odin compiler binary: bundled `<repo>/tools/odin/` first for standalone portability,
+// then `ODIN_ROOT`, then `PATH`.
 resolve_odin_binary :: proc(allocator := context.temp_allocator) -> string {
-	exe_ext :: ".exe" when ODIN_OS == .Windows else ""
-	if path_env, found := os.lookup_env("PATH", context.temp_allocator); found {
-		sep := ";" when ODIN_OS == .Windows else ":"
-		name := strings.concatenate({"odin", exe_ext}, context.temp_allocator)
-		for dir in strings.split(path_env, sep, context.temp_allocator) {
-			if dir == "" do continue
-			p, err := filepath.join({dir, name}, context.temp_allocator)
-			if err == nil && os.exists(p) {
-				return strings.clone(p, allocator)
-			}
-		}
-	}
-	root_odin, _ := filepath.join({ODIN_ROOT, "odin" + exe_ext}, context.temp_allocator)
-	if os.exists(root_odin) {
-		return strings.clone(root_odin, allocator)
-	}
-	return strings.clone("odin", allocator)
-}
-
-// Resolves repository root (one level above `moonhug/` when cwd is `moonhug/`).
-resolve_repo_root :: proc(allocator := context.temp_allocator) -> string {
-	cwd, err := os.get_working_directory(context.temp_allocator)
-	if err != nil do return strings.clone("..", allocator)
-	if os.exists("tools/mh/mh.odin") {
-		return strings.clone(cwd, allocator)
-	}
-	parent: string
-	{
-		context.allocator = context.temp_allocator
-		parent = filepath.dir(cwd)
-	}
-	return strings.clone(parent, allocator)
+	path, _ := resolve_host_tool("odin", "tools/odin", "", true, allocator)
+	return path
 }
 
 // Triggers an asynchronous, single-flight `odin build builds/hot_cartridge_src -build-mode:dll`
@@ -661,10 +963,14 @@ hot_cartridge_trigger_async_build :: proc(full_regen: bool = false) -> bool {
 	err_abs, _ := filepath.join({repo_root, fmt.tprintf("builds/hot_cartridge_%d.err", next_gen)}, context.temp_allocator)
 	src_abs, _ := filepath.join({repo_root, "builds/hot_cartridge_src"}, context.temp_allocator)
 
-	need_mh_hot := full_regen || !os.exists(src_abs)
+	proj_dir := active_project_root()
+	need_mh_hot := full_regen || !os.exists(src_abs) || (proj_dir != "" && project_dir_has_odin_code(proj_dir))
 	cmd := make([dynamic]string, context.temp_allocator)
 	if need_mh_hot {
 		append(&cmd, odin_exe, "run", "tools/mh", "--", "hot", fmt.tprintf("--out=%s", dll_rel))
+		if proj_dir != "" {
+			append(&cmd, fmt.tprintf("--project=%s", proj_dir))
+		}
 	} else {
 		append(
 			&cmd,
@@ -675,8 +981,11 @@ hot_cartridge_trigger_async_build :: proc(full_regen: bool = false) -> bool {
 			"-collection:haati=haati",
 			"-collection:moonhug=haati",
 			"-ignore-unknown-attributes",
-			fmt.tprintf("-out:%s", dll_rel),
 		)
+		if proj_dir != "" {
+			append(&cmd, fmt.tprintf("-collection:project=%s", proj_dir))
+		}
+		append(&cmd, fmt.tprintf("-out:%s", dll_rel))
 	}
 
 	proc_handle, started := bg_process_start_to_file(repo_root, cmd[:], nil, err_abs)
@@ -704,7 +1013,18 @@ hot_cartridge_poll :: proc() -> (just_swapped: bool) {
 	if !_hot_reg.build_pending do return false
 
 	exited, exit_code := bg_process_poll(&_hot_reg.build_proc)
-	if !exited do return false
+	if !exited {
+		if time.duration_seconds(time.tick_since(_hot_reg.build_started_at)) > 30.0 {
+			bg_process_kill(&_hot_reg.build_proc)
+			_hot_reg.build_pending = false
+			if _hot_reg.build_err_file != "" {
+				_ = os.remove(_hot_reg.build_err_file)
+			}
+			_set_hot_status(.Compile_Failed, "Hot-Swap compile timed out (>30s)", "")
+			log.error("[HotReload] Compile timed out (>30s); killed child process")
+		}
+		return false
+	}
 
 	_hot_reg.build_pending = false
 	elapsed_ms := f32(time.duration_milliseconds(time.tick_since(_hot_reg.build_started_at)))

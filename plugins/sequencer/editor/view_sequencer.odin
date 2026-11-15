@@ -365,7 +365,7 @@ sequencer_window_draw :: proc() {
 	widgets.tooltip("To End", im.HoveredFlags_ForTooltip)
 	im.EndDisabled()
 	im.SameLine()
-	im.Text("%6.2fs / %.2fs", _sq.time, dur)
+	widgets.textf("%6.2fs / %.2fs", _sq.time, dur)
 	im.SameLine()
 	im.SetNextItemWidth(90)
 	dur_changed := im.DragFloat("##sq_dur", &d.duration, 0.05, 0, 0, "len %.2f")

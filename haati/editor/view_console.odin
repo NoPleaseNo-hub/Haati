@@ -88,14 +88,13 @@ draw_status_bar :: proc() {
 	n := len(log.entries)
 	if n > 0 {
 		last := log.entries[n - 1]
-		cmsg := fmt.ctprintf("%s %s  %s", _console_level_icon(last.level), _console_time_str(last.time), last.message)
 		im.PushClipRect(im.GetCursorScreenPos(), {im.GetWindowPos().x + im.GetWindowWidth() - badge_w - 8, im.GetWindowPos().y + height}, true)
-		im.TextColored(_console_level_color(last.level), cmsg)
+		widgets.text_coloredf(_console_level_color(last.level), "%s %s  %s", _console_level_icon(last.level), _console_time_str(last.time), last.message)
 		im.PopClipRect()
 		im.SameLine()
 	}
 	im.SetCursorPosX(max(im.GetCursorPosX(), im.GetWindowWidth() - badge_w - style.WindowPadding.x))
-	im.TextColored(p.text_muted, fmt.ctprintf("%s %s", icons.ICON_MD_PALETTE, theme_badge))
+	widgets.text_coloredf(p.text_muted, "%s %s", icons.ICON_MD_PALETTE, theme_badge)
 }
 
 draw_console_view :: proc() {
@@ -133,16 +132,21 @@ draw_console_view :: proc() {
 		avail_x := im.GetContentRegionAvail().x
 		cursor_x := im.GetCursorPosX()
 		filter_width := avail_x - btn_width - style.ItemSpacing.x
-		im.SetNextItemWidth(filter_width)
-		im.InputText("##filter", cstring(raw_data(_console_filter[:])), len(_console_filter))
+		_ = widgets.search_bar(_console_filter[:], widgets.Search_Bar_Opts{
+			id    = "##filter",
+			hint  = "Filter logs...",
+			mode  = .Toolbar,
+			width = max(60.0, filter_width),
+		})
 		im.SameLine()
 		im.SetCursorPosX(cursor_x + avail_x - btn_width)
 
+		p := thm.palette()
 		filter_toggle_button(btn_labels[0], &_console_show_info)
 		im.SameLine()
-		filter_toggle_button(btn_labels[1], &_console_show_warning, im.Vec4{0.957, 0.737, 0.008, 1})
+		filter_toggle_button(btn_labels[1], &_console_show_warning, thm.with_alpha(p.status_warning, 0.35))
 		im.SameLine()
-		filter_toggle_button(btn_labels[2], &_console_show_error, im.Vec4{0.827, 0.133, 0.133, 1})
+		filter_toggle_button(btn_labels[2], &_console_show_error, thm.with_alpha(p.status_error, 0.35))
 
 		// Zero horizontal inner padding so rows sit flush against the left border
 		// (keep the default vertical padding for top/bottom breathing room).
@@ -220,9 +224,8 @@ draw_console_view :: proc() {
 			// Text column to the right of the icon.
 			im.SetCursorScreenPos(im.Vec2{row_start.x + icon_col_w, row_start.y})
 			im.BeginGroup()
-			cmsg := fmt.ctprintf("%s  %s", _console_time_str(entry.time), entry.message)
-			im.TextColored(_console_level_color(entry.level), cmsg)
-			im.TextColored(im.Vec4{0.55, 0.55, 0.55, 1}, _console_loc_line(entry))
+			widgets.text_coloredf(_console_level_color(entry.level), "%s  %s", _console_time_str(entry.time), entry.message)
+			im.TextColoredUnformatted(thm.palette().text_muted, _console_loc_line(entry))
 			im.EndGroup()
 
 			// Reserve exactly row_h of vertical space (regardless of text height)
@@ -231,6 +234,32 @@ draw_console_view :: proc() {
 			im.SetCursorScreenPos(row_start)
 			if im.InvisibleButton(fmt.ctprintf("##crow_%d", entry.id), im.Vec2{max(row_w, 1), row_h}) {
 				_console_selected_id = entry.id
+			}
+			if im.BeginPopupContextItem(fmt.ctprintf("##crow_ctx_%d", entry.id)) {
+				_console_selected_id = entry.id
+				if im.MenuItem(fmt.ctprintf("%s  Copy Log Entry", icons.ICON_MD_CONTENT_COPY)) {
+					im.SetClipboardText(strings.clone_to_cstring(entry.message, context.temp_allocator))
+				}
+				if im.MenuItem(fmt.ctprintf("%s  Copy Entry With Source", icons.ICON_MD_DESCRIPTION)) {
+					full := fmt.ctprintf("%s  %s\n%s", _console_time_str(entry.time), entry.message, _console_loc_line(entry))
+					im.SetClipboardText(full)
+				}
+				if im.MenuItem(fmt.ctprintf("%s  Copy All Visible", icons.ICON_MD_CONTENT_COPY)) {
+					sb := strings.builder_make(context.temp_allocator)
+					for ve in log.entries {
+						v_show := true
+						switch ve.level {
+						case .Info:    v_show = _console_show_info
+						case .Warning: v_show = _console_show_warning
+						case .Error:   v_show = _console_show_error
+						}
+						if v_show && widgets.search_match(ve.message, filter_terms) {
+							strings.write_string(&sb, fmt.tprintf("%s  %s (%s)\n", _console_time_str(ve.time), ve.message, string(_console_loc_line(ve))))
+						}
+					}
+					im.SetClipboardText(strings.clone_to_cstring(strings.to_string(sb), context.temp_allocator))
+				}
+				im.EndPopup()
 			}
 			if is_row_selected && _console_scroll_to_sel {
 				im.SetScrollHereY()
@@ -343,16 +372,18 @@ _draw_console_detail :: proc() {
 		strings.write_string(&b, "No call stack captured.")
 	}
 	text := strings.to_string(b)
-	buf := strings.clone_to_cstring(text, context.temp_allocator)
 
 	// The pane has no padding of its own, so the gap around this text is
 	// this input's frame padding.
-	im.PushStyleVarImVec2(.FramePadding, DETAIL_TEXT_PAD)
-	im.PushStyleColorImVec4(.FrameBg, im.Vec4{0, 0, 0, 0})
-	im.PushStyleColorImVec4(.Text, _console_level_color(sel.level))
-	im.InputTextMultiline("##console_detail_text", buf, uint(len(text) + 1), im.Vec2{-1, -1}, {.ReadOnly, .WordWrap})
-	im.PopStyleColor(2)
-	im.PopStyleVar()
+	widgets.readonly_multiline(
+		"##console_detail_text",
+		text,
+		{-1, -1},
+		word_wrap = true,
+		frame_pad = DETAIL_TEXT_PAD,
+		bg_col = im.Vec4{0, 0, 0, 0},
+		text_col = _console_level_color(sel.level),
+	)
 }
 
 // Clears the log when "Clear on Play" is on. Both ways of playing call it:

@@ -274,7 +274,10 @@ canvas_begin :: proc(cv: ^Node_Canvas, id: cstring) -> bool {
 	im.PushStyleVarImVec2(.WindowPadding, im.Vec2{0, 0})
 	open := im.BeginChild(id, im.Vec2{0, 0}, {.Borders}, {.NoScrollbar, .NoScrollWithMouse})
 	im.PopStyleVar()
-	if !open do return false
+	if !open {
+		im.EndChild()
+		return false
+	}
 	cv.origin = im.GetCursorScreenPos()
 	cv.size = im.GetContentRegionAvail()
 	cv.ctx_handled = false
@@ -348,7 +351,7 @@ canvas_begin_context_menu :: proc(
 		dl := im.GetWindowDrawList()
 
 		im.SetCursorScreenPos(cv.origin)
-		im.InvisibleButton("##canvas_bg", cv.size)
+		im.InvisibleButton("##canvas_bg", {max(cv.size.x, 1.0), max(cv.size.y, 1.0)})
 		bg_clicked_left  := im.IsItemClicked(.Left)
 		bg_active_left   := im.IsItemActive() && im.IsMouseDown(.Left)
 		bg_hovered       := im.IsItemHovered()
@@ -506,7 +509,8 @@ canvas_node :: proc(
 	// Interaction first: the button claims hover over the background surface,
 	// the visuals draw over both.
 	im.SetCursorScreenPos(rmin)
-	im.InvisibleButton(fmt.ctprintf("##canvas_node_%d", id), rmax - rmin)
+	btn_sz := rmax - rmin
+	im.InvisibleButton(fmt.ctprintf("##canvas_node_%d", id), {max(btn_sz.x, 1.0), max(btn_sz.y, 1.0)})
 	if im.IsItemClicked(.Left) && !cv.suppress_node_drag {
 		if io.KeyCtrl || io.KeyShift {
 			canvas_set_selected(cv, id, !canvas_is_selected(cv, id))
@@ -811,7 +815,7 @@ canvas_update_and_draw_comments :: proc(cv: ^Node_Canvas, node_positions: []im.V
 		// 1. Header Drag Handle FIRST so `sp` updates before drawing (zero 1-frame lag!)
 		drag_x0 := sp.x + max(sz.x - 105.0 * zm, 76.0)
 		im.SetCursorScreenPos({drag_x0, sp.y})
-		im.InvisibleButton("##nc_cmt_hdr_drag", {max(54.0 * zm, 24.0), hdr_h})
+		im.InvisibleButton("##nc_cmt_hdr_drag", {max(54.0 * zm, 24.0), max(hdr_h, 1.0)})
 		if im.IsItemClicked(.Left) {
 			cv.sel = 9000 + c_idx
 			is_sel = true
@@ -833,7 +837,7 @@ canvas_update_and_draw_comments :: proc(cv: ^Node_Canvas, node_positions: []im.V
 		}
 
 		// 2. Bottom-Right Resize Grip
-		grip_sz := 16.0 * zm
+		grip_sz := max(16.0 * zm, 1.0)
 		im.SetCursorScreenPos({sp.x + sz.x - grip_sz, sp.y + sz.y - grip_sz})
 		im.InvisibleButton("##nc_cmt_resize", {grip_sz, grip_sz})
 		if im.IsItemActive() && im.IsMouseDragging(.Left, 0) {

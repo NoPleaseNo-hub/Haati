@@ -26,6 +26,7 @@ import "core:strconv"
 import "core:strings"
 import im "haati:external/odin-imgui"
 import thm "haati:editor/theme"
+import core "haati:engine/core"
 
 // @(menu_item) on a bool variable is a toggle, and this package is inside a
 // scan root, so the menu entry costs nothing beyond the attribute.
@@ -96,8 +97,8 @@ ui_tool_settings :: proc(settings_proc: proc()) {
 ui_tool_script_loc :: proc(impl: runtime.Source_Code_Location, label: string = "Tool Implementation", settings_proc: proc() = nil) {
 	@(static) path_buf: [512]u8
 	rel := _repo_relative(impl.file_path)
-	n := copy(path_buf[:], rel)
-	ui_tool_script(string(path_buf[:n]), int(impl.line), label, settings_proc)
+	saved := core.buf_set(path_buf[:], rel)
+	ui_tool_script(saved, int(impl.line), label, settings_proc)
 }
 
 // ui_origin_push / ui_origin_pop bracket the draw of one registered element.
@@ -155,8 +156,39 @@ tooltip_unchecked :: proc(text: cstring, loc := #caller_location) {
 	}
 }
 
+// Pins the next tooltip to the currently hosted ImGui viewport so hover tooltips
+// near panel/window edges never spawn/destroy secondary Vulkan swapchains.
+pin_tooltip_to_current_viewport :: proc() {
+	if vp := im.GetWindowViewport(); vp != nil && vp.ID_ != 0 {
+		im.SetNextWindowViewport(vp.ID_)
+	}
+}
+
+// Pins an active drag-and-drop source preview tooltip to whichever ImGui platform viewport
+// currently contains the cursor (falling back to the source window viewport), avoiding
+// per-frame swapchain thrashing across viewport borders.
+pin_active_drag_drop_tooltip :: proc() {
+	g := im.GetCurrentContext()
+	if g == nil || !g.DragDropActive || g.DragDropPayload.SourceId != im.GetItemID() {
+		return
+	}
+	mp := im.GetMousePos()
+	pio := im.GetPlatformIO()
+	if pio != nil && pio.Viewports.Size > 0 && pio.Viewports.Data != nil {
+		vps := ([^]^im.Viewport)(pio.Viewports.Data)[:pio.Viewports.Size]
+		for vp in vps {
+			if vp == nil || vp.ID_ == 0 do continue
+			if mp.x >= vp.Pos.x && mp.y >= vp.Pos.y && mp.x <= vp.Pos.x + vp.Size.x && mp.y <= vp.Pos.y + vp.Size.y {
+				im.SetNextWindowViewport(vp.ID_)
+				return
+			}
+		}
+	}
+	pin_tooltip_to_current_viewport()
+}
+
 // Stationary mouse-hover idle-delay check: resets timer while the pointer is actively moving
-// (`> 4px` drift), and returns `true` once the pointer rests calmly on `hover_key` for `delay_sec`.
+// (`> 2px` jitter tolerance), and returns `true` once the pointer rests calmly on `hover_key` for `delay_sec`.
 @(private = "file")
 _check_idle_hover_ready :: proc(hover_key: u64, delay_sec: f32) -> bool {
 	if im.IsMouseDown(.Left) || im.IsMouseDown(.Middle) {
@@ -170,9 +202,9 @@ _check_idle_hover_ready :: proc(hover_key: u64, delay_sec: f32) -> bool {
 	mp        := im.GetMousePos()
 	dx        := mp.x - _idle_hover_anchor.x
 	dy        := mp.y - _idle_hover_anchor.y
-	moved_far := (dx * dx + dy * dy) > 16.0
+	moved_far := (dx * dx + dy * dy) > 4.0
 
-	if hover_key != _idle_hover_key || (cur_frame - _idle_hover_last_frame) > 2 || moved_far {
+	if hover_key != _idle_hover_key || (cur_frame - _idle_hover_last_frame) > 1 || moved_far {
 		_idle_hover_key     = hover_key
 		_idle_hover_anchor  = mp
 		_idle_hover_elapsed = 0
@@ -251,9 +283,7 @@ _capture_code_jump :: proc(text: cstring, loc: runtime.Source_Code_Location, imp
 	if nl := strings.index_byte(raw_txt, '\n'); nl >= 0 {
 		raw_txt = raw_txt[:nl]
 	}
-	if len(raw_txt) > 72 {
-		raw_txt = raw_txt[:72]
-	}
+	raw_txt = utf8_safe_prefix(raw_txt, 72)
 	_code_jump.title         = strings.clone(raw_txt)
 	_code_jump.call_file     = strings.clone(_repo_relative(loc.file_path))
 	_code_jump.call_line     = int(loc.line)
@@ -302,9 +332,9 @@ code_jump_popup_draw :: proc() {
 
 		p := thm.palette()
 		if len(_code_jump.title) > 0 {
-			im.TextColored(p.accent, strings.clone_to_cstring(_code_jump.title, context.temp_allocator))
+			text_colored(p.accent, _code_jump.title)
 		} else {
-			im.TextColored(p.accent, "UI Tool / Widget")
+			im.TextColoredUnformatted(p.accent, "UI Tool / Widget")
 		}
 
 		// 0. Interactive Per-Tool Settings / Sliders (if this tool registered a settings callback)
@@ -317,13 +347,13 @@ code_jump_popup_draw :: proc() {
 		}
 
 		im.Separator()
-		im.TextColored(p.text_secondary, "Script Inspector")
+		im.TextColoredUnformatted(p.text_secondary, "Script Inspector")
 		if len(_code_jump.impl_file) > 0 {
-			im.TextDisabled(fmt.ctprintf("Tool Script: %s:%d", _code_jump.impl_file, _code_jump.impl_line))
+			text_disabledf("Tool Script: %s:%d", _code_jump.impl_file, _code_jump.impl_line)
 		}
-		im.TextDisabled(fmt.ctprintf("UI Widget:   %s:%d  (%s)", _code_jump.call_file, _code_jump.call_line, _code_jump.call_proc))
+		text_disabledf("UI Widget:   %s:%d  (%s)", _code_jump.call_file, _code_jump.call_line, _code_jump.call_proc)
 		if len(_code_jump.origin_attr) > 0 {
-			im.TextDisabled(fmt.ctprintf("Registered:  %s", _code_jump.origin_attr))
+			text_disabledf("Registered:  %s", _code_jump.origin_attr)
 		}
 		im.Separator()
 
@@ -371,6 +401,7 @@ _tooltip_show :: proc(text: cstring, loc: runtime.Source_Code_Location, impl_fil
 	// Never spawn or update floating tooltip OS swapchains during active left-mouse drags (window/dock/splitter drag)!
 	if im.IsMouseDown(.Left) do return
 	has_text := text != nil && text != ""
+	pin_tooltip_to_current_viewport()
 	if !ui_debug_tooltips && !has_settings {
 		if has_text do im.SetTooltipUnformatted(text)
 		return
@@ -424,7 +455,10 @@ _dim :: proc(s: string) {
 @(private = "file")
 _repo_relative :: proc(path: string) -> string {
 	norm, _ := strings.replace_all(path, "\\", "/", context.temp_allocator)
-	for root in ([2]string{"/moonhug/", "/plugins/"}) {
+	if i := strings.index(norm, "/Haati_Engine/"); i >= 0 {
+		return norm[i + len("/Haati_Engine/"):]
+	}
+	for root in ([3]string{"/haati/", "/moonhug/", "/plugins/"}) {
 		if i := strings.index(norm, root); i >= 0 do return norm[i + 1:]
 	}
 	return norm

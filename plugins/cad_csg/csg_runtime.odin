@@ -5,6 +5,7 @@ package cad_csg
 // Visual Latency Masking for `CSGVolume`.
 
 import "base:runtime"
+import "core:encoding/endian"
 import "core:math"
 import "core:math/linalg"
 import "core:sync"
@@ -155,12 +156,8 @@ make_procedural_guid :: proc(tH: engine.Transform_Handle, salt: u32 = 0) -> engi
 	raw[1] = 0x53
 	raw[2] = 0x47
 	raw[3] = 0x21
-	for i in 0 ..< 8 {
-		raw[4 + i] = u8((h_bits >> (uint(i) * 8)) & 0xFF)
-	}
-	for i in 0 ..< 4 {
-		raw[12 + i] = u8((salt >> (uint(i) * 8)) & 0xFF)
-	}
+	_ = endian.put_u64(raw[4:12], .Little, h_bits)
+	_ = endian.put_u32(raw[12:16], .Little, salt)
 	return engine.Asset_GUID(raw)
 }
 
@@ -864,6 +861,59 @@ csg_render_collector_init :: proc() {
 	if registered do return
 	registered = true
 	engine.render_register_collector(_collect_csg_volumes)
+	engine.nav_register_geometry_provider(_csg_nav_geometry_provider)
+}
+
+@(private = "file")
+_csg_nav_geometry_provider :: proc(
+	w:         ^engine.World,
+	aabb_min:  [3]f32,
+	aabb_max:  [3]f32,
+	emit:      engine.Nav_Geometry_Emit_Proc,
+	emit_user: rawptr,
+) {
+	if w == nil || emit == nil do return
+	it := engine.pool_iterator(csg_volumes(w))
+	for vol, _ in engine.pool_next(&it) {
+		if !vol.enabled || vol.is_dynamic_rigidbody do continue
+		if !engine.transform_active_in_hierarchy(vol.owner) do continue
+		if !vol.compiled do continue
+
+		tw := engine.transform_world(vol.owner)
+		model := engine.trs_matrix(tw.position, tw.rotation, tw.scale)
+		for _, ch in vol.chunks {
+			if ch == nil || len(ch.verts) < 3 || len(ch.indices) < 3 do continue
+			lo := ch.aabb_min
+			hi := ch.aabb_max
+			w_min := [3]f32{1e30, 1e30, 1e30}
+			w_max := [3]f32{-1e30, -1e30, -1e30}
+			for cz in 0 ..< 2 {
+				for cy in 0 ..< 2 {
+					for cx in 0 ..< 2 {
+						corner := [4]f32{cx == 0 ? lo.x : hi.x, cy == 0 ? lo.y : hi.y, cz == 0 ? lo.z : hi.z, 1.0}
+						wp := (model * corner).xyz
+						w_min.x = min(w_min.x, wp.x); w_min.y = min(w_min.y, wp.y); w_min.z = min(w_min.z, wp.z)
+						w_max.x = max(w_max.x, wp.x); w_max.y = max(w_max.y, wp.y); w_max.z = max(w_max.z, wp.z)
+					}
+				}
+			}
+			if w_max.x < aabb_min.x || w_min.x > aabb_max.x ||
+			   w_max.z < aabb_min.z || w_min.z > aabb_max.z {
+				continue
+			}
+			tri_count := len(ch.indices) / 3
+			for ti in 0 ..< tri_count {
+				i0 := int(ch.indices[ti * 3 + 0])
+				i1 := int(ch.indices[ti * 3 + 1])
+				i2 := int(ch.indices[ti * 3 + 2])
+				if i0 >= len(ch.verts) || i1 >= len(ch.verts) || i2 >= len(ch.verts) do continue
+				p0 := (model * [4]f32{ch.verts[i0].position.x, ch.verts[i0].position.y, ch.verts[i0].position.z, 1.0}).xyz
+				p1 := (model * [4]f32{ch.verts[i1].position.x, ch.verts[i1].position.y, ch.verts[i1].position.z, 1.0}).xyz
+				p2 := (model * [4]f32{ch.verts[i2].position.x, ch.verts[i2].position.y, ch.verts[i2].position.z, 1.0}).xyz
+				emit(emit_user, p0, p1, p2)
+			}
+		}
+	}
 }
 
 @(private = "file")
@@ -2285,6 +2335,17 @@ csg_volume_bake_to_static_mesh :: proc(vol: ^CSGVolume) -> engine.Transform_Hand
 // ============================================================================
 
 @(private = "file")
+_chunk_world_bounds :: proc(ch: ^CSG_Chunk, tw: engine.Transform_World) -> (wmin, wmax: [3]f32) {
+	center := (ch.aabb_min + ch.aabb_max) * 0.5
+	ext := (ch.aabb_max - ch.aabb_min) * 0.5
+	abs_s := [3]f32{abs(tw.scale.x), abs(tw.scale.y), abs(tw.scale.z)}
+	w_ext := [3]f32{ext.x * abs_s.x, ext.y * abs_s.y, ext.z * abs_s.z}
+	max_r := max(w_ext.x, max(w_ext.y, w_ext.z)) * 1.75
+	w_center := tw.position + [3]f32{center.x * tw.scale.x, center.y * tw.scale.y, center.z * tw.scale.z}
+	return w_center - max_r, w_center + max_r
+}
+
+@(private = "file")
 _sync_chunk_physics_body :: proc(vol: ^CSGVolume, ch: ^CSG_Chunk, pre_cooked_shape: ^jolt.Shape = nil) {
 	if !physics3d._state.world_ready || physics3d._state.body_interface == nil do return
 	bi := physics3d._state.body_interface
@@ -2298,6 +2359,8 @@ _sync_chunk_physics_body :: proc(vol: ^CSGVolume, ch: ^CSG_Chunk, pre_cooked_sha
 			}
 			jolt.BodyInterface_DestroyBody(bi, ch.static_body)
 			ch.static_body = 0
+			wmin, wmax := _chunk_world_bounds(ch, tw)
+			engine.navmesh_notify_geometry_changed(wmin, wmax)
 		}
 		if ch.jolt_shape != nil {
 			delete_key(&physics3d._state.shape_owner, uintptr(ch.jolt_shape))
@@ -2339,6 +2402,8 @@ _sync_chunk_physics_body :: proc(vol: ^CSGVolume, ch: ^CSG_Chunk, pre_cooked_sha
 			}
 			jolt.BodyInterface_DestroyBody(bi, ch.static_body)
 			ch.static_body = 0
+			wmin, wmax := _chunk_world_bounds(ch, tw)
+			engine.navmesh_notify_geometry_changed(wmin, wmax)
 		}
 		if ch.jolt_shape != nil {
 			delete_key(&physics3d._state.shape_owner, uintptr(ch.jolt_shape))
@@ -2351,37 +2416,46 @@ _sync_chunk_physics_body :: proc(vol: ^CSGVolume, ch: ^CSG_Chunk, pre_cooked_sha
 
 	physics3d._state.shape_owner[uintptr(new_shape)] = vol.owner
 
-	// Always remove and destroy the old static Jolt body before adding the updated shape
-	// so Jolt's ContactManager purges 100% of cached sub-shape contact manifolds from the pre-blast geometry!
-	if physics3d.is_body_valid(ch.static_body) {
-		if jolt.BodyInterface_IsAdded(bi, ch.static_body) {
-			jolt.BodyInterface_RemoveBody(bi, ch.static_body)
-		}
-		jolt.BodyInterface_DestroyBody(bi, ch.static_body)
-		ch.static_body = 0
-	}
-	if ch.jolt_shape != nil && ch.jolt_shape != new_shape {
-		delete_key(&physics3d._state.shape_owner, uintptr(ch.jolt_shape))
-		jolt.Shape_Destroy(ch.jolt_shape)
-	}
-	ch.jolt_shape = new_shape
-
 	pos := tw.position
 	rot := transmute(jolt.Quat)tw.rotation
-	bcs := jolt.BodyCreationSettings_Create3(
-		ch.jolt_shape,
-		&pos,
-		&rot,
-		.Static,
-		physics3d.LAYER_NON_MOVING,
-	)
-	if bcs != nil {
-		jolt.BodyCreationSettings_SetFriction(bcs, 0.75)
-		jolt.BodyCreationSettings_SetRestitution(bcs, 0.10)
-		jolt.BodyCreationSettings_SetUserData(bcs, transmute(u64)engine.Handle(vol.owner))
-		ch.static_body = jolt.BodyInterface_CreateAndAddBody(bi, bcs, .DontActivate)
-		jolt.BodyCreationSettings_Destroy(bcs)
+	if physics3d.is_body_valid(ch.static_body) && jolt.BodyInterface_IsAdded(bi, ch.static_body) {
+		old_shape := ch.jolt_shape
+		ch.jolt_shape = new_shape
+		jolt.BodyInterface_SetShape(bi, ch.static_body, new_shape, false, .Activate)
+		jolt.BodyInterface_InvalidateContactCache(bi, ch.static_body)
+		jolt.BodyInterface_SetPositionAndRotationWhenChanged(bi, ch.static_body, &pos, &rot, .Activate)
+		if old_shape != nil && old_shape != new_shape {
+			delete_key(&physics3d._state.shape_owner, uintptr(old_shape))
+			jolt.Shape_Destroy(old_shape)
+		}
+	} else {
+		if physics3d.is_body_valid(ch.static_body) {
+			jolt.BodyInterface_DestroyBody(bi, ch.static_body)
+			ch.static_body = 0
+		}
+		if ch.jolt_shape != nil && ch.jolt_shape != new_shape {
+			delete_key(&physics3d._state.shape_owner, uintptr(ch.jolt_shape))
+			jolt.Shape_Destroy(ch.jolt_shape)
+		}
+		ch.jolt_shape = new_shape
+
+		bcs := jolt.BodyCreationSettings_Create3(
+			ch.jolt_shape,
+			&pos,
+			&rot,
+			.Static,
+			physics3d.LAYER_NON_MOVING,
+		)
+		if bcs != nil {
+			jolt.BodyCreationSettings_SetFriction(bcs, 0.75)
+			jolt.BodyCreationSettings_SetRestitution(bcs, 0.10)
+			jolt.BodyCreationSettings_SetUserData(bcs, transmute(u64)engine.Handle(vol.owner))
+			ch.static_body = jolt.BodyInterface_CreateAndAddBody(bi, bcs, .DontActivate)
+			jolt.BodyCreationSettings_Destroy(bcs)
+		}
 	}
+	wmin, wmax := _chunk_world_bounds(ch, tw)
+	engine.navmesh_notify_geometry_changed(wmin, wmax)
 	ch.dirty_physics = false
 }
 
@@ -3054,8 +3128,10 @@ _ensure_worker_started :: proc() {
 	sync.lock(&_worker_state.mutex)
 	defer sync.unlock(&_worker_state.mutex)
 	if _worker_state.running do return
+	prev := context.allocator
 	alloc := runtime.default_allocator()
 	context.allocator = alloc
+	defer context.allocator = prev
 	_worker_state.pending_jobs = make([dynamic]CSG_Async_Blast_Job, alloc)
 	_worker_state.results = make([dynamic]CSG_Async_Blast_Result, alloc)
 	_worker_state.blast_fx = make([dynamic]CSG_Blast_FX, alloc)
@@ -3434,6 +3510,11 @@ csg_trigger_blast :: proc(
 		delete(pd.hulls)
 	}
 
+	if touched_count > 0 {
+		pad := [3]f32{radius + 0.5, radius + 0.5, radius + 0.5}
+		engine.nav_quarantine_begin(world_pos - pad, world_pos + pad, 0.45, world_pos, radius)
+	}
+
 	return touched_count
 }
 
@@ -3623,6 +3704,8 @@ csg_drain_completed_results :: proc() {
 
 			// Repack combined GPU mesh for the volume
 			csg_volume_repack_gpu_mesh(vol)
+			rpad := [3]f32{res.blast_radius + 1.0, res.blast_radius + 1.0, res.blast_radius + 1.0}
+			engine.navmesh_notify_geometry_changed(res.world_blast_pos - rpad, res.world_blast_pos + rpad)
 		}
 
 		// Wake up any sleeping Jolt rigidbodies inside the blast AABB so crates/ragdolls fall into the new crater!
@@ -3873,4 +3956,43 @@ csg_shutdown :: proc() {
 		}
 		_worker_state.running = false
 	}
+	prev := context.allocator
+	alloc := runtime.default_allocator()
+	context.allocator = alloc
+	defer context.allocator = prev
+
+	for &job in _worker_state.pending_jobs {
+		for &ci in job.touched_chunks {
+			for &h in ci.destructible_hulls do convex_destroy(&h)
+			delete(ci.destructible_hulls)
+			for &h in ci.indestructible_hulls do convex_destroy(&h)
+			delete(ci.indestructible_hulls)
+			if ci.voxel_grid != nil do csg_voxel_grid_free(ci.voxel_grid, alloc)
+		}
+		delete(job.touched_chunks)
+	}
+	for &res in _worker_state.results {
+		for &co in res.chunk_outputs {
+			for &h in co.destructible_hulls do convex_destroy(&h)
+			delete(co.destructible_hulls)
+			for &h in co.indestructible_hulls do convex_destroy(&h)
+			delete(co.indestructible_hulls)
+			if co.voxel_grid != nil do csg_voxel_grid_free(co.voxel_grid, alloc)
+			for &h in co.detached_islands do convex_destroy(&h)
+			delete(co.detached_islands)
+			delete(co.verts)
+			delete(co.indices)
+			delete(co.submeshes)
+			if co.cooked_shape != nil do jolt.Shape_Destroy(co.cooked_shape)
+		}
+		delete(res.chunk_outputs)
+	}
+	delete(_worker_state.pending_jobs)
+	_worker_state.pending_jobs = nil
+	delete(_worker_state.results)
+	_worker_state.results = nil
+	delete(_worker_state.blast_fx)
+	_worker_state.blast_fx = nil
+	delete(_worker_state.debris_list)
+	_worker_state.debris_list = nil
 }

@@ -227,3 +227,32 @@ record_reorder_components :: proc(owner_tH: engine.Transform_Handle, from, to: i
 	}
 	push(s, Command(Structural_Command(cmd)))
 }
+
+// Ensures `key` exists on `tH` and returns its component data pointer. If the component is
+// newly added, invokes `init(ptr)` before recording the undo step.
+record_ensure_component :: proc(tH: engine.Transform_Handle, key: engine.TypeKey, init: proc(ptr: rawptr) = nil) -> rawptr {
+	w := engine.ctx_world()
+	if w == nil do return nil
+	t := engine.pool_get(&w.transforms, engine.Handle(tH))
+	if t == nil do return nil
+	if existing, idx := engine.transform_find_comp(t, key); idx >= 0 {
+		return engine.world_pool_get(w, existing.handle)
+	}
+	owned, ptr := engine.transform_add_comp(tH, key)
+	if ptr == nil do return nil
+	if init != nil do init(ptr)
+	record_add_component(tH, owned.handle, len(t.components) - 1)
+	return ptr
+}
+
+// Creates a Canvas root object at the active scene root with `.Canvas` and `.GraphicRaycaster`.
+record_create_ui_canvas :: proc() -> engine.Transform_Handle {
+	scene := engine.sm_scene_get_active()
+	if scene == nil do return {}
+	tH := record_create_child("Canvas", engine.Transform_Handle(scene.root.handle))
+	if tH != {} {
+		record_ensure_component(tH, .Canvas)
+		record_ensure_component(tH, .GraphicRaycaster)
+	}
+	return tH
+}

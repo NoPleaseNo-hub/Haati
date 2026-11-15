@@ -158,9 +158,18 @@ game_label_pos :: proc(v: engine.Render_View, img_min, img_size: [2]f32, l: engi
 	return p + l.offset_px, true
 }
 
+MAX_GAME_RT_DIM :: i32(4096)
+
 render_game_rt :: proc(w, h: i32) -> bool {
-	if w < 1 || h < 1 do return false
-	gfx.rt_resize(game_rt, w, h)
+	if w < 1 || h < 1 || game_rt == nil do return false
+	rt_w := w
+	rt_h := h
+	if rt_w > MAX_GAME_RT_DIM || rt_h > MAX_GAME_RT_DIM {
+		s := min(f32(MAX_GAME_RT_DIM) / f32(rt_w), f32(MAX_GAME_RT_DIM) / f32(rt_h))
+		rt_w = max(i32(f32(rt_w) * s), 1)
+		rt_h = max(i32(f32(rt_h) * s), 1)
+	}
+	gfx.rt_resize(game_rt, rt_w, rt_h)
 	had_camera := engine.camera_active() != nil
 	// Begins the pass (black clear when no camera) and leaves it open.
 	engine.render_world_cameras(game_rt)
@@ -279,7 +288,11 @@ draw_game_view :: proc() {
 			// on both sides, matching Unity.
 			offset := im.Vec2{max((area.x - avail.x) * 0.5, 0), max((area.y - avail.y) * 0.5, 0)}
 			im.SetCursorScreenPos(area_min + offset)
-			im.Image(im.TextureRef{_TexID = tex_id}, avail)
+			if tex_id != 0 {
+				im.Image(im.TextureRef{_TexID = tex_id}, avail)
+			} else {
+				im.Dummy(avail)
+			}
 
 			// The image is the game's screen: mouse coordinates are relative
 			// to it and its size is what the game unprojects with. In MAIN
@@ -328,7 +341,7 @@ draw_game_view :: proc() {
 				im.DrawList_AddRectFilled(im.GetWindowDrawList(), rect_min, rect_max, 0x99333333, 4)
 				im.SetCursorScreenPos(text_pos)
 				im.PushStyleColorImVec4(.Text, im.Vec4{1, 1, 1, 1})
-				im.Text(msg)
+				im.TextUnformatted(msg)
 				im.PopStyleColor()
 			}
 		}

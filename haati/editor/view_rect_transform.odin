@@ -276,7 +276,7 @@ _rt_draw_position_block :: proc(driven: bool) {
 	widgets.tooltip("Anchor presets")
 	anchors_mixed := false
 	for t in _rt_targets[1:] do if t.rt.anchor_min != rt.anchor_min || t.rt.anchor_max != rt.anchor_max do anchors_mixed = true
-	_rt_anchor_icon(im.GetWindowDrawList(), btn_pos, btn, rt.anchor_min, rt.anchor_max, im.IsItemHovered() || im.IsItemActive(), false, anchors_mixed)
+	draw_anchor_preset_icon(im.GetWindowDrawList(), btn_pos, btn, rt.anchor_min, rt.anchor_max, im.IsItemHovered() || im.IsItemActive(), false, anchors_mixed)
 	block_top := btn_pos.y - (block_h - btn) * 0.5
 
 	// Three columns of label-over-field, right of the label column. Grouped so
@@ -479,12 +479,29 @@ rect_transform_covers_selection :: proc(active: engine.Transform_Handle, sel: []
 @(private = "file") _RT_PRESET_H_NAMES := [4]cstring{"left", "center", "right", "stretch"}
 @(private = "file") _RT_PRESET_V_NAMES := [4]cstring{"top", "middle", "bottom", "stretch"}
 @(private = "file") _RT_PRESET_CELL :: f32(46) // 1.15x larger (was 40) for easier clicking
+@(private = "file") _RT_PRESET_ENUMS := [4][4]engine.UI_Anchor_Preset{
+	{.Top_Left, .Top_Center, .Top_Right, .Top_Stretch},
+	{.Middle_Left, .Center, .Middle_Right, .Middle_Stretch},
+	{.Bottom_Left, .Bottom_Center, .Bottom_Right, .Bottom_Stretch},
+	{.Left_Stretch, .Center_Stretch, .Right_Stretch, .Full_Stretch},
+}
 
-@(private = "file")
-_rt_draw_anchor_presets_popup :: proc() {
-	if !im.BeginPopup("##rt_anchor_presets") do return
-	defer im.EndPopup()
-	rt := _rt_targets[0].rt
+Anchor_Preset_Pick_Proc :: #type proc(
+	user_data: rawptr,
+	row, col: int,
+	preset: engine.UI_Anchor_Preset,
+	amin, amax: [2]f32,
+	set_pivot, set_position: bool,
+)
+
+// Shared 4x4 anchor preset grid popup content used by both RectTransform Inspector
+// and Scene 2D toolbar.
+draw_anchor_presets_grid :: proc(
+	current_rt: ^engine.RectTransform,
+	hint_text: cstring,
+	on_pick: Anchor_Preset_Pick_Proc,
+	user_data: rawptr = nil,
+) {
 	io := im.GetIO()
 	style := im.GetStyle()
 	cell := _RT_PRESET_CELL
@@ -497,29 +514,45 @@ _rt_draw_anchor_presets_popup :: proc() {
 		name := _RT_PRESET_H_NAMES[c]
 		tw := im.CalcTextSize(name).x
 		im.SetCursorScreenPos({origin.x + label_w + f32(c) * (cell + style.ItemSpacing.x) + (cell - tw) * 0.5, origin.y})
-		im.TextDisabled(name)
+		im.TextDisabledUnformatted(name)
 	}
 	grid_top := origin.y + im.GetTextLineHeight() + style.ItemSpacing.y
 	for r in 0 ..< 4 {
 		y := grid_top + f32(r) * (cell + style.ItemSpacing.y)
 		im.SetCursorScreenPos({origin.x, y + (cell - im.GetTextLineHeight()) * 0.5})
-		im.TextDisabled(_RT_PRESET_V_NAMES[r])
+		im.TextDisabledUnformatted(_RT_PRESET_V_NAMES[r])
 		for c in 0 ..< 4 {
 			p := im.Vec2{origin.x + label_w + f32(c) * (cell + style.ItemSpacing.x), y}
 			im.SetCursorScreenPos(p)
 			amin := [2]f32{_RT_PRESET_H[c][0], _RT_PRESET_V[r][0]}
 			amax := [2]f32{_RT_PRESET_H[c][1], _RT_PRESET_V[r][1]}
 			clicked := im.InvisibleButton(fmt.ctprintf("##rt_preset_%d_%d", r, c), {cell, cell})
-			current := rt.anchor_min == amin && rt.anchor_max == amax
-			_rt_anchor_icon(dl, p, cell, amin, amax, im.IsItemHovered(), current, false)
+			current := current_rt != nil && current_rt.anchor_min == amin && current_rt.anchor_max == amax
+			draw_anchor_preset_icon(dl, p, cell, amin, amax, im.IsItemHovered(), current, false)
 			if clicked {
-				_rt_apply_preset(amin, amax, c == 3, r == 3, io.KeyShift, io.KeyAlt)
+				if on_pick != nil {
+					on_pick(user_data, r, c, _RT_PRESET_ENUMS[r][c], amin, amax, io.KeyShift, io.KeyAlt)
+				}
 				im.CloseCurrentPopup()
 			}
 		}
 	}
 	im.SetCursorScreenPos({origin.x, grid_top + 4 * (cell + style.ItemSpacing.y)})
-	im.TextDisabled("Shift: also set pivot   Alt: also set position")
+	if hint_text != nil {
+		im.TextDisabledUnformatted(hint_text)
+	}
+}
+
+@(private = "file")
+_rt_on_pick_preset :: proc(_: rawptr, row, col: int, _: engine.UI_Anchor_Preset, amin, amax: [2]f32, set_pivot, set_position: bool) {
+	_rt_apply_preset(amin, amax, col == 3, row == 3, set_pivot, set_position)
+}
+
+@(private = "file")
+_rt_draw_anchor_presets_popup :: proc() {
+	if !im.BeginPopup("##rt_anchor_presets") do return
+	defer im.EndPopup()
+	draw_anchor_presets_grid(_rt_targets[0].rt, "Shift: also set pivot   Alt: also set position", _rt_on_pick_preset)
 }
 
 // Alt (also set position) puts the rect onto the anchors: position zero, and
@@ -549,8 +582,7 @@ _rt_apply_preset :: proc(amin, amax: [2]f32, stretch_x, stretch_y, set_pivot, se
 // The anchor icon: the parent as an outline, the anchors as a filled mark
 // inside it. A coinciding pair on an axis is a short mark at that fraction,
 // a separated pair a bar between the two. `mixed` draws the outline only.
-@(private = "file")
-_rt_anchor_icon :: proc(dl: ^im.DrawList, p: im.Vec2, size: f32, amin, amax: [2]f32, hot, current, mixed: bool) {
+draw_anchor_preset_icon :: proc(dl: ^im.DrawList, p: im.Vec2, size: f32, amin, amax: [2]f32, hot, current, mixed: bool) {
 	inset := size * 0.18
 	inner := size - 2 * inset
 	q0 := im.Vec2{p.x + inset, p.y + inset}

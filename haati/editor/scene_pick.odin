@@ -146,25 +146,10 @@ scene_view_pick_all :: proc(view: engine.Render_View, px, py: f32) -> []Scene_Hi
 		}
 	}
 
-	// UI: every drawn graphic's rect where the canvas sits in 3D world space
-	// (WorldSpace or ScreenSpaceCamera; 2D Overlay canvases are picked in Scene 2D).
-	nodes := make([dynamic]engine.Node_Rect, context.temp_allocator)
-	cv_it := engine.pool_iterator(engine.canvases(w))
-	for canvas, _ in engine.pool_next(&cv_it) {
-		if !canvas.enabled || !engine.transform_active_in_hierarchy(canvas.owner) do continue
-		_, _, in_world := engine.canvas_placement(canvas.owner, engine.canvas_game_viewport())
-		if !in_world do continue
-		clear(&nodes)
-		engine.canvas_resolve_placed(canvas.owner, &nodes)
-		for n in nodes {
-			_, cr := engine.transform_get_comp(n.tH, engine.CanvasRenderer)
-			if cr == nil || !cr.enabled do continue
-			if _, _, _, ok := engine.node_graphic(n.tH); !ok do continue
-			c := engine.rect_corners(n.rect, n.xform)
-			for tri in ([2][3]int{{0, 1, 2}, {0, 2, 3}}) {
-				if t, hit := engine.ray_hit_triangle(ray, c[tri[0]], c[tri[1]], c[tri[2]]); hit {
-					append(&geo, Scene_Hit{n.tH, t})
-				}
+	for q in _collect_world_canvas_quads(w) {
+		for tri in ([2][3]int{{0, 1, 2}, {0, 2, 3}}) {
+			if t, hit := engine.ray_hit_triangle(ray, q.corners[tri[0]], q.corners[tri[1]], q.corners[tri[2]]); hit {
+				append(&geo, Scene_Hit{q.tH, t})
 			}
 		}
 	}
@@ -181,6 +166,50 @@ scene_view_pick_all :: proc(view: engine.Render_View, px, py: f32) -> []Scene_Hi
 	for h in icons do _add_hit(&out, h)
 	for h in geo do _add_hit(&out, h)
 	return out[:]
+}
+
+@(private = "file")
+_World_UI_Quad :: struct {
+	tH:      engine.Transform_Handle,
+	corners: [4][3]f32,
+}
+
+// Shared helper collecting world-space / ScreenSpaceCamera UI graphic quads once per query.
+@(private = "file")
+_collect_world_canvas_quads :: proc(w: ^engine.World) -> []_World_UI_Quad {
+	out := make([dynamic]_World_UI_Quad, context.temp_allocator)
+	nodes := make([dynamic]engine.Node_Rect, context.temp_allocator)
+	cv_it := engine.pool_iterator(engine.canvases(w))
+	for canvas, _ in engine.pool_next(&cv_it) {
+		if !canvas.enabled || !engine.transform_active_in_hierarchy(canvas.owner) do continue
+		_, _, in_world := engine.canvas_placement(canvas.owner, engine.canvas_game_viewport())
+		if !in_world do continue
+		clear(&nodes)
+		engine.canvas_resolve_placed(canvas.owner, &nodes)
+		for n in nodes {
+			_, cr := engine.transform_get_comp(n.tH, engine.CanvasRenderer)
+			if cr == nil || !cr.enabled do continue
+			if _, _, _, ok := engine.node_graphic(n.tH); !ok do continue
+			append(&out, _World_UI_Quad{
+				tH      = n.tH,
+				corners = engine.rect_corners(n.rect, n.xform),
+			})
+		}
+	}
+	return out[:]
+}
+
+@(private = "file")
+_aabb_corners :: proc(lo, hi: [3]f32) -> [8][3]f32 {
+	corners: [8][3]f32
+	for k in 0 ..< 8 {
+		corners[k] = {
+			k & 1 == 0 ? lo.x : hi.x,
+			k & 2 == 0 ? lo.y : hi.y,
+			k & 4 == 0 ? lo.z : hi.z,
+		}
+	}
+	return corners
 }
 
 // Appends `h` unless its object is listed: an object hit twice (both
@@ -205,22 +234,8 @@ scene_view_band_query :: proc(view: engine.Render_View, rmin, rmax: [2]f32) -> [
 		if _rect_hits_points(view, rmin, rmax, q.corners[:]) do append(&out, c.owner)
 	}
 
-	// UI: every drawn graphic's rect for 3D in-world canvases (WorldSpace / ScreenSpaceCamera).
-	nodes := make([dynamic]engine.Node_Rect, context.temp_allocator)
-	cv_it := engine.pool_iterator(engine.canvases(w))
-	for canvas, _ in engine.pool_next(&cv_it) {
-		if !canvas.enabled || !engine.transform_active_in_hierarchy(canvas.owner) do continue
-		_, _, in_world := engine.canvas_placement(canvas.owner, engine.canvas_game_viewport())
-		if !in_world do continue
-		clear(&nodes)
-		engine.canvas_resolve_placed(canvas.owner, &nodes)
-		for n in nodes {
-			_, cr := engine.transform_get_comp(n.tH, engine.CanvasRenderer)
-			if cr == nil || !cr.enabled do continue
-			if _, _, _, ok := engine.node_graphic(n.tH); !ok do continue
-			c := engine.rect_corners(n.rect, n.xform)
-			if _rect_hits_points(view, rmin, rmax, c[:]) do append(&out, n.tH)
-		}
+	for &q in _collect_world_canvas_quads(w) {
+		if _rect_hits_points(view, rmin, rmax, q.corners[:]) do append(&out, q.tH)
 	}
 
 	mr_it := engine.pool_iterator(engine.mesh_renderers(w))
@@ -233,16 +248,10 @@ scene_view_band_query :: proc(view: engine.Render_View, rmin, rmax: [2]f32) -> [
 		if !ok do continue
 		tw := engine.transform_world(engine.Transform_Handle(mr.owner))
 		model := engine.trs_matrix(tw.position, tw.rotation, tw.scale)
-		lo, hi := mesh.aabb_min, mesh.aabb_max
-		corners: [8][3]f32
+		corners := _aabb_corners(mesh.aabb_min, mesh.aabb_max)
 		for k in 0 ..< 8 {
-			local := [4]f32{
-				k & 1 == 0 ? lo.x : hi.x,
-				k & 2 == 0 ? lo.y : hi.y,
-				k & 4 == 0 ? lo.z : hi.z,
-				1,
-			}
-			corners[k] = (model * local).xyz
+			c := corners[k]
+			corners[k] = (model * [4]f32{c.x, c.y, c.z, 1}).xyz
 		}
 		if _rect_hits_points(view, rmin, rmax, corners[:]) {
 			append(&out, engine.Transform_Handle(mr.owner))
@@ -257,14 +266,7 @@ scene_view_band_query :: proc(view: engine.Render_View, rmin, rmax: [2]f32) -> [
 		if !engine.transform_active_in_hierarchy(smr.owner) do continue
 		lo, hi, ok := engine.skinned_mesh_world_bounds(smr)
 		if !ok do continue
-		corners: [8][3]f32
-		for k in 0 ..< 8 {
-			corners[k] = {
-				k & 1 == 0 ? lo.x : hi.x,
-				k & 2 == 0 ? lo.y : hi.y,
-				k & 4 == 0 ? lo.z : hi.z,
-			}
-		}
+		corners := _aabb_corners(lo, hi)
 		if _rect_hits_points(view, rmin, rmax, corners[:]) {
 			append(&out, engine.Transform_Handle(smr.owner))
 		}

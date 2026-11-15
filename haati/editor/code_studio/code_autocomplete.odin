@@ -18,8 +18,6 @@ import "base:runtime"
 import "core:fmt"
 import "core:mem"
 import "core:odin/ast"
-import "core:odin/parser"
-import "core:odin/tokenizer"
 import "core:os"
 import "core:path/filepath"
 import "core:slice"
@@ -94,9 +92,6 @@ _AC_Worker_State :: struct {
 
 @(private = "file")
 _ac: _AC_Worker_State
-
-@(private = "file")
-_ac_silent_err :: proc(_pos: tokenizer.Pos, _fmt: string, _args: ..any) {}
 
 @(private = "file")
 _free_indexed_symbol :: proc(s: Indexed_Symbol) {
@@ -258,23 +253,7 @@ parse_buffer_symbols_in_ram :: proc(
 	mem.dynamic_arena_init(&arena)
 	defer mem.dynamic_arena_destroy(&arena)
 
-	wrapped := is_scoped_body \
-		? strings.concatenate({"package _mh_ac\n_mh_body :: proc(api: ^hot.Engine_Hot_API, self: hot.Hot_Entity, dt: f32) {\n", code, "\n}\n"}, mem.dynamic_arena_allocator(&arena)) \
-		: code
-
-	f := ast.File{
-		src      = wrapped,
-		fullpath = "ac_buffer.odin",
-	}
-	p := parser.Parser{
-		err   = _ac_silent_err,
-		warn  = _ac_silent_err,
-		flags = {.Optional_Semicolons},
-	}
-	{
-		context.allocator = mem.dynamic_arena_allocator(&arena)
-		_ = parser.parse_file(&p, &f)
-	}
+	f, _, wrapped := parse_odin_in_arena(code, "ac_buffer.odin", is_scoped_body, &arena)
 
 	out := make([dynamic]Indexed_Symbol, 0, 32, allocator)
 	ltypes := make(map[string]string, 16, allocator)
@@ -408,8 +387,15 @@ _index_package_dir_symbols :: proc(pkg_dir: string, allocator := context.temp_al
 	out := make([dynamic]Indexed_Symbol, 0, 64, allocator)
 	if pkg_dir == "" do return out[:]
 
-	repo_root := engine.resolve_repo_root(context.temp_allocator)
-	abs_dir, _ := filepath.join({repo_root, pkg_dir}, context.temp_allocator)
+	abs_dir := pkg_dir
+	if !filepath.is_abs(pkg_dir) {
+		repo_root := engine.engine_root(context.temp_allocator)
+		if repo_root == "" {
+			repo_root = engine.resolve_repo_root(context.temp_allocator)
+		}
+		abs_dir, _ = filepath.join({repo_root, pkg_dir}, context.temp_allocator)
+	}
+	if !os.is_dir(abs_dir) do return out[:]
 	entries, err := os.read_all_directory_by_path(abs_dir, context.temp_allocator)
 	if err != nil do return out[:]
 
@@ -696,41 +682,14 @@ submit_async_autocomplete_index :: proc(code: string, is_scoped_body: bool, pkg_
 // Caret Prefix & Dot-Receiver Extractor + Fuzzy Matcher
 // =============================================================================
 
-@(private = "file")
-_is_ident_char :: #force_inline proc(c: byte) -> bool {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
-}
-
 // Extracts `receiver` (if right after `ident.`) and `prefix` before `cursor_pos`.
 extract_completion_context :: proc(src: string, cursor_pos: int) -> (receiver: string, prefix: string, replace_start: int) {
 	pos := clamp(cursor_pos, 0, len(src))
 	start := pos
-	for start > 0 && _is_ident_char(src[start - 1]) {
+	for start > 0 && is_odin_ident_char(src[start - 1]) {
 		start -= 1
 	}
-	prefix = src[start:pos]
-	replace_start = start
-
-	// Check for `receiver.` or `receiver^.` immediately preceding `start`
-	dot_idx := start - 1
-	if dot_idx >= 0 && src[dot_idx] == '.' {
-		// Guard against `..` / `..<` range operator!
-		if dot_idx > 0 && src[dot_idx - 1] == '.' {
-			return "", prefix, replace_start
-		}
-		rec_end := dot_idx
-		if rec_end > 0 && src[rec_end - 1] == '^' {
-			rec_end -= 1
-		}
-		rec_start := rec_end
-		for rec_start > 0 && _is_ident_char(src[rec_start - 1]) {
-			rec_start -= 1
-		}
-		if rec_end > rec_start {
-			receiver = src[rec_start:rec_end]
-		}
-	}
-	return receiver, prefix, replace_start
+	return extract_dot_receiver_before(src, start), src[start:pos], start
 }
 
 // Fuzzy matcher returning `> 0` when `pattern` is a prefix or camel/snake subsequence of `candidate`.
@@ -1318,22 +1277,14 @@ extract_call_tip_info :: proc(src: string, cursor_pos: int, allocator := context
 		fn_end -= 1
 	}
 	fn_start := fn_end
-	for fn_start > 0 && _is_ident_char(src[fn_start - 1]) {
+	for fn_start > 0 && is_odin_ident_char(src[fn_start - 1]) {
 		fn_start -= 1
 	}
 	if fn_end <= fn_start do return {}, false
 	callee := src[fn_start:fn_end]
 	if callee == "if" || callee == "for" || callee == "switch" || callee == "proc" do return {}, false
 
-	rec := ""
-	if fn_start > 1 && src[fn_start - 1] == '.' {
-		r_end := fn_start - 1
-		r_start := r_end
-		for r_start > 0 && _is_ident_char(src[r_start - 1]) {
-			r_start -= 1
-		}
-		if r_end > r_start do rec = src[r_start:r_end]
-	}
+	rec := extract_dot_receiver_before(src, fn_start)
 
 	sig := ""
 	for b in _BUILTIN_ENTRIES {

@@ -22,6 +22,8 @@ import "core:strings"
 
 VERSION :: "1.0.0"
 
+g_cli_args: []string
+
 Command :: struct {
 	name:    string,
 	summary: string,
@@ -36,7 +38,7 @@ COMMANDS := []Command {
 	{"setup", "build the vendored Odin libraries this repo links against", cmd_setup, false},
 	{"run", "build and launch the editor", cmd_run, true},
 	{"debug", "build with -debug and launch the editor", cmd_debug, true},
-	{"build", "build the editor without launching it (--debug, --console)", cmd_build, true},
+	{"build", "build the editor without launching it (-debug on by default; pass --release to strip symbols, --console)", cmd_build, true},
 	{"check", "type-check with compiler ground truth (--fast, --json, --pkg=dir)", cmd_check, true},
 	{"hot", "build hot-swappable gameplay cartridge DLL (--out=path, --fast)", cmd_hot, true},
 	{"overwatch", "build the out-of-process Overwatch flight recorder", cmd_overwatch, true},
@@ -61,8 +63,10 @@ main :: proc() {
 		if c.name == name {
 			if c.in_repo {
 				if !chdir_repo_root() do os.exit(1)
+				_ = sweep_stale_compile_mount()
 				refresh_odin_stamp()
 			}
+			g_cli_args = args[1:]
 			os.exit(c.run(args[1:]))
 		}
 	}

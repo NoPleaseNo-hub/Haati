@@ -14,6 +14,7 @@ package mcp_shim
 // Run from the repo root (the bridge file path is root-relative); an
 // explicit path to mcp_bridge.json may be passed as the only argument.
 
+import "base:runtime"
 import "core:encoding/json"
 import "core:fmt"
 import "core:net"
@@ -41,6 +42,7 @@ _shim: struct {
 // back empty. The watcher polls for the bridge and pushes tools/list_changed
 // the moment the editor appears, so the client re-lists without a reconnect.
 _watch_editor :: proc(_: ^thread.Thread) {
+	context.allocator = runtime.default_allocator()
 	for {
 		time.sleep(2 * time.Second)
 		notify := false
@@ -53,17 +55,19 @@ _watch_editor :: proc(_: ^thread.Thread) {
 		if notify {
 			_out(`{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}`)
 		}
+		free_all(context.temp_allocator)
 	}
 }
 
 main :: proc() {
 	_shim.bridge_path = mcp.BRIDGE_FILE_FROM_ROOT
 	if len(os.args) > 1 do _shim.bridge_path = os.args[1]
+	_shim.fb.data = make([dynamic]u8, 0, 0, runtime.default_allocator())
 
 	watcher := thread.create(_watch_editor)
 	thread.start(watcher)
 
-	stdin_buf := make([dynamic]u8)
+	stdin_buf := make([dynamic]u8, 0, 0, runtime.default_allocator())
 	chunk: [65536]u8
 	for {
 		n, rerr := os.read(os.stdin, chunk[:])

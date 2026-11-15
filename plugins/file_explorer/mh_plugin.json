@@ -1,6 +1,0 @@
-{
-  "name": "file_explorer",
-  "guid": "b7e21a4f-5612-4c99-a318-9d8a1e2f7301",
-  "description": "Godot & UE5 style Content Browser & File Explorer with Grid/List views, Quick Access, and OS integration",
-  "dependencies": ["audio", "cad_csg", "control_rig", "editor_visuals", "essentials", "physics3d"]
-}

@@ -55,12 +55,15 @@ void main() {
         vec3 to_light = -L;
         float diffuse = max(dot(n, to_light), 0.0);
         float atten = light_attenuation(l, L, dist);
-        float shadow = eval_light_shadow(0, l, frag_world_pos, n, L, diffuse);
-        light += l.color_outer.rgb * ((1.0 - ambient) * diffuse * atten * shadow);
+        float shadow = 1.0;
+        if (diffuse > 0.0 && atten > 1e-4) {
+            shadow = eval_light_shadow(0, l, frag_world_pos, n, L, diffuse);
+            light += l.color_outer.rgb * (diffuse * atten * shadow);
 
-        vec3 half_dir = normalize(to_light + to_cam);
-        float spec = pow(max(dot(n, half_dir), 0.0), shiny) * step(0.0, diffuse);
-        spec_contrib = l.color_outer.rgb * sc.rgb * (spec * clamp(sc.a, 0.0, 1.0) * atten * shadow);
+            vec3 half_dir = normalize(to_light + to_cam);
+            float spec = pow(max(dot(n, half_dir), 0.0), shiny);
+            spec_contrib = l.color_outer.rgb * sc.rgb * (spec * clamp(sc.a, 0.0, 1.0) * atten * shadow);
+        }
     }
 
     vec4 base = texture(tex, frag_uv) * frag_color;

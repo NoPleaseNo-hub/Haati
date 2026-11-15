@@ -8,6 +8,7 @@ import "core:path/filepath"
 import "core:encoding/uuid"
 import strings "core:strings"
 import im "haati:external/odin-imgui"
+import thm "haati:editor/theme"
 import "haati:editor/widgets"
 import ser "../../engine/serialization"
 import engine "../../engine"
@@ -293,48 +294,64 @@ save_to_file :: proc() {
     }
 }
 
-// p_open: the editor's show flag, so the dock tab's X can close the window
-// (the menu package imports this one, so the flag is passed in).
+// p_open / lock state for unified asset inspection inside Void Inspector.
+@(private = "file")
+_locked: bool
+
 // Preview pane's share of the window height, dragged via the splitter
 // (the console/history splitter pattern).
 _preview_split_ratio: f32 = 0.3
 
-view_inspector_draw :: proc(p_open: ^bool) {
-    if im.Begin(icons.TITLE_PROJECT_INSPECTOR, p_open, {.NoCollapse}) {
-        // A registered preview pins to the window's bottom — the mode content
-        // scrolls in a child above it.
-        preview := _asset_preview_drawer()
-        avail := im.GetContentRegionAvail()
-        split_total := avail.y - widgets.SPLITTER_SIZE
-        MIN_PANE :: f32(60)
-        preview_h, body_h: f32
-        if preview != nil {
-            preview_h = split_total * _preview_split_ratio
-            if preview_h < MIN_PANE do preview_h = MIN_PANE
-            if preview_h > split_total - MIN_PANE do preview_h = split_total - MIN_PANE
-            body_h = split_total - preview_h
-            im.BeginChild("##inspector_body", {0, body_h})
-        }
-        switch inspectorData.mode {
-        case .Asset:
-            _draw_asset_inspector()
-        case .ImportSettings:
-            _draw_import_settings_inspector()
-        case .Package:
-            _draw_package_inspector()
-        }
-        if preview != nil {
-            im.EndChild()
+has_selected_asset :: proc() -> bool {
+    return inspectorData.filePath != "" || inspectorData.packageName != ""
+}
 
-            if widgets.splitter("##preview_split", false, &body_h, &preview_h, MIN_PANE, MIN_PANE) {
-                _preview_split_ratio = preview_h / split_total
-            }
+is_locked :: proc() -> bool {
+    return _locked
+}
 
-            im.SeparatorText("Preview")
-            preview(inspectorData.filePath)
-        }
+set_locked :: proc(locked: bool) {
+    _locked = locked
+}
+
+// Renders the active asset / import-settings / package inspector and bottom
+// preview pane inside the host Void Inspector window.
+draw_selected_asset_inspector :: proc() {
+    // A registered preview pins to the window's bottom — the mode content
+    // scrolls in a child above it.
+    preview := _asset_preview_drawer()
+    avail := im.GetContentRegionAvail()
+    split_total := avail.y - widgets.SPLITTER_SIZE
+    MIN_PANE :: f32(60)
+    preview_h, body_h: f32
+    if preview != nil && split_total > MIN_PANE * 2 {
+        preview_h = split_total * _preview_split_ratio
+        if preview_h < MIN_PANE do preview_h = MIN_PANE
+        if preview_h > split_total - MIN_PANE do preview_h = split_total - MIN_PANE
+        body_h = split_total - preview_h
+        im.BeginChild("##inspector_body", {0, body_h})
     }
-    im.End()
+    switch inspectorData.mode {
+    case .Asset:
+        _draw_asset_inspector()
+    case .ImportSettings:
+        _draw_import_settings_inspector()
+    case .Package:
+        _draw_package_inspector()
+    }
+    if preview != nil && split_total > MIN_PANE * 2 {
+        im.EndChild()
+
+        if widgets.splitter("##preview_split", false, &body_h, &preview_h, MIN_PANE, MIN_PANE) {
+            _preview_split_ratio = preview_h / split_total
+        }
+
+        im.SeparatorText("Preview")
+        preview(inspectorData.filePath)
+    } else if preview != nil {
+        im.SeparatorText("Preview")
+        preview(inspectorData.filePath)
+    }
 }
 
 _asset_preview_drawer :: proc() -> proc(path: string) {
@@ -354,10 +371,9 @@ package_reveal: proc(pkg_name: string, select: bool)
 // Package inspector (docs/Plugins.md): shown when a package is selected in
 // the project view's Packages section (left-pane node or right-pane row).
 _draw_package_inspector :: proc() {
-    tc :: proc(s: string) -> cstring { return strings.clone_to_cstring(s, context.temp_allocator) }
-    im.Text(tc(fmt.tprintf("Package: %s", inspectorData.packageName)))
+    widgets.textf("Package: %s", inspectorData.packageName)
     im.Separator()
-    im.Text(tc(fmt.tprintf("Assets: %d", inspectorData.packageAssetCount)))
+    widgets.textf("Assets: %d", inspectorData.packageAssetCount)
     _draw_package_manifest(&inspectorData.packageManifest)
     if package_samples_draw != nil {
         package_samples_draw(inspectorData.packageName)
@@ -371,16 +387,16 @@ _draw_package_inspector :: proc() {
 // project view, a double click selects it.
 @(private = "file")
 _draw_package_manifest :: proc(m: ^Plugin_Manifest_View) {
-    tc :: proc(s: string) -> cstring { return strings.clone_to_cstring(s, context.temp_allocator) }
+    p := thm.palette()
     if !m.found {
-        im.TextDisabled(tc(fmt.tprintf("No mh_plugin.json (mh deps %s makes it)", inspectorData.packageName)))
+        widgets.text_disabledf("No mh_plugin.json (mh deps %s makes it)", inspectorData.packageName)
         return
     }
     if !m.ok {
-        im.TextColored({1, 0.4, 0.4, 1}, "mh_plugin.json does not parse")
+        im.TextColoredUnformatted(p.status_error, "mh_plugin.json does not parse")
         return
     }
-    if m.description != "" do im.TextWrapped(tc(m.description))
+    if m.description != "" do widgets.text_wrapped(m.description)
     im.Spacing()
 
     missing := 0
@@ -388,10 +404,10 @@ _draw_package_manifest :: proc(m: ^Plugin_Manifest_View) {
     im.SetNextItemOpen(true, .Once)
     label := fmt.tprintf("Dependencies (%d)###pkg_deps", len(m.dependencies))
     if missing > 0 do label = fmt.tprintf("%s Dependencies (%d, %d not installed)###pkg_deps", icons.ICON_MD_WARNING, len(m.dependencies), missing)
-    if im.CollapsingHeader(tc(label)) do _draw_dependency_table("##pkg_deps_table", m.dependencies)
+    if im.CollapsingHeader(widgets.temp_cstr(label)) do _draw_dependency_table("##pkg_deps_table", m.dependencies)
 
     im.SetNextItemOpen(true, .Once)
-    if im.CollapsingHeader(tc(fmt.tprintf("Used by (%d)###pkg_used_by", len(m.used_by)))) do _draw_dependency_table("##pkg_used_by_table", m.used_by)
+    if im.CollapsingHeader(widgets.temp_cstr(fmt.tprintf("Used by (%d)###pkg_used_by", len(m.used_by)))) do _draw_dependency_table("##pkg_used_by_table", m.used_by)
 }
 
 // Name, Compile, Tests, Content: a dot under what needs the row's plugin,
@@ -399,7 +415,6 @@ _draw_package_manifest :: proc(m: ^Plugin_Manifest_View) {
 // (imgui's sort specs).
 @(private = "file")
 _draw_dependency_table :: proc(id: cstring, rows: []Plugin_Dependency) {
-    tc :: proc(s: string) -> cstring { return strings.clone_to_cstring(s, context.temp_allocator) }
     if len(rows) == 0 {
         im.Indent()
         im.TextDisabled("none")
@@ -436,11 +451,11 @@ _draw_dependency_table :: proc(id: cstring, rows: []Plugin_Dependency) {
         if d.installed {
             // Click pings the package's row in the project view, double click
             // selects it.
-            if im.Selectable(tc(fmt.tprintf("%s##dep_%s", d.name, d.name)), false, {.SpanAllColumns, .AllowDoubleClick}) && package_reveal != nil {
+            if im.Selectable(widgets.temp_cstr(fmt.tprintf("%s##dep_%s", d.name, d.name)), false, {.SpanAllColumns, .AllowDoubleClick}) && package_reveal != nil {
                 package_reveal(d.name, im.IsMouseDoubleClicked(.Left))
             }
         } else {
-            im.TextColored({1, 0.75, 0.3, 1}, tc(fmt.tprintf("%s %s", icons.ICON_MD_WARNING, d.name)))
+            widgets.text_coloredf(thm.palette().status_warning, "%s %s", icons.ICON_MD_WARNING, d.name)
             widgets.tooltip("Not installed: what this plugin uses from it will not load. mh setup relinks every committed plugin.")
         }
         if !d.compile && !d.tests && !d.content do widgets.tooltip("Written by hand: nothing on disk needs it.")
@@ -460,7 +475,7 @@ _dot :: proc() {
     DOT :: "\u2022"
     w := im.CalcTextSize(DOT).x
     im.SetCursorPosX(im.GetCursorPosX() + (im.GetContentRegionAvail().x - w) * 0.5)
-    im.Text(DOT)
+    im.TextUnformatted(DOT)
 }
 
 // The open file, by NAME. The full path is a folder listing the project view
@@ -483,14 +498,14 @@ _draw_asset_inspector :: proc() {
     // No Save button: File/Save (Ctrl+S) writes every dirty document and
     // scene, and the star after the path is the pending mark.
     if inspectorData.statusMessage != "" {
-        im.Text(strings.clone_to_cstring(inspectorData.statusMessage, context.temp_allocator))
+        widgets.text(inspectorData.statusMessage)
         im.Separator()
     }
 
     if inspectorData.filePath != "" {
         _draw_file_row(inspectorData.doc != nil && inspectorData.doc.dirty)
     } else {
-        im.TextColored(im.Vec4{1, 0, 0, 1}, "No file loaded")
+        im.TextColoredUnformatted(thm.palette().status_error, "No file loaded")
     }
 
     im.Separator()
@@ -581,7 +596,7 @@ draw_default_import_settings :: proc() {
     im.SameLine()
 
     if inspectorData.statusMessage != "" {
-        im.Text(strings.clone_to_cstring(inspectorData.statusMessage, context.temp_allocator))
+        widgets.text(inspectorData.statusMessage)
     }
 
     im.Separator()
@@ -626,7 +641,9 @@ _is_picker_type :: proc(tid: typeid) -> bool {
 
 // Text color of a field that a prefab instance overrides. One value for the
 // generic loop, custom rows and the hierarchy's own markers.
-OVERRIDE_TEXT_COLOR :: im.Vec4{0.4, 0.8, 1.0, 1.0}
+override_text_color :: proc() -> im.Vec4 {
+    return thm.palette().accent
+}
 
 // The field a prefab override NAMES for a row. For most rows it is the row's
 // own value. For a row inside a dynamic-array element (a state in `layers`) no
@@ -648,7 +665,7 @@ override_marker_push :: proc(path: string) -> bool {
     ht := engine.pool_get(&w.transforms, engine.Handle(host_tH))
     if ht == nil do return false
     if !engine.nested_scene_has_root_override(ht.scene, host_tH, nested_lid, path) do return false
-    im.PushStyleColorImVec4(im.Col.Text, OVERRIDE_TEXT_COLOR)
+    im.PushStyleColorImVec4(im.Col.Text, override_text_color())
     return true
 }
 
@@ -1013,7 +1030,6 @@ draw_inspector_default :: proc(ptr: rawptr, tid: typeid, label: cstring, path_pr
         return
     }
 
-    xAny := any{ptr, tid}
     names := reflect.struct_field_names(tid)
     types := reflect.struct_field_types(tid)
     count := len(names)
@@ -1027,189 +1043,199 @@ draw_inspector_default :: proc(ptr: rawptr, tid: typeid, label: cstring, path_pr
         if types[i].id == typeid_of(engine.CompData) {
             continue
         }
-        field_info := reflect.struct_field_at(tid, i)
-        inspect_val, has_inspect := reflect.struct_tag_lookup(field_info.tag, "inspect")
-        if has_inspect && inspect_val == "-" {
-            continue
-        }
-        json_val, has_json := reflect.struct_tag_lookup(field_info.tag, "json")
-        if !has_inspect && has_json && json_val == "-" {
-            continue
-        }
-
-        field_name := names[i]
-        c_field_name := strings.clone_to_cstring(field_name)
-        defer delete(c_field_name)
-        field_type := types[i]
-        field_val := reflect.struct_field_value(xAny, field_info)
-
-        field_ptr := rawptr(uintptr(ptr) + field_info.offset)
-
-        full_path := path_prefix == "" ? field_name : strings.concatenate({path_prefix, ".", field_name}, context.temp_allocator)
-
-        nested_lid := engine.inspector_get_nested_local_id()
-        host_tH := engine.inspector_get_nested_host()
-        is_field_overridden := false
-        if nested_lid != 0 && host_tH != {} {
-            w := engine.ctx_world()
-            ht := engine.pool_get(&w.transforms, engine.Handle(host_tH))
-            if ht != nil {
-                is_field_overridden = engine.nested_scene_has_root_override(ht.scene, host_tH, nested_lid, full_path)
-            }
-        }
-
-		ctx := DrawContext{is_visible = true, is_pre = true, field_ptr = field_ptr, field_type = field_type.id, field_label = c_field_name, owner_ptr = ptr, owner_type = tid}
-
-        im.PushID(c_field_name)
-        prev_changed_outside := inspector_changed
-        inspector_changed = false
-
-        if is_field_overridden {
-            im.PushStyleColorImVec4(im.Col.Text, OVERRIDE_TEXT_COLOR)
-        }
-
-        // A decorator that draws the row itself writes the value before the
-        // row's transaction can look at it, so the "before" is taken here.
-        // Only rows with a decorator pay for the snapshot.
-        pre_before: []byte
-        if decorators, has := decorator_registry[tid]; has && i < len(decorators) && decorators[i] != nil {
-            pre_before = undo.capture_json(field_ptr, field_type.id)
-        }
-        defer if pre_before != nil do delete(pre_before)
-
-        // Grouped for the same reason field_edit_row groups its drawer: a
-        // decorator that draws the row (color, range) may emit several items,
-        // and the row's transaction below must see them as one gesture.
-        im.BeginGroup()
-        run_field_decorators(tid, i, &ctx)
-        im.EndGroup()
-
-        row_popup_done := false
-
-        if ctx.is_visible {
-            // Field-level picker tags apply through EVERY drawer path — a
-            // [dynamic]Asset_GUID `ext:"mat"` field reaches the guid drawer
-            // via draw_inspector_array, and the elements must still filter.
-            prev_tags := field_tags_set(field_info.tag)
-            defer field_tags_restore(prev_tags)
-
-            if drawer, ok := mapPropertyDrawer[field_type.id]; ok {
-                // The drawer owns this row, so its @(property_drawer) is what
-                // debug tooltips name for anything the row hovers.
-                origin_prev := widgets.ui_origin_push(mapPropertyDrawerOrigin[field_type.id])
-                defer widgets.ui_origin_pop(origin_prev)
-
-                // Mixed-value display for the selection. Read by the drawer.
-                multi_offset := multi_offset_of(field_ptr, ptr)
-                multi_probe_field(field_ptr, field_type.id, multi_offset)
-
-                // Group the drawer's widgets so the field context menu below
-                // binds to the WHOLE row. A drawer can emit several items (e.g.
-                // Ref_Local: picker button + "X" clear) and OpenPopupOnItemClick
-                // only tests the last one — right-click would then work only on
-                // the tiny X (or only when no value meant no X).
-                expands := current_field_expand && field_type.id == typeid_of(engine.Asset_GUID)
-                if expands do current_field_trailing_w = EXPAND_BTN_W
-                im.BeginGroup()
-                // The whole transaction, shared with the array-element path so
-                // the two cannot drift — see field_edit_row.
-                // Peers record their overrides against their own instances, and
-                // the path names which field — see field_edit.odin.
-                prev_path := field_edit_set_path(full_path)
-                finished := field_edit_row(field_ptr, field_type.id, multi_offset,
-                                           field_name, drawer, c_field_name)
-                field_edit_set_path(prev_path)
-                im.EndGroup()
-                current_field_trailing_w = 0
-                record_nested_override(field_ptr, field_type.id, full_path, finished)
-                // The arrow sits in the space the row left for it, and the
-                // document draws below, outside the row's transaction: its
-                // rows must not read as edits of this reference field.
-                if expands {
-                    guid := (^engine.Asset_GUID)(field_ptr)^
-                    im.SameLine(0, 0)
-                    if expand_arrow(guid) do draw_expanded_asset(guid)
-                }
-            } else if is_array_type(field_type.id) {
-                // Elements multi-edit through their own rebased peer list —
-                // draw_inspector_array does that itself, since only it knows
-                // where the element storage is.
-                draw_inspector_array_multi(field_ptr, field_type.id, c_field_name, multi_offset_of(field_ptr, ptr))
-                row_popup_done = true
-            } else if is_union_type(field_type.id) {
-                // A union's payload type can differ per object, so the same
-                // bytes would mean different things — see multi_suspend.
-                mprev := multi_suspend()
-                draw_inspector_union(field_ptr, field_type.id, c_field_name)
-                multi_resume(mprev)
-                row_popup_done = true
-            } else if is_enum_type(field_type.id) {
-                // An enum row is a combo: the value lands from a popup, so the
-                // row brackets the change retroactively like the pickers
-                // (_is_picker_type). Opening a session up front would end any
-                // other row's gesture in flight on every frame this row draws.
-                multi_offset := multi_offset_of(field_ptr, ptr)
-                multi_probe_field(field_ptr, field_type.id, multi_offset)
-                prev_path := field_edit_set_path(full_path)
-                finished := field_edit_row(field_ptr, field_type.id, multi_offset,
-                                           field_name, draw_inspector_enum, c_field_name)
-                field_edit_set_path(prev_path)
-                record_nested_override(field_ptr, field_type.id, full_path, finished)
-                row_popup_done = true
-            } else if reflect.is_struct(field_type) || reflect.is_union(field_type) {
-                // Descending into a nested struct: the peers' matching fields
-                // sit at the same offset inside THEIR copy, so the recursion
-                // carries the accumulated offset rather than the raw pointer.
-                prev_off := multi_push_offset(uintptr(field_ptr) - uintptr(ptr))
-                defer multi_pop_offset(prev_off)
-                _, is_inline := reflect.struct_tag_lookup(field_info.tag, "inline")
-                if is_inline {
-                    draw_inspector(field_val, "", full_path)
-                    row_popup_done = true
-                } else {
-                    tree_open := im.TreeNode(c_field_name)
-                    draw_field_context_menu(field_ptr, field_type.id, full_path)
-                    row_popup_done = true
-                    if tree_open {
-                        draw_inspector(field_val, "", full_path)
-                        im.TreePop()
-                    }
-                }
-            } else if reflect.is_pointer(type_info_of(field_type.id)) {
-                draw_inspector(field_val, "", full_path)
-                row_popup_done = true
-            } else {
-                c_str := strings.clone_to_cstring(fmt.tprintf("%s: %v", field_name, field_val))
-                defer delete(c_str)
-                im.Text(c_str)
-            }
-            if !row_popup_done {
-                draw_field_context_menu(field_ptr, field_type.id, full_path)
-            }
-        } else if ctx.handled_draw {
-            // A decorator drew this field itself. It is still a VALUE edit, so
-            // it gets the same transaction every other row does — the drawer
-            // already ran, so the row is driven with a nil drawer.
-            multi_offset := multi_offset_of(field_ptr, ptr)
-            prev_path := field_edit_set_path(full_path)
-            finished := field_edit_row(field_ptr, field_type.id, multi_offset,
-                                       field_name, nil, c_field_name, pre_before)
-            field_edit_set_path(prev_path)
-            record_nested_override(field_ptr, field_type.id, full_path, finished)
-            draw_field_context_menu(field_ptr, field_type.id, full_path)
-        }
-
-        if is_field_overridden {
-            im.PopStyleColor(1)
-        }
-
-        if prev_changed_outside || inspector_changed do inspector_changed = true
-        im.PopID()
-
-        ctx.is_pre = false
-        run_field_decorators(tid, i, &ctx)
+        draw_struct_field_at(ptr, tid, i, path_prefix)
     }
 
     // @(inspector_button) rows < 0 close this struct's draw from the BOTTOM.
     draw_inspector_buttons(tid, ptr, above = false, element_ctx = _in_array_element)
+}
+
+// Draws a single reflected field `i` of struct `(ptr, tid)` with its full
+// decorator chain, undo transaction, property drawer, and context menu.
+draw_struct_field_at :: proc(ptr: rawptr, tid: typeid, i: int, path_prefix: string = "") {
+    names := reflect.struct_field_names(tid)
+    types := reflect.struct_field_types(tid)
+    if i < 0 || i >= len(names) do return
+    if types[i].id == typeid_of(engine.CompData) do return
+
+    xAny := any{ptr, tid}
+    field_info := reflect.struct_field_at(tid, i)
+    inspect_val, has_inspect := reflect.struct_tag_lookup(field_info.tag, "inspect")
+    if has_inspect && inspect_val == "-" {
+        return
+    }
+    json_val, has_json := reflect.struct_tag_lookup(field_info.tag, "json")
+    if !has_inspect && has_json && json_val == "-" {
+        return
+    }
+
+    field_name := names[i]
+    c_field_name := strings.clone_to_cstring(field_name)
+    defer delete(c_field_name)
+    field_type := types[i]
+    field_val := reflect.struct_field_value(xAny, field_info)
+
+    field_ptr := rawptr(uintptr(ptr) + field_info.offset)
+
+    full_path := path_prefix == "" ? field_name : strings.concatenate({path_prefix, ".", field_name}, context.temp_allocator)
+
+    nested_lid := engine.inspector_get_nested_local_id()
+    host_tH := engine.inspector_get_nested_host()
+    is_field_overridden := false
+    if nested_lid != 0 && host_tH != {} {
+        w := engine.ctx_world()
+        ht := engine.pool_get(&w.transforms, engine.Handle(host_tH))
+        if ht != nil {
+            is_field_overridden = engine.nested_scene_has_root_override(ht.scene, host_tH, nested_lid, full_path)
+        }
+    }
+
+    ctx := DrawContext{is_visible = true, is_pre = true, field_ptr = field_ptr, field_type = field_type.id, field_label = c_field_name, owner_ptr = ptr, owner_type = tid}
+
+    im.PushID(c_field_name)
+    prev_changed_outside := inspector_changed
+    inspector_changed = false
+
+    if is_field_overridden {
+        im.PushStyleColorImVec4(im.Col.Text, override_text_color())
+    }
+
+    // A decorator that draws the row itself writes the value before the
+    // row's transaction can look at it, so the "before" is taken here.
+    // Only rows with a decorator pay for the snapshot.
+    pre_before: []byte
+    if decorators, has := decorator_registry[tid]; has && i < len(decorators) && decorators[i] != nil {
+        pre_before = undo.capture_json(field_ptr, field_type.id)
+    }
+    defer if pre_before != nil do delete(pre_before)
+
+    // Grouped for the same reason field_edit_row groups its drawer: a
+    // decorator that draws the row (color, range) may emit several items,
+    // and the row's transaction below must see them as one gesture.
+    im.BeginGroup()
+    run_field_decorators(tid, i, &ctx)
+    im.EndGroup()
+
+    row_popup_done := false
+
+    if ctx.is_visible {
+        // Field-level picker tags apply through EVERY drawer path — a
+        // [dynamic]Asset_GUID `ext:"mat"` field reaches the guid drawer
+        // via draw_inspector_array, and the elements must still filter.
+        prev_tags := field_tags_set(field_info.tag)
+        defer field_tags_restore(prev_tags)
+
+        if drawer, ok := mapPropertyDrawer[field_type.id]; ok {
+            // The drawer owns this row, so its @(property_drawer) is what
+            // debug tooltips name for anything the row hovers.
+            origin_prev := widgets.ui_origin_push(mapPropertyDrawerOrigin[field_type.id])
+            defer widgets.ui_origin_pop(origin_prev)
+
+            // Mixed-value display for the selection. Read by the drawer.
+            multi_offset := multi_offset_of(field_ptr, ptr)
+            multi_probe_field(field_ptr, field_type.id, multi_offset)
+
+            // Group the drawer's widgets so the field context menu below
+            // binds to the WHOLE row. A drawer can emit several items (e.g.
+            // Ref_Local: picker button + "X" clear) and OpenPopupOnItemClick
+            // only tests the last one — right-click would then work only on
+            // the tiny X (or only when no value meant no X).
+            expands := current_field_expand && field_type.id == typeid_of(engine.Asset_GUID)
+            if expands do current_field_trailing_w = EXPAND_BTN_W
+            im.BeginGroup()
+            // The whole transaction, shared with the array-element path so
+            // the two cannot drift — see field_edit_row.
+            // Peers record their overrides against their own instances, and
+            // the path names which field — see field_edit.odin.
+            prev_path := field_edit_set_path(full_path)
+            finished := field_edit_row(field_ptr, field_type.id, multi_offset,
+                                       field_name, drawer, c_field_name)
+            field_edit_set_path(prev_path)
+            im.EndGroup()
+            current_field_trailing_w = 0
+            record_nested_override(field_ptr, field_type.id, full_path, finished)
+            // The arrow sits in the space the row left for it, and the
+            // document draws below, outside the row's transaction: its
+            // rows must not read as edits of this reference field.
+            if expands {
+                guid := (^engine.Asset_GUID)(field_ptr)^
+                im.SameLine(0, 0)
+                if expand_arrow(guid) do draw_expanded_asset(guid)
+            }
+        } else if is_array_type(field_type.id) {
+            // Elements multi-edit through their own rebased peer list —
+            // draw_inspector_array does that itself, since only it knows
+            // where the element storage is.
+            draw_inspector_array_multi(field_ptr, field_type.id, c_field_name, multi_offset_of(field_ptr, ptr))
+            row_popup_done = true
+        } else if is_union_type(field_type.id) {
+            // A union's payload type can differ per object, so the same
+            // bytes would mean different things — see multi_suspend.
+            mprev := multi_suspend()
+            draw_inspector_union(field_ptr, field_type.id, c_field_name)
+            multi_resume(mprev)
+            row_popup_done = true
+        } else if is_enum_type(field_type.id) {
+            // An enum row is a combo: the value lands from a popup, so the
+            // row brackets the change retroactively like the pickers
+            // (_is_picker_type). Opening a session up front would end any
+            // other row's gesture in flight on every frame this row draws.
+            multi_offset := multi_offset_of(field_ptr, ptr)
+            multi_probe_field(field_ptr, field_type.id, multi_offset)
+            prev_path := field_edit_set_path(full_path)
+            finished := field_edit_row(field_ptr, field_type.id, multi_offset,
+                                       field_name, draw_inspector_enum, c_field_name)
+            field_edit_set_path(prev_path)
+            record_nested_override(field_ptr, field_type.id, full_path, finished)
+            row_popup_done = true
+        } else if reflect.is_struct(field_type) || reflect.is_union(field_type) {
+            // Descending into a nested struct: the peers' matching fields
+            // sit at the same offset inside THEIR copy, so the recursion
+            // carries the accumulated offset rather than the raw pointer.
+            prev_off := multi_push_offset(uintptr(field_ptr) - uintptr(ptr))
+            defer multi_pop_offset(prev_off)
+            _, is_inline := reflect.struct_tag_lookup(field_info.tag, "inline")
+            if is_inline {
+                draw_inspector(field_val, "", full_path)
+                row_popup_done = true
+            } else {
+                tree_open := im.TreeNode(c_field_name)
+                draw_field_context_menu(field_ptr, field_type.id, full_path)
+                row_popup_done = true
+                if tree_open {
+                    draw_inspector(field_val, "", full_path)
+                    im.TreePop()
+                }
+            }
+        } else if reflect.is_pointer(type_info_of(field_type.id)) {
+            draw_inspector(field_val, "", full_path)
+            row_popup_done = true
+        } else {
+            widgets.textf("%s: %v", field_name, field_val)
+        }
+        if !row_popup_done {
+            draw_field_context_menu(field_ptr, field_type.id, full_path)
+        }
+    } else if ctx.handled_draw {
+        // A decorator drew this field itself. It is still a VALUE edit, so
+        // it gets the same transaction every other row does — the drawer
+        // already ran, so the row is driven with a nil drawer.
+        multi_offset := multi_offset_of(field_ptr, ptr)
+        prev_path := field_edit_set_path(full_path)
+        finished := field_edit_row(field_ptr, field_type.id, multi_offset,
+                                   field_name, nil, c_field_name, pre_before)
+        field_edit_set_path(prev_path)
+        record_nested_override(field_ptr, field_type.id, full_path, finished)
+        draw_field_context_menu(field_ptr, field_type.id, full_path)
+    }
+
+    if is_field_overridden {
+        im.PopStyleColor(1)
+    }
+
+    if prev_changed_outside || inspector_changed do inspector_changed = true
+    im.PopID()
+
+    ctx.is_pre = false
+    run_field_decorators(tid, i, &ctx)
 }

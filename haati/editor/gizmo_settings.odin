@@ -59,10 +59,10 @@ gizmo_type_set :: proc(type_name: string, part: Gizmo_Part, shown: bool) {
 	}
 }
 
-// The type names that hide `part`, for saving (temp).
+// The type names that hide `part`, for saving (default allocator — freed cleanly by editor_settings_shutdown).
 gizmo_types_hiding :: proc(part: Gizmo_Part) -> [dynamic]string {
-	out := make([dynamic]string, context.temp_allocator)
-	for name, hidden in _hidden do if part in hidden do append(&out, name)
+	out := make([dynamic]string, runtime.default_allocator())
+	for name, hidden in _hidden do if part in hidden do append(&out, strings.clone(name, runtime.default_allocator()))
 	return out
 }
 

@@ -2,6 +2,7 @@ package inspector
 
 import "core:strings"
 import im "haati:external/odin-imgui"
+import engine "../../engine"
 
 @(private, property_drawer={type = int, priority = 0})
 draw_int_property :: proc(ptr: rawptr, tid: typeid, label: cstring) {
@@ -42,13 +43,9 @@ draw_string_property :: proc(ptr: rawptr, tid: typeid, label: cstring) {
     // string as if it were shared. Typing then assigns to the whole selection,
     // and leaving it alone changes nothing.
     if !current_field_mixed {
-        copy(buf[:], value)
+        engine.buf_set(buf[:], value)
     }
     if im.InputText(field_row(label), cstring(raw_data(buf[:])), len(buf), {}) {
-        str_len := 0
-        for str_len < len(buf) && buf[str_len] != 0 {
-            str_len += 1
-        }
         // Component strings live on context.allocator — scene load
         // (_ext_value_into), the union unmarshaler and undo's apply all
         // allocate with it, so the replacement does too. The old value is
@@ -56,7 +53,7 @@ draw_string_property :: proc(ptr: rawptr, tid: typeid, label: cstring) {
         if !current_field_mixed {
             delete(str_ptr^)
         }
-        str_ptr^ = strings.clone(string(buf[:str_len]))
+        str_ptr^ = strings.clone(engine.buf_str(buf[:]))
         mark_inspector_changed()
     }
 }

@@ -83,6 +83,15 @@ transform_get_or_add_comp :: proc(tH: Transform_Handle, $T: typeid) -> (Owned, ^
     return new_owned, cast(^T)raw
 }
 
+// Validates a VS bridge target entity handle and resolves its `^T` component in one step.
+vs_resolve_entity_comp :: proc(entity_h: Handle, $T: typeid) -> (tH: Transform_Handle, comp: ^T, ok: bool) {
+    w := ctx_world()
+    if w == nil || entity_h == {} || !pool_valid(&w.transforms, entity_h) do return {}, nil, false
+    tH = Transform_Handle(entity_h)
+    _, comp = transform_get_comp(tH, T)
+    return tH, comp, comp != nil
+}
+
 transform_remove_comp :: proc(tH: Transform_Handle, comp_handle: Handle) {
     w := ctx_world()
     t := pool_get(&w.transforms, Handle(tH))

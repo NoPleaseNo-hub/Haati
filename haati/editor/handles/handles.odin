@@ -26,6 +26,7 @@ import "core:math/linalg"
 import "core:mem"
 import "haati:engine"
 import "haati:engine/gizmos"
+import undo "haati:editor/undo"
 
 // The scene view's tool: Q W E R T. The editor's gizmo_mode holds it, and
 // gizmo and handles hooks read it from their context.
@@ -861,4 +862,30 @@ pick_register :: proc(p: Pick_Provider) {
 
 pick_providers :: proc() -> []Pick_Provider {
 	return _pick_providers[:]
+}
+
+// Opens `sess` for `targets` and registers an `on_drag_lost` handler so a dropped
+// drag (e.g. target deselected or destroyed) still commits/closes `sess`.
+// `sess` must point to persistent storage (e.g., module-level `@(private="file")`).
+begin_drag_edit :: proc(sess: ^undo.Edit_Session, targets: []undo.Edit_Target, label: string) {
+	if sess == nil do return
+	sess^ = undo.edit_session_begin(targets, label)
+	on_drag_lost(proc(user: rawptr) {
+		if user != nil do undo.edit_session_end(cast(^undo.Edit_Session)user)
+	}, sess)
+}
+
+// Writes `now / s` back to a scalar field only when the drag changed that axis.
+unscale_scalar :: proc(field: ^f32, now, before, s: f32) {
+	if now != before && s > 1e-6 do field^ = now / s
+}
+
+// Writes `[2]f32` drag deltas back unscaled on each changed axis.
+unscale_vec2 :: proc(field: ^[2]f32, now, before: [3]f32, s: [2]f32) {
+	for i in 0 ..< 2 do unscale_scalar(&field[i], now[i], before[i], s[i])
+}
+
+// Writes `[3]f32` drag deltas back unscaled on each changed axis.
+unscale_vec3 :: proc(field: ^[3]f32, now, before, s: [3]f32) {
+	for i in 0 ..< 3 do unscale_scalar(&field[i], now[i], before[i], s[i])
 }

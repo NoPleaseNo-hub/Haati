@@ -23,6 +23,7 @@ import "inspector"
 import "haati:engine_editor/asset_pipeline"
 import "haati:editor/icons"
 import "haati:editor/widgets"
+import "../engine"
 
 Sample_State :: enum {
 	Not_Installed,
@@ -55,14 +56,15 @@ project_package_samples_shutdown :: proc() {
 // Temp-allocated. Presence of packages/<name> = installed (docs/Plugins.md
 // install model — the editor only ever sees a directory).
 package_samples_list :: proc(pkg: string) -> []Package_Sample {
-	samples_dir := fmt.tprintf("%s/%s/samples", _PROJECT_PACKAGES_PATH, pkg)
+	pkgs_dir := project_packages_path()
+	samples_dir := fmt.tprintf("%s/%s/samples", pkgs_dir, pkg)
 	entries, ok := project_dir_listing(samples_dir)
 	if !ok do return nil
 	out := make([dynamic]Package_Sample, context.temp_allocator)
 	for entry in entries {
 		if !entry.is_dir do continue
 		if strings.has_prefix(entry.name, ".") do continue
-		dst := fmt.tprintf("%s/%s", _PROJECT_PACKAGES_PATH, entry.name)
+		dst := fmt.tprintf("%s/%s", pkgs_dir, entry.name)
 		state := Sample_State.Not_Installed
 		if info, lerr := os.lstat(dst, context.temp_allocator); lerr == nil {
 			state = info.type == .Symlink ? .Linked : .Copied
@@ -136,11 +138,8 @@ _sample_install_copy :: proc(s: Package_Sample) {
 @(private = "file")
 _sample_install_link :: proc(s: Package_Sample) {
 	if _sample_dst_taken(s) do return
-	// Both live under packages/, so the relative target is just the
-	// source path with the "packages/" prefix dropped.
-	target := s.src[len(_PROJECT_PACKAGES_PATH) + 1:]
-	if err := os.symlink(target, s.dst); err != nil {
-		fmt.printf("[Editor] Install sample: symlink %s -> %s failed: %v\n", s.dst, target, err)
+	if !engine.os_create_dir_link(s.dst, s.src) {
+		fmt.printf("[Editor] Install sample: link %s -> %s failed\n", s.dst, s.src)
 		return
 	}
 	_sample_after_change("Linked", s.name)
@@ -149,8 +148,8 @@ _sample_install_link :: proc(s: Package_Sample) {
 @(private = "file")
 _sample_remove_confirmed :: proc() {
 	if _sample_confirm_linked {
-		if err := os.remove(_sample_confirm_dst); err != nil {
-			fmt.printf("[Editor] Remove sample: unlink %s failed: %v\n", _sample_confirm_dst, err)
+		if !engine.os_remove_dir_link(_sample_confirm_dst) {
+			fmt.printf("[Editor] Remove sample: unlink %s failed\n", _sample_confirm_dst)
 			return
 		}
 	} else if !file_move_to_trash(_sample_confirm_dst) {
@@ -186,7 +185,7 @@ package_samples_draw :: proc(pkg: string) {
 		defer im.PopID()
 
 		im.AlignTextToFramePadding() // row text lines up with the buttons
-		im.Text(strings.clone_to_cstring(s.name, context.temp_allocator))
+		im.TextUnformatted(strings.clone_to_cstring(s.name, context.temp_allocator))
 
 		// Controls anchor to the RIGHT edge: shift the cursor so exactly
 		// their width remains.
@@ -197,7 +196,7 @@ package_samples_draw :: proc(pkg: string) {
 			w = im.CalcTextSize(icon).x + style.ItemSpacing.x + btn_w("Remove")
 			im.SameLine()
 			im.SetCursorPosX(im.GetCursorPosX() + im.GetContentRegionAvail().x - w)
-			im.TextDisabled(icon)
+			im.TextDisabledUnformatted(icon)
 			im.SameLine()
 			if im.Button("Remove") {
 				delete(_sample_confirm_name)

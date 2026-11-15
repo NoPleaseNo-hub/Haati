@@ -8,8 +8,10 @@ package editor
 // - docking to the left/right edge turns the overlay vertical
 // Overlay placement persists in editor_settings (anchor + normalized float pos).
 
+import "base:runtime"
 import "core:fmt"
 import "core:math"
+import "core:strings"
 import im "haati:external/odin-imgui"
 import "menu"
 import "haati:editor/icons"
@@ -35,8 +37,9 @@ draw_dockspace :: proc() {
 	im.SetNextWindowPos(pos, {}, {0, 0})
 	im.SetNextWindowSize(size, {})
 	flags := im.WindowFlags{.NoTitleBar, .NoResize, .NoMove, .NoScrollbar, .NoCollapse, .NoBringToFrontOnFocus, .NoNavFocus, .NoDocking}
+	dockspace_id: im.ID
 	if im.Begin("##DockSpaceHost", nil, flags) {
-		dockspace_id := im.GetID("DockSpace")
+		dockspace_id = im.GetID("DockSpace")
 		wnd.main_dockspace_id = dockspace_id
 		if central := im.DockBuilderGetCentralNode(dockspace_id); central != nil {
 			wnd.main_central_dock_id = central.ID_
@@ -46,10 +49,13 @@ draw_dockspace :: proc() {
 			_dock_build_default_layout(dockspace_id, size)
 		}
 		im.DockSpace(dockspace_id, im.Vec2{0, 0}, {}, nil)
-		// Unity's tab context menu button on every node's tab bar.
-		tab_menu_draw_all(im.DockBuilderGetNode(dockspace_id))
 	}
 	im.End()
+	// Draw tab context menu chrome after closing ##DockSpaceHost so _tab_menu_node
+	// never re-enters an open ##DockSpaceHost window mid-Begin.
+	if dockspace_id != 0 {
+		tab_menu_draw_all(im.DockBuilderGetNode(dockspace_id))
+	}
 }
 
 // ImGuiDockNodeFlagsPrivate_DockSpace — the DockBuilder docs require it on the
@@ -71,8 +77,6 @@ _dock_build_default_layout :: proc(dockspace_id: im.ID, size: im.Vec2) {
 
 	if t := wnd.title_of("void_hierarchy"); t != nil do im.DockBuilderDockWindow(t, left)
 	if t := wnd.title_of("void_inspector"); t != nil do im.DockBuilderDockWindow(t, right)
-	im.DockBuilderDockWindow(icons.TITLE_INSPECTOR, right)
-	im.DockBuilderDockWindow(icons.TITLE_PROJECT_INSPECTOR, right)
 	im.DockBuilderDockWindow(icons.TITLE_SCENE, center)
 	im.DockBuilderDockWindow(icons.TITLE_SCENE_2D, center)
 	im.DockBuilderDockWindow(icons.TITLE_GAME, center)
@@ -90,8 +94,6 @@ _dock_build_default_layout :: proc(dockspace_id: im.ID, size: im.Vec2) {
 @(menu_item={path="Window/Reset Layout", order=20, shortcut=""})
 view_reset_layout_menu :: proc() {
 	_dock_layout_reset = true
-	menu.show_inspector = false
-	menu.show_project_inspector = false
 	menu.show_scene = true
 	menu.show_scene_2d = true
 	menu.show_game = true
@@ -266,11 +268,12 @@ overlays_apply_settings :: proc() {
 // Snapshot overlay placement into editor_settings (temp-allocated, mirroring
 // open_scene_guids in save_editor_settings).
 overlays_capture_settings :: proc() {
+	for s in editor_settings.scene_overlays do delete(s.id)
 	delete(editor_settings.scene_overlays)
-	editor_settings.scene_overlays = make([dynamic]Overlay_Setting, context.temp_allocator)
+	editor_settings.scene_overlays = make([dynamic]Overlay_Setting, runtime.default_allocator())
 	for ov in _overlays {
 		append(&editor_settings.scene_overlays, Overlay_Setting{
-			id     = string(ov.id),
+			id     = strings.clone(string(ov.id), runtime.default_allocator()),
 			anchor = u8(ov.anchor),
 			x      = ov.float_pos.x,
 			y      = ov.float_pos.y,

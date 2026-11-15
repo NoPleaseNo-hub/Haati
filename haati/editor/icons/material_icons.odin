@@ -99,6 +99,10 @@ ICON_MD_UNDO          :: "\ue166"   // undo
 ICON_MD_REDO               :: "\ue15a"   // redo
 ICON_MD_ADD                :: "\ue145"   // add
 ICON_MD_ADD_CIRCLE_OUTLINE :: "\ue990"   // add_circle_outline
+ICON_MD_REMOVE             :: "\ue15b"   // remove (minus / step out)
+ICON_MD_ZOOM_IN            :: "\ue8ff"   // zoom_in
+ICON_MD_ZOOM_OUT           :: "\ue900"   // zoom_out
+ICON_MD_GRID_VIEW          :: "\ue9b0"   // grid_view (2x2 rounded tile grid)
 ICON_MD_DELETE             :: "\ue92e"   // delete
 ICON_MD_CHECK         :: "\ue668"   // check
 ICON_MD_EDIT          :: "\uf097"   // edit
@@ -173,10 +177,6 @@ ICON_MD_SCREEN_ROTATION :: "\ue1c1" // screen_rotation (Game view size flip)
 TITLE_SCENE             :: ICON_MD_LANDSCAPE + " Scene3D###Scene"
 TITLE_SCENE_2D          :: ICON_MD_GRID_4X4 + " Scene 2D###Scene 2D"
 TITLE_GAME              :: ICON_MD_SPORTS_ESPORTS + " Game###Game"
-TITLE_HIERARCHY         :: ICON_MD_ACCOUNT_TREE + " Hierarchy###Hierarchy"
-TITLE_INSPECTOR         :: ICON_MD_TUNE + " Inspector###Inspector"
-TITLE_PROJECT           :: ICON_MD_FOLDER + " Project###Project"
-TITLE_PROJECT_INSPECTOR :: ICON_MD_DESCRIPTION + " Project Inspector###Project Inspector"
 TITLE_CONSOLE           :: ICON_MD_LIST_ALT + " Console###Console"
 TITLE_OUTPUT            :: ICON_MD_RECEIPT_LONG + " Output###Output"
 TITLE_HISTORY           :: ICON_MD_HISTORY + " History###History"

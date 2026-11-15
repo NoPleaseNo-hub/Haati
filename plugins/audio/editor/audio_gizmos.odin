@@ -62,8 +62,7 @@ audio_source_handles :: proc(a: ^audio.AudioSource, ctx: handles.Gizmo_Context) 
 			undo.edit_target_pooled(h, &a.min_distance, typeid_of(f32)),
 			undo.edit_target_pooled(h, &a.max_distance, typeid_of(f32)),
 		}
-		_edit = undo.edit_session_begin(targets[:], "Edit Audio Source")
-		handles.on_drag_lost(proc(_: rawptr) { undo.edit_session_end(&_edit) })
+		handles.begin_drag_edit(&_edit, targets[:], "Edit Audio Source")
 	}
 	if (dmin.dragging || dmin.released) && lo != a.min_distance {
 		a.min_distance = lo
