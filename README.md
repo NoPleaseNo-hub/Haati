@@ -5,6 +5,7 @@
 ## Highlights
 
 - **CAD & Destructible CSG Hybrid ("Faker CSG")**: Real-time CSG booleans, sub-millisecond Jolt collision hulls, surface stamps, and visual mesh deformation.
+- Multicore Windows x64 game engine & integrated Odin studio (MoonHug fork): destructible CSG, .bodin visual scripting with F7 hot-reload, HDR bloom, tiled async NavMesh, .pak packaging.
 - **Control Rig & Procedural Character Motion**: Full humanoid IK/rigging, skeletal deformation, blend spaces, and spring bones (`Mannequin_F.glb` default mannequin in `plugins/control_rig/assets/meshes/characters/`).
 - **Unified Graph & Odin Micro-Studio**: `.bodin` Visual Graphs compiled straight to native x64 machine code alongside Odin source editing, Unreal-style Namespace `BP_Node` Blocks (`Event`, `Flow`, `Input`, `Math`, `Transform`, `Anim`, `VFX`, `Audio`, `AI`, `Delegate`, `Odin`), Left/Right pin-drag context-sensitive spawner, inline `+ New Custom Event` wiring, and ~200 ms F7 Hot-Cartridge live swap.
 - **Unified GPU Lighting & Shadow Atlas**: `4096x4096` 16-tile GPU depth atlas supporting 3-cascade Directional CSM, Spot shadows, and dual 6-face Point Light cubemap shadows, with true `0.0` ambient darkness and `[Lit | Unlit | FakeLight]` Scene 3D viewport modes.
