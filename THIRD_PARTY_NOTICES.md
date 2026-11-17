@@ -13,7 +13,8 @@ binary and never reaches a game.
 | stb (image, image_write, image_resize, truetype, vorbis) | MIT / public domain | runtime + editor | https://github.com/nothings/stb |
 | cgltf | MIT | editor (glTF import) | https://github.com/jkuhlmann/cgltf |
 | Box2D | MIT | runtime, `physics2d` package only | https://github.com/erincatto/box2d |
-| Box3D | MIT | runtime, `physics3d` package only | https://github.com/erincatto/box3d |
+| Jolt Physics | MIT, Jorrit Rouwe | runtime, `physics3d` + `cad_csg` packages (`joltc.dll`) | https://github.com/jrouwe/JoltPhysics |
+| JoltC (C API + Odin bindings) | MIT, Amer Koleci and Contributors | runtime, `physics3d` + `cad_csg` packages | https://github.com/amerkoleci/joltc |
 | Dear ImGui | MIT | editor | https://github.com/ocornut/imgui |
 | odin-imgui (bindings) | MIT, Trevin Sorenson | editor | `haati/external/odin-imgui/LICENSE` |
 | Material Symbols Outlined (icon font) | Apache-2.0 | editor | `haati/external/fonts/material/LICENSE-Material.txt` |
@@ -26,8 +27,8 @@ binary and never reaches a game.
   distributions.
 - **BSD-3-Clause** (Odin core): the Odin copyright notice and license text
   in the game's documentation or credits.
-- **MIT** (stb, Box2D, Box3D when used): the respective copyright notice and
-  license text in the game's documentation or credits.
+- **MIT** (stb, Box2D, Jolt Physics + JoltC when `physics3d` / `cad_csg` are used): the
+  respective copyright notice and license text in the game's documentation or credits.
 
 Editor-only components (Dear ImGui, odin-imgui, Material Symbols, Phosphor, cgltf) and
 the CC0 assets impose nothing on shipped games. The CC-BY 3.0 Watch-Wolf emblem is

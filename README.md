@@ -8,8 +8,8 @@
 sentence again, slowly, because it is both the selling point and the warning label.
 
 **In one line:** multicore Windows x64 game engine & integrated Odin studio (MoonHug fork):
-destructible CSG, `.bodin` visual scripting with F7 hot-reload, HDR bloom, tiled async NavMesh,
-`.pak` packaging, and a crash watchdog because the rest of that list needs one.
+Jolt physics, destructible CSG, `.bodin` visual scripting with F7 hot-reload, HDR bloom, tiled
+async NavMesh, `.pak` packaging, and a crash watchdog because the rest of that list needs one.
 
 ---
 
@@ -68,10 +68,12 @@ battle-test them got scrapped and is being rebuilt from scratch, which tells you
   node does, not the exact transpiler output. Don't paste it into prod and expect miracles.
 
 ### Runtime & Rendering
+- **Physics: Jolt Physics via JoltC** (`haati/external/jolt`): rigidbodies, colliders, joints and
+  the character controller in `physics3d`, plus the collision side of destructible CSG.
 - Multicore job system for physics, culling and scene work.
 - Shadow atlas (directional cascades, spot, point cubemaps), HDR bloom, `Lit / Unlit / FakeLight`
   viewport modes.
-- Destructible CSG ("Faker CSG"): runtime booleans, surface stamps, mesh deformation, generated
+- Destructible CSG ("Faker CSG"): runtime booleans, surface stamps, mesh deformation, and Jolt
   collision hulls.
 - Control Rig / procedural character motion (IK, blend spaces, spring bones).
 - Async tiled NavMesh, slow-mo time scale, read-only `.pak` VFS + external project packaging.
