@@ -908,7 +908,9 @@ bp_unsafe_tooltip_warning :: proc(
 sync_bodin_user_ast_into_graph :: proc(g: ^engine.Visual_Graph, user_zone: string) {
 	if g == nil do return
 	prev_alloc := context.allocator
-	context.allocator = runtime.default_allocator()
+	if g == &_vs.graph {
+		context.allocator = runtime.default_allocator()
+	}
 	defer context.allocator = prev_alloc
 
 	// Remove previous `code_authored` entries cleanly

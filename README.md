@@ -135,9 +135,10 @@ $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notmatch 'Odin' }) -join 
 # Build & launch the editor (add --project-hub to start in the Project Hub)
 .\tools\odin\odin.exe run tools/haati -- run
 
-# Typecheck / test / release build
+# Typecheck / test / stress / release build
 .\tools\odin\odin.exe run tools/haati -- check --project-hub
 .\tools\odin\odin.exe run tools/haati -- test
+.\tools\odin\odin.exe run tools/haati -- test --stress
 .\tools\odin\odin.exe run tools/haati -- build --project-hub
 ```
 

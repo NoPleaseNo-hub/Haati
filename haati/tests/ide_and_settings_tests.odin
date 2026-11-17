@@ -3,14 +3,21 @@ package tests
 import "core:encoding/json"
 import "core:math"
 import "core:os"
+import "core:path/filepath"
 import "core:strings"
 import "core:testing"
 import "core:unicode/utf8"
+import stbtt "vendor:stb/truetype"
 
+import editor "../editor"
+import "../editor/menu"
 import "../engine"
 import cs "haati:editor/code_studio"
 import fe "haati:editor/file_explorer"
+import "haati:editor/icons"
+import mcp "haati:editor/mcp"
 import widgets "haati:editor/widgets"
+import wnd "haati:editor/window"
 
 @(test)
 test_utf8_safe_prefix_preserves_multibyte_runes :: proc(t: ^testing.T) {
@@ -132,4 +139,219 @@ test_unified_3_tier_settings_cascade :: proc(t: ^testing.T) {
 	// Resetting `speed` to default restores Tier 1 Factory Backdrop (10.0).
 	testing.expect(t, engine.project_settings_reset_field_to_default(tab_name, "speed", &va2, typeid_of(Cascade_Probe)))
 	testing.expect_value(t, va2.speed, f32(10.0))
+}
+
+// Verifies Settings label humanizer + MCP discovery constant conventions.
+@(test)
+test_settings_humanizer_and_mcp_discovery :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+
+	testing.expect_value(t, editor.humanize_setting_label("problem_check_delay_sec"), "Problem Check Delay (s)")
+	testing.expect_value(t, editor.humanize_setting_label("ui_scale"), "UI Scale")
+	testing.expect_value(t, editor.humanize_setting_label("target_fps_hz"), "Target FPS (Hz)")
+	testing.expect_value(t, editor.humanize_setting_label("ide_sandbox_mode"), "IDE Sandbox Mode")
+	testing.expect_value(t, editor.humanize_setting_label("enable_csg_vfs_mcp"), "Enable CSG VFS MCP")
+	testing.expect_value(t, mcp.BRIDGE_FILE_USER_SETTINGS, "UserSettings/mcp_bridge.json")
+}
+
+// Verifies embedded Phosphor & Material icon TTF font bytes and that sampled icon glyph
+// constants decode to single PUA runes and map to real glyph indices inside the TTF font.
+@(test)
+test_phosphor_and_material_icon_glyphs_valid_pua :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+
+	ph_font: stbtt.fontinfo
+	init_ok := bool(stbtt.InitFont(&ph_font, raw_data(editor.PHOSPHOR_FONT_DATA), 0))
+	testing.expect(t, init_ok, "Phosphor.ttf must parse cleanly via stb_truetype")
+	if !init_ok do return
+
+	ph_samples := [?]string{
+		icons.ICON_PH_VECTOR_THREE,
+		icons.ICON_PH_BLUEPRINT,
+		icons.ICON_PH_UNITE,
+		icons.ICON_PH_SUBTRACT,
+		icons.ICON_PH_INTERSECT,
+		icons.ICON_PH_BONE,
+		icons.ICON_PH_SWORD,
+		icons.ICON_PH_CUBE,
+	}
+	for g in ph_samples {
+		r, n := utf8.decode_rune_in_string(g)
+		testing.expect(t, n == len(g) && r >= icons.ICON_PH_MIN && r <= icons.ICON_PH_MAX, "Phosphor constant must be a single PUA rune")
+		glyph_idx := stbtt.FindGlyphIndex(&ph_font, r)
+		testing.expectf(t, glyph_idx != 0, "Phosphor.ttf missing glyph index for codepoint U+%04X", u32(r))
+	}
+
+	md_samples := [?]string{
+		icons.ICON_MD_LIGHTBULB,
+		icons.ICON_MD_WB_SUNNY,
+		icons.ICON_MD_SKELETON,
+		icons.ICON_MD_PSYCHOLOGY,
+		icons.ICON_MD_SMART_TOY,
+		icons.ICON_MD_MEMORY,
+		icons.ICON_MD_BUG_REPORT,
+		icons.ICON_MD_ROCKET_LAUNCH,
+	}
+	for g in md_samples {
+		r, n := utf8.decode_rune_in_string(g)
+		testing.expect(t, n == len(g) && r >= icons.ICON_MD_MIN && r <= icons.ICON_MD_MAX, "Material icon constant must be a single PUA rune")
+	}
+}
+
+// Verifies portable bundled Odin toolchain resolution picks `tools/odin/odin.exe` next to the
+// compiler executable first before falling back to `ODIN_ROOT` or `PATH`.
+@(test)
+test_bundled_toolchain_resolution_prefers_tools_odin :: proc(t: ^testing.T) {
+	odin_exe := engine.resolve_odin_binary(context.temp_allocator)
+	testing.expect(t, len(odin_exe) > 0, "resolve_odin_binary must return a non-empty path")
+	testing.expectf(t, os.exists(odin_exe), "resolved Odin binary must exist on disk: %s", odin_exe)
+
+	norm, _ := strings.replace_all(odin_exe, "\\", "/", context.temp_allocator)
+	expected_suffix := "tools/odin/odin.exe" when ODIN_OS == .Windows else "tools/odin/odin"
+	testing.expectf(
+		t,
+		strings.has_suffix(norm, expected_suffix),
+		"expected resolve_odin_binary to prefer bundled %s, got %s",
+		expected_suffix,
+		norm,
+	)
+}
+
+// Verifies `wnd.show_confirm_dialog` routes cleanly into `widgets.dialog_open` (`is_danger`
+// and `is_cancel` button semantics).
+@(test)
+test_window_confirm_dialog_delegates_to_widgets_dialog :: proc(t: ^testing.T) {
+	defer wnd.close_confirm_dialog()
+
+	wnd.show_confirm_dialog("Delete Node?", "Cannot undo.", "Delete", nil, true, "Keep", nil)
+	d, ok := widgets.dialog_current()
+	testing.expect(t, ok, "confirm dialog should be open via widgets.dialog_open")
+	if ok {
+		testing.expect_value(t, d.title, "Delete Node?")
+		testing.expect_value(t, d.description, "Cannot undo.")
+		testing.expect_value(t, len(d.buttons), 2)
+		if len(d.buttons) == 2 {
+			testing.expect_value(t, d.buttons[0].label, "Delete")
+			testing.expect_value(t, d.buttons[0].is_danger, true)
+			testing.expect_value(t, d.buttons[0].is_default, false)
+			testing.expect_value(t, d.buttons[1].label, "Keep")
+			testing.expect_value(t, d.buttons[1].is_cancel, true)
+		}
+	}
+
+	wnd.close_confirm_dialog()
+	_, closed_ok := widgets.dialog_current()
+	testing.expect(t, !closed_ok, "close_confirm_dialog must close widgets dialog")
+
+	wnd.show_confirm_dialog("Save Layout?", "Overwrite?", "Save", nil, false)
+	d2, ok2 := widgets.dialog_current()
+	testing.expect(t, ok2, "non-danger confirm dialog should be open")
+	if ok2 && len(d2.buttons) == 2 {
+		testing.expect_value(t, d2.buttons[0].is_danger, false)
+		testing.expect_value(t, d2.buttons[0].is_default, true)
+		testing.expect_value(t, d2.buttons[1].label, "Cancel")
+		testing.expect_value(t, d2.buttons[1].is_cancel, true)
+	}
+}
+
+// Verifies Studio/Browser windows (`void_file_explorer`, `void_material_editor`,
+// `odin_micro_studio`, `mh_visual_script`) opt out of whole-window DPI Ctrl+MouseWheel
+// scaling so their toolbars, buttons, and sidebars stay crisp.
+@(test)
+test_window_independent_pane_zoom_exemptions :: proc(t: ^testing.T) {
+	testing.expect(t, wnd.uses_independent_pane_zoom("odin_micro_studio"), "odin_micro_studio must use independent pane zoom")
+	testing.expect(t, wnd.uses_independent_pane_zoom("mh_visual_script"), "mh_visual_script must use independent pane zoom")
+	testing.expect(t, wnd.uses_independent_pane_zoom("void_file_explorer"), "void_file_explorer must use independent pane zoom")
+	testing.expect(t, wnd.uses_independent_pane_zoom("void_material_editor"), "void_material_editor must use independent pane zoom")
+	testing.expect(t, !wnd.uses_independent_pane_zoom("inspector"), "standard inspector window should allow whole-window scale")
+}
+
+// Verifies Void File Explorer's expanded `48px..256px` tile zoom range, list density scale,
+// and UTF-8-safe middle-ellipsis filename fitting for compact cards.
+@(test)
+test_void_file_explorer_zoom_range_and_middle_ellipsis :: proc(t: ^testing.T) {
+	testing.expect_value(t, fe.CARD_SIZE_MIN, f32(48.0))
+	testing.expect_value(t, fe.CARD_SIZE_MAX, f32(256.0))
+
+	// Zero / unset legacy values fall back cleanly to defaults
+	testing.expect_value(t, fe.clamp_card_size(0), fe.CARD_SIZE_DEFAULT)
+	testing.expect_value(t, fe.clamp_list_scale(0), fe.LIST_SCALE_DEFAULT)
+
+	// Bounds clamping and stepping across full range
+	testing.expect_value(t, fe.clamp_card_size(12.0), f32(48.0))
+	testing.expect_value(t, fe.clamp_card_size(512.0), f32(256.0))
+	testing.expect_value(t, fe.step_card_size(104.0, 1.0), f32(116.0))
+	testing.expect_value(t, fe.step_card_size(104.0, -1.0), f32(92.0))
+	testing.expect_value(t, fe.step_card_size(52.0, -5.0), f32(48.0))
+	testing.expect_value(t, fe.step_card_size(60.0, -5.0), f32(48.0))
+	testing.expect_value(t, fe.step_card_size(248.0, 5.0), f32(256.0))
+
+	testing.expect_value(t, fe.clamp_list_scale(0.10), fe.LIST_SCALE_MIN)
+	testing.expect_value(t, fe.clamp_list_scale(3.00), fe.LIST_SCALE_MAX)
+	testing.expect_value(t, fe.step_list_scale(1.00, 1.0), f32(1.10))
+	testing.expect_value(t, fe.step_list_scale(1.00, -1.0), f32(0.90))
+	testing.expect_value(t, fe.step_list_scale(0.85, -10.0), fe.LIST_SCALE_MIN)
+
+	// Middle-ellipsis preserves extensions on normal files and handles directories / ultra-short cards
+	long_fbx := fe.format_middle_ellipsis("FERRA_Rigged_NonConstraint.fbx", ".fbx", false, 14, context.temp_allocator)
+	testing.expectf(t, strings.has_suffix(long_fbx, "...fbx"), "extension and ellipsis should stay visible at 14 chars, got: %s", long_fbx)
+	testing.expect(t, utf8.rune_count_in_string(long_fbx) <= 14, "truncated name must respect max_runes")
+
+	dir_trunc := fe.format_middle_ellipsis("Character_Textures_HighRes", "", true, 8, context.temp_allocator)
+	testing.expect_value(t, dir_trunc, "Charac..")
+
+	tiny := fe.format_middle_ellipsis("player_controller.odin", ".odin", false, 4, context.temp_allocator)
+	testing.expect_value(t, tiny, "pl..")
+
+	// Multi-byte UTF-8 safety across arbitrary rune limits
+	utf8_name := "Ferra_Übersicht_Mesh.glb"
+	for lim in 1 ..= 20 {
+		out := fe.format_middle_ellipsis(utf8_name, ".glb", false, lim, context.temp_allocator)
+		testing.expectf(t, utf8.valid_string(out), "middle-ellipsis output must be valid UTF-8 at max_runes=%d: %s", lim, out)
+		testing.expectf(t, utf8.rune_count_in_string(out) <= lim, "output rune count exceeded limit %d", lim)
+	}
+}
+
+// Verifies Void File Explorer Left Tree zoom (`[0.75..2.00]`) is clamped & stepped independently
+// from Folder Content List density zoom (`[0.75..2.00]`) and defaults legacy 0 values to 1.00.
+@(test)
+test_ux_independent_tree_vs_folder_zoom :: proc(t: ^testing.T) {
+	testing.expect_value(t, fe.clamp_tree_scale(0), fe.TREE_SCALE_DEFAULT)
+	testing.expect_value(t, fe.clamp_tree_scale(0.1), fe.TREE_SCALE_MIN)
+	testing.expect_value(t, fe.clamp_tree_scale(5.0), fe.TREE_SCALE_MAX)
+	testing.expect_value(t, fe.step_tree_scale(1.0, 2.0), f32(1.20))
+	testing.expect_value(t, fe.step_tree_scale(1.95, 1.0), fe.TREE_SCALE_MAX)
+	testing.expect_value(t, fe.step_tree_scale(0.85, -2.0), fe.TREE_SCALE_MIN)
+
+	testing.expect_value(t, fe.clamp_list_scale(0), fe.LIST_SCALE_DEFAULT)
+	testing.expect_value(t, fe.clamp_list_scale(3.0), fe.LIST_SCALE_MAX)
+	testing.expect_value(t, fe.step_list_scale(1.60, 4.0), fe.LIST_SCALE_MAX)
+}
+
+// Verifies Window/Tools menu rename & Asset menu streamlining generated cleanly.
+@(test)
+test_ux_menu_searchable_window_tools_and_explorer_name :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+
+	menu.init_menu()
+	defer menu.shutdown_menu()
+	menu.add_menu_item("Window/General/Void File Explorer", "Ctrl+5", proc() {})
+	menu.add_menu_item("Tools/Refresh AssetDB", "", proc() {})
+	paths := menu.collect_invokable_paths(context.temp_allocator)
+	has_fe   := false
+	has_ref  := false
+	for p in paths {
+		if p == "Window/General/Void File Explorer" do has_fe = true
+		if p == "Tools/Refresh AssetDB" do has_ref = true
+	}
+	testing.expect(t, has_fe && has_ref, "menu tree must support searchable Window/General/Void File Explorer and Tools/Refresh AssetDB")
+
+	repo := engine.resolve_repo_root(context.temp_allocator)
+	gen_path, _ := filepath.join({repo, "haati/editor/menu_items_generated.odin"}, context.temp_allocator)
+	gen_bytes, gerr := os.read_entire_file(gen_path, context.temp_allocator)
+	testing.expect(t, gerr == nil, "menu_items_generated.odin must exist")
+	gen_src := string(gen_bytes)
+	testing.expect(t, strings.contains(gen_src, "\"Window/General/Void File Explorer\""), "generated menu items must expose Void File Explorer")
+	testing.expect(t, strings.contains(gen_src, "\"Tools/Refresh AssetDB\""), "generated menu items must expose Tools/Refresh AssetDB")
+	testing.expect(t, !strings.contains(gen_src, "\"Assets/Refresh AssetDB\""), "Assets/Refresh AssetDB must no longer live under top Assets menu")
 }

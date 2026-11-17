@@ -220,56 +220,114 @@ watchdog_vault_read_and_consume :: proc(
 
 	any_valid := false
 
-	// Zone 0: Camera, selection & scene path
-	mseq := intrinsics.atomic_load(&hdr.meta_seq)
-	if mseq > 0 && (mseq & 1) == 0 {
-		any_valid = true
-		snap.cam_pos     = hdr.cam_pos
-		snap.cam_yaw     = hdr.cam_yaw
-		snap.cam_pitch   = hdr.cam_pitch
-		snap.cam_dist    = hdr.cam_dist
-		snap.cam_target  = hdr.cam_target
-		snap.cam_ortho   = hdr.cam_ortho != 0
-		snap.cam_2d_mode = hdr.cam_2d_mode != 0
-		snap.scene_guid  = hdr.scene_guid
+	// Zone 0: Camera, selection & scene path (tear-proof seqlock reader)
+	for _ in 0 ..< 16 {
+		mseq1 := intrinsics.atomic_load(&hdr.meta_seq)
+		if mseq1 == 0 do break
+		if (mseq1 & 1) != 0 {
+			intrinsics.cpu_relax()
+			continue
+		}
 
-		sel_n := min(int(hdr.selected_count), RELAUNCH_SHM_MAX_SEL)
+		c_cam_pos     := hdr.cam_pos
+		c_cam_yaw     := hdr.cam_yaw
+		c_cam_pitch   := hdr.cam_pitch
+		c_cam_dist    := hdr.cam_dist
+		c_cam_target  := hdr.cam_target
+		c_cam_ortho   := hdr.cam_ortho != 0
+		c_cam_2d_mode := hdr.cam_2d_mode != 0
+		c_scene_guid  := hdr.scene_guid
+
+		sel_n := clamp(int(hdr.selected_count), 0, RELAUNCH_SHM_MAX_SEL)
+		c_lids: []u64 = nil
 		if sel_n > 0 {
-			snap.selected_lids = make([]u64, sel_n, allocator)
+			c_lids = make([]u64, sel_n, allocator)
 			for i in 0 ..< sel_n {
-				snap.selected_lids[i] = hdr.selected_lids[i]
+				c_lids[i] = hdr.selected_lids[i]
 			}
 		}
 
-		path_n := min(int(hdr.scene_path_len), len(hdr.scene_path_buf))
+		path_n := clamp(int(hdr.scene_path_len), 0, len(hdr.scene_path_buf))
+		c_path := ""
 		if path_n > 0 {
-			snap.scene_path = strings.clone(string(hdr.scene_path_buf[:path_n]), allocator)
+			c_path = strings.clone(string(hdr.scene_path_buf[:path_n]), allocator)
 		}
+
+		mseq2 := intrinsics.atomic_load(&hdr.meta_seq)
+		if mseq1 == mseq2 {
+			any_valid        = true
+			snap.cam_pos     = c_cam_pos
+			snap.cam_yaw     = c_cam_yaw
+			snap.cam_pitch   = c_cam_pitch
+			snap.cam_dist    = c_cam_dist
+			snap.cam_target  = c_cam_target
+			snap.cam_ortho   = c_cam_ortho
+			snap.cam_2d_mode = c_cam_2d_mode
+			snap.scene_guid  = c_scene_guid
+			snap.selected_lids = c_lids
+			snap.scene_path  = c_path
+			break
+		}
+		if c_lids != nil do delete(c_lids, allocator)
+		if c_path != "" do delete(c_path, allocator)
+		intrinsics.cpu_relax()
 	}
 
-	// Zone 1: Dirty Code Studio Tabs
-	tseq := intrinsics.atomic_load(&hdr.tabs_seq)
-	if tseq > 0 && (tseq & 1) == 0 {
-		any_valid = true
+	// Zone 1: Dirty Code Studio Tabs (tear-proof seqlock reader)
+	for _ in 0 ..< 16 {
+		tseq1 := intrinsics.atomic_load(&hdr.tabs_seq)
+		if tseq1 == 0 do break
+		if (tseq1 & 1) != 0 {
+			intrinsics.cpu_relax()
+			continue
+		}
+
 		tabs_sz := int(hdr.tabs_json_len)
+		c_tabs: []byte = nil
 		if tabs_sz > 0 && tabs_sz <= WATCHDOG_VAULT_TABS_ZONE_CAP {
-			tabs_json = make([]byte, tabs_sz, allocator)
+			c_tabs = make([]byte, tabs_sz, allocator)
 			src := rawptr(uintptr(view) + uintptr(WATCHDOG_VAULT_TABS_ZONE_OFF))
-			mem.copy(raw_data(tabs_json), src, tabs_sz)
+			mem.copy(raw_data(c_tabs), src, tabs_sz)
 		}
+
+		tseq2 := intrinsics.atomic_load(&hdr.tabs_seq)
+		if tseq1 == tseq2 {
+			any_valid = true
+			tabs_json = c_tabs
+			break
+		}
+		if c_tabs != nil do delete(c_tabs, allocator)
+		intrinsics.cpu_relax()
 	}
 
-	// Zone 2: Unsaved Scene Bytes
-	sseq := intrinsics.atomic_load(&hdr.scene_seq)
-	if sseq > 0 && (sseq & 1) == 0 {
-		any_valid = true
-		bytes_sz := int(hdr.scene_bytes_len)
-		if hdr.has_scene_bytes != 0 && bytes_sz > 0 && bytes_sz <= WATCHDOG_VAULT_SCENE_ZONE_CAP {
-			snap.has_scene_bytes = true
-			snap.scene_bytes = make([]byte, bytes_sz, allocator)
-			src := rawptr(uintptr(view) + uintptr(WATCHDOG_VAULT_SCENE_ZONE_OFF))
-			mem.copy(raw_data(snap.scene_bytes), src, bytes_sz)
+	// Zone 2: Unsaved Scene Bytes (tear-proof seqlock reader)
+	for _ in 0 ..< 16 {
+		sseq1 := intrinsics.atomic_load(&hdr.scene_seq)
+		if sseq1 == 0 do break
+		if (sseq1 & 1) != 0 {
+			intrinsics.cpu_relax()
+			continue
 		}
+
+		bytes_sz := int(hdr.scene_bytes_len)
+		c_has_bytes := false
+		c_bytes: []byte = nil
+		if hdr.has_scene_bytes != 0 && bytes_sz > 0 && bytes_sz <= WATCHDOG_VAULT_SCENE_ZONE_CAP {
+			c_has_bytes = true
+			c_bytes = make([]byte, bytes_sz, allocator)
+			src := rawptr(uintptr(view) + uintptr(WATCHDOG_VAULT_SCENE_ZONE_OFF))
+			mem.copy(raw_data(c_bytes), src, bytes_sz)
+		}
+
+		sseq2 := intrinsics.atomic_load(&hdr.scene_seq)
+		if sseq1 == sseq2 {
+			any_valid            = true
+			snap.has_scene_bytes = c_has_bytes
+			snap.scene_bytes     = c_bytes
+			break
+		}
+		if c_bytes != nil do delete(c_bytes, allocator)
+		intrinsics.cpu_relax()
 	}
 
 	intrinsics.atomic_store(&hdr.consumed, 1)

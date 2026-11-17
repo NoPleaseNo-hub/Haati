@@ -1,28 +1,17 @@
 package tests
 
 import "base:intrinsics"
-import "core:encoding/json"
-import "core:encoding/uuid"
 import "core:fmt"
 import "core:math"
-import "core:mem"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
 import "core:testing"
-import "core:time"
-import "core:unicode/utf8"
-import stbi "vendor:stb/image"
-import stbtt "vendor:stb/truetype"
-import editor "../editor"
 import "../engine"
 import "haati:engine/crash_journal"
 import hot "haati:engine/hot_api"
 import cs "haati:editor/code_studio"
-import "haati:editor/icons"
-import mcp "haati:editor/mcp"
 import vs "haati:editor/visual_script"
-import widgets "haati:editor/widgets"
 
 // 1. Verifies 3-Zone Chimera `.bodin` lossless authoring:
 //    - Multiple custom Odin structs + enum + defer + context.temp_allocator + []f32 in Zone 1
@@ -231,20 +220,7 @@ test_sandbox_exec_layer1_assertion_and_layer2_veh :: proc(t: ^testing.T) {
 	}
 }
 
-// 4. Verifies Settings label humanizer + MCP discovery constant conventions.
-@(test)
-test_settings_humanizer_and_mcp_discovery :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
-	testing.expect_value(t, editor.humanize_setting_label("problem_check_delay_sec"), "Problem Check Delay (s)")
-	testing.expect_value(t, editor.humanize_setting_label("ui_scale"), "UI Scale")
-	testing.expect_value(t, editor.humanize_setting_label("target_fps_hz"), "Target FPS (Hz)")
-	testing.expect_value(t, editor.humanize_setting_label("ide_sandbox_mode"), "IDE Sandbox Mode")
-	testing.expect_value(t, editor.humanize_setting_label("enable_csg_vfs_mcp"), "Enable CSG VFS MCP")
-	testing.expect_value(t, mcp.BRIDGE_FILE_USER_SETTINGS, "UserSettings/mcp_bridge.json")
-}
-
-// 5. Verifies universal all-type Slice (`[]Vec3`), Dynamic Array (`[dynamic]i32`),
+// 4. Verifies universal all-type Slice (`[]Vec3`), Dynamic Array (`[dynamic]i32`),
 //    `Sub_Slice` (`arr[start:end]`), and zero-cost guarded `rawptr` transpilation + VM sequences.
 @(test)
 test_universal_sequences_subslice_and_rawptr_bodin :: proc(t: ^testing.T) {
@@ -352,7 +328,7 @@ test_universal_sequences_subslice_and_rawptr_bodin :: proc(t: ^testing.T) {
 	testing.expect(t, id_seq.data != nil && (cast(^i32)id_seq.data)^ == 42, "VM Array_Op.Append must write i32 element into var_seqs")
 }
 
-// 6. Verifies `hot.validate_raw_ptr` pointer safety checks and `cs.predict_unsafe_odin_hazards`
+// 5. Verifies `hot.validate_raw_ptr` pointer safety checks and `cs.predict_unsafe_odin_hazards`
 //    static detection of dangling stack slices, rawptr integer casts, and append-invalidated views.
 @(test)
 test_validate_raw_ptr_and_unsafe_hazard_predictor :: proc(t: ^testing.T) {
@@ -402,7 +378,7 @@ bad_cast_and_append :: proc() {
 	testing.expect(t, saw_stack && saw_append && saw_cast, "predict_unsafe_odin_hazards must catch stack slice return, append invalidation, and rawptr(uintptr)")
 }
 
-// 7. Verifies in-process heap canary + NaN Transform scrubber (`visual_script_verify_and_repair_entity`).
+// 6. Verifies in-process heap canary + NaN Transform scrubber (`visual_script_verify_and_repair_entity`).
 @(test)
 test_in_process_canary_and_nan_transform_scrubber :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
@@ -446,406 +422,7 @@ test_in_process_canary_and_nan_transform_scrubber :: proc(t: ^testing.T) {
 	testing.expect(t, !nan_fixed2, "after auto-repair, subsequent scrubber pass must report clean state")
 }
 
-// 8. Verifies out-of-process Watchdog 16 MB Kernel RAM Vault write + read_and_consume roundtrip on Windows.
-@(test)
-test_watchdog_kernel_ram_vault_roundtrip :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
-	when ODIN_OS == .Windows {
-		vault_name := fmt.tprintf("Local\\Haati_WD_UnitTest_%d", os.get_pid())
-		vh, vok := engine.watchdog_vault_create(vault_name)
-		testing.expect(t, vok && vh != nil, "watchdog_vault_create must create Windows pagefile section")
-		if !vok || vh == nil do return
-		defer engine.watchdog_vault_close(vh)
-
-		scene_str := "{\"root\":1,\"entities\":4}"
-		tabs_str  := "[{\"path\":\"hot_scripts/player.odin\",\"text\":\"package hot_scripts\"}]"
-		lids      := [?]u64{101, 202}
-		snap := engine.Relaunch_SHM_Snapshot{
-			has_scene_bytes = true,
-			cam_pos         = {12.5, 4.0, -8.5},
-			cam_yaw         = 0.75,
-			cam_pitch       = -0.25,
-			cam_dist        = 15.0,
-			cam_target      = {1, 2, 3},
-			cam_ortho       = false,
-			cam_2d_mode     = true,
-			selected_lids   = lids[:],
-			scene_path      = "assets/scenes/arena.scene",
-			scene_bytes     = transmute([]byte)scene_str,
-		}
-
-		testing.expect(t, engine.watchdog_vault_write(vh, snap, transmute([]byte)tabs_str), "watchdog_vault_write must succeed")
-
-		rsnap, rtabs, rok := engine.watchdog_vault_read_and_consume(vault_name, context.temp_allocator)
-		testing.expect(t, rok, "watchdog_vault_read_and_consume must restore staged snapshot")
-		testing.expect(t, rsnap.has_scene_bytes && rsnap.cam_2d_mode, "camera and scene flags must roundtrip through Kernel RAM Vault")
-		testing.expect(t, rsnap.cam_pos == snap.cam_pos, "cam_pos must roundtrip accurately")
-		testing.expect_value(t, len(rsnap.selected_lids), 2)
-		testing.expect_value(t, rsnap.selected_lids[1], u64(202))
-		testing.expect_value(t, rsnap.scene_path, "assets/scenes/arena.scene")
-		testing.expect_value(t, string(rsnap.scene_bytes), scene_str)
-		testing.expect_value(t, string(rtabs), tabs_str)
-	}
-}
-
-// 9. Verifies incomplete Odin `for` headers (`for i, ` / `for k, v {`) do not trigger
-//    `core/odin/parser/parser.odin:938` `assert(as.op.kind == .In)`, preserve caller
-//    `context.allocator`, and leak 0 heap allocations.
-@(test)
-test_parser_incomplete_for_header_no_assert_and_allocator_preserved :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
-	track: mem.Tracking_Allocator
-	mem.tracking_allocator_init(&track, context.allocator)
-	defer mem.tracking_allocator_destroy(&track)
-
-	{
-		context.allocator = mem.tracking_allocator(&track)
-		orig_proc := context.allocator.procedure
-
-		d1, _ := cs.check_odin_syntax_in_ram("package demo\nf :: proc() {\n\tfor i, \n}\n", false, context.allocator)
-		testing.expect(t, context.allocator.procedure == orig_proc, "check_odin_syntax_in_ram must preserve caller context.allocator on incomplete `for i, `")
-		testing.expect(t, len(d1) > 0 && !d1[0].is_warning, "expected syntax error diagnostic on incomplete `for i, `")
-		for d in d1 {
-			delete(d.file)
-			delete(d.message)
-		}
-		delete(d1)
-
-		d2, _ := cs.check_odin_syntax_in_ram("package demo\nf :: proc() {\n\tfor k, v {\n\t}\n}\n", false, context.allocator)
-		testing.expect(t, context.allocator.procedure == orig_proc, "check_odin_syntax_in_ram must preserve caller context.allocator on incomplete `for k, v {`")
-		testing.expect(t, len(d2) > 0, "expected diagnostic on incomplete `for k, v {` without `in`")
-		for d in d2 {
-			delete(d.file)
-			delete(d.message)
-		}
-		delete(d2)
-	}
-
-	testing.expectf(t, len(track.allocation_map) == 0, "expected 0 leaked allocations after syntax parse, got %d", len(track.allocation_map))
-	testing.expectf(t, len(track.bad_free_array) == 0, "expected 0 bad frees after syntax parse, got %d", len(track.bad_free_array))
-}
-
-// 10. Verifies Odin `-json-errors` fatal error severity elevation (even when tagged `"type": "warning"`
-//     with `"error_count": 1`) and legacy `moonhug:` -> `haati:` / `project:` import migration.
-@(test)
-test_odin_json_error_severity_and_moonhug_migration :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
-	fatal_warn_json := `{"error_count": 1, "errors": [{"type": "warning", "pos": {"file": "demo.odin", "line": 8, "column": 1, "end_column": 42}, "msgs": ["Syntax Error: Invalid path: moonhug:packages/demo_proj/Scenes/CamPawn"]}]}`
-	fdiags := cs.parse_odin_json_errors(fatal_warn_json, context.temp_allocator)
-	testing.expect_value(t, len(fdiags), 1)
-	if len(fdiags) == 1 {
-		testing.expect(t, !fdiags[0].is_warning, "fatal import syntax error with error_count=1 must elevate to hard error")
-		testing.expect_value(t, fdiags[0].line, 8)
-	}
-
-	real_warn_json := `{"error_count": 0, "errors": [{"type": "warning", "pos": {"file": "demo.odin", "line": 3, "column": 1, "end_column": 10}, "msgs": ["Unused import"]}]}`
-	wdiags := cs.parse_odin_json_errors(real_warn_json, context.temp_allocator)
-	testing.expect_value(t, len(wdiags), 1)
-	if len(wdiags) == 1 {
-		testing.expect(t, wdiags[0].is_warning, "non-fatal warning with error_count=0 must stay is_warning=true")
-	}
-
-	m1, ok1 := cs.compute_haati_import_migration("moonhug:engine", "", context.temp_allocator)
-	testing.expect(t, ok1 && m1 == "haati:engine", "moonhug:engine must migrate to haati:engine")
-	m2, ok2 := cs.compute_haati_import_migration("moonhug:app/helpers", "", context.temp_allocator)
-	testing.expect(t, ok2 && m2 == "haati:packages/app/helpers", "moonhug:app/* must migrate to haati:packages/app/*")
-	m3, ok3 := cs.compute_haati_import_migration("moonhug:packages/control_rig", "my_game", context.temp_allocator)
-	testing.expect(t, ok3 && m3 == "haati:packages/control_rig", "plugin package must migrate to haati:packages/*")
-	m4, ok4 := cs.compute_haati_import_migration("moonhug:packages/my_game/Scenes/CamPawn", "my_game", context.temp_allocator)
-	testing.expect(t, ok4 && m4 == "project:Scenes/CamPawn", "active project self-import must migrate to project:*")
-
-	legacy_src := "package p\n// import \"moonhug:ignored_comment\"\nimport \"moonhug:engine\"\nimport cam \"moonhug:packages/my_game/Scenes/CamPawn\"\n"
-	lints := cs.lint_legacy_moonhug_imports(legacy_src, "p.odin", "my_game", context.temp_allocator)
-	testing.expect_value(t, len(lints), 2)
-	migrated, cnt := cs.migrate_all_legacy_moonhug_imports(legacy_src, "my_game", context.temp_allocator)
-	testing.expect_value(t, cnt, 2)
-	testing.expect(t, strings.contains(migrated, "// import \"moonhug:ignored_comment\""), "commented import lines must remain untouched")
-	testing.expect(t, strings.contains(migrated, "import \"haati:engine\""), "engine import must migrate to haati:engine")
-	testing.expect(t, strings.contains(migrated, "import cam \"project:Scenes/CamPawn\""), "project import must migrate to project:Scenes/CamPawn")
-}
-
-// 11. Verifies 3-Zone Watchdog Vault independent zone writes preserve untouched zones.
-@(test)
-test_watchdog_vault_3zone_independent_updates :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
-	when ODIN_OS == .Windows {
-		vault_name := fmt.tprintf("Local\\Haati_WD_3ZoneTest_%d", os.get_pid())
-		vh, vok := engine.watchdog_vault_create(vault_name)
-		testing.expect(t, vok && vh != nil, "watchdog_vault_create must succeed")
-		if !vok || vh == nil do return
-		defer engine.watchdog_vault_close(vh)
-
-		scene_str := "{\"scene\":1}"
-		tabs_v1   := "[{\"abs_path\":\"a.odin\",\"content\":\"v1\"}]"
-		tabs_v2   := "[{\"abs_path\":\"a.odin\",\"content\":\"v2\"}]"
-
-		m1 := engine.Relaunch_SHM_Snapshot{
-			cam_pos    = {1, 2, 3},
-			cam_yaw    = 1.0,
-			scene_path = "assets/s1.scene",
-		}
-		testing.expect(t, engine.watchdog_vault_write_meta(vh, m1), "initial Zone 0 meta write must succeed")
-		testing.expect(t, engine.watchdog_vault_write_tabs(vh, transmute([]byte)tabs_v1), "initial Zone 1 tabs write must succeed")
-		testing.expect(t, engine.watchdog_vault_write_scene(vh, true, transmute([]byte)scene_str), "initial Zone 2 scene write must succeed")
-
-		// Update ONLY Zone 0 and Zone 1 without re-writing Zone 2
-		m2 := m1
-		m2.cam_yaw = 2.5
-		testing.expect(t, engine.watchdog_vault_write_meta(vh, m2), "updated Zone 0 meta write must succeed")
-		testing.expect(t, engine.watchdog_vault_write_tabs(vh, transmute([]byte)tabs_v2), "updated Zone 1 tabs write must succeed")
-
-		rsnap, rtabs, rok := engine.watchdog_vault_read_and_consume(vault_name, context.temp_allocator)
-		testing.expect(t, rok, "watchdog_vault_read_and_consume must read updated 3-zone vault")
-		testing.expect_value(t, rsnap.cam_yaw, f32(2.5))
-		testing.expect_value(t, string(rtabs), tabs_v2)
-		testing.expect(t, rsnap.has_scene_bytes, "Zone 2 has_scene_bytes must remain intact across Zone 0/1 writes")
-		testing.expect_value(t, string(rsnap.scene_bytes), scene_str)
-	}
-}
-
-// 12. Verifies indexing a large multi-file package (`haati/engine`, 90+ `.odin` files) does not
-//     wrap or corrupt the 4 MB `context.temp_allocator` ring buffer, preserves caller allocator,
-//     and frees with zero leaked heap allocations or invalid string bytes.
-@(test)
-test_autocomplete_large_engine_package_index_no_ring_wrap_or_leak :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
-	track: mem.Tracking_Allocator
-	mem.tracking_allocator_init(&track, context.allocator)
-	defer mem.tracking_allocator_destroy(&track)
-
-	sym_count := 0
-	all_valid_utf8 := true
-	{
-		context.allocator = mem.tracking_allocator(&track)
-		orig_proc := context.allocator.procedure
-
-		syms := cs.index_package_dir_symbols("haati/engine", context.allocator)
-		testing.expect(t, context.allocator.procedure == orig_proc, "index_package_dir_symbols must preserve caller context.allocator")
-		sym_count = len(syms)
-		for s in syms {
-			if s.name == "" || !utf8.valid_string(s.name) ||
-			   !utf8.valid_string(s.insert_text) ||
-			   !utf8.valid_string(s.detail) ||
-			   !utf8.valid_string(s.receiver) {
-				all_valid_utf8 = false
-			}
-			if s.name        != "" do delete(s.name)
-			if s.insert_text != "" do delete(s.insert_text)
-			if s.detail      != "" do delete(s.detail)
-			if s.receiver    != "" do delete(s.receiver)
-		}
-		delete(syms)
-	}
-
-	testing.expectf(t, sym_count >= 100, "expected >= 100 indexed symbols across haati/engine, got %d", sym_count)
-	testing.expect(t, all_valid_utf8, "every indexed symbol must hold intact valid UTF-8 strings with zero ring-buffer overwrite")
-	testing.expectf(t, len(track.allocation_map) == 0, "expected 0 leaked allocations after indexing haati/engine, got %d", len(track.allocation_map))
-	testing.expectf(t, len(track.bad_free_array) == 0, "expected 0 bad frees after indexing haati/engine, got %d", len(track.bad_free_array))
-}
-
-// 13. Verifies embedded Phosphor Regular (`Phosphor.ttf`) and newly added Material Symbols
-//     constants decode to single PUA runes and map to real glyph indices inside the TTF font.
-@(test)
-test_phosphor_and_material_icon_glyphs_valid_pua :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
-	ph_font: stbtt.fontinfo
-	init_ok := bool(stbtt.InitFont(&ph_font, raw_data(editor.PHOSPHOR_FONT_DATA), 0))
-	testing.expect(t, init_ok, "Phosphor.ttf must parse cleanly via stb_truetype")
-	if !init_ok do return
-
-	ph_samples := [?]string{
-		icons.ICON_PH_VECTOR_THREE,
-		icons.ICON_PH_BLUEPRINT,
-		icons.ICON_PH_UNITE,
-		icons.ICON_PH_SUBTRACT,
-		icons.ICON_PH_INTERSECT,
-		icons.ICON_PH_BONE,
-		icons.ICON_PH_SWORD,
-		icons.ICON_PH_CUBE,
-	}
-	for g in ph_samples {
-		r, n := utf8.decode_rune_in_string(g)
-		testing.expect(t, n == len(g) && r >= icons.ICON_PH_MIN && r <= icons.ICON_PH_MAX, "Phosphor constant must be a single PUA rune")
-		glyph_idx := stbtt.FindGlyphIndex(&ph_font, r)
-		testing.expectf(t, glyph_idx != 0, "Phosphor.ttf missing glyph index for codepoint U+%04X", u32(r))
-	}
-
-	md_samples := [?]string{
-		icons.ICON_MD_LIGHTBULB,
-		icons.ICON_MD_WB_SUNNY,
-		icons.ICON_MD_SKELETON,
-		icons.ICON_MD_PSYCHOLOGY,
-		icons.ICON_MD_SMART_TOY,
-		icons.ICON_MD_MEMORY,
-		icons.ICON_MD_BUG_REPORT,
-		icons.ICON_MD_ROCKET_LAUNCH,
-	}
-	for g in md_samples {
-		r, n := utf8.decode_rune_in_string(g)
-		testing.expect(t, n == len(g) && r >= icons.ICON_MD_MIN && r <= icons.ICON_MD_MAX, "Material icon constant must be a single PUA rune")
-	}
-}
-
-// 14. Verifies `submit_async_check` and `set_checker_dirty_overlays` persist normalized paths
-//     on the heap so wiping & overwriting `context.temp_allocator` cannot cause a worker UAF.
-@(test)
-test_async_checker_norm_path_heap_lifetime_no_uaf :: proc(t: ^testing.T) {
-	defer cs.shutdown_checker()
-	defer free_all(context.temp_allocator)
-
-	cs.set_problem_check_delay_sec(0.05)
-	defer cs.set_problem_check_delay_sec(0.9)
-
-	for i in 0 ..< 5 {
-		temp_ov := fmt.tprintf("C:/Haati_Temp_Test\\dir_%d\\overlay_script_%d.bodin", i, i)
-		temp_sub := fmt.tprintf("C:/Haati_Temp_Test\\dir_%d\\active_script_%d.bodin", i, i)
-		cs.set_checker_dirty_overlays([]cs.Dirty_File_Overlay{
-			{abs_path = temp_ov, code = "package hot_scripts\n", is_bodin = true},
-		})
-		cs.submit_async_check("package hot_scripts\n// valid syntax\n", false, "", false, temp_sub)
-
-		// Wipe and poison temp_allocator immediately while worker holds queued strings!
-		free_all(context.temp_allocator)
-		poison := make([]u8, 16 * 1024, context.temp_allocator)
-		mem.set(raw_data(poison), 0xAA, len(poison))
-
-		time.sleep(5 * time.Millisecond)
-		snap := cs.read_checker_snapshot(context.temp_allocator)
-		testing.expect(t, utf8.valid_string(snap.summary_label), "checker snapshot summary must stay valid UTF-8")
-	}
-	cs.set_checker_dirty_overlays(nil)
-}
-
-// 15. Verifies HTSCN001 binary scene encoding, O(1) embedded UTF-8 summary (`deps:` + hierarchy),
-//     lossless round-trip decode, and CRC32 corruption / truncation rejection without leaking.
-@(test)
-test_htscn001_binary_scene_roundtrip_summary_and_corruption_guard :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
-	prefab_id, _ := uuid.read("11111111-2222-4333-8444-555555555555")
-	prefab_guid := engine.Asset_GUID(prefab_id)
-
-	sf: engine.SceneFile
-	sf.schema_version = engine.SCENE_SCHEMA_VERSION
-	sf.root = 100
-
-	tr := engine.Transform{
-		local_id     = 100,
-		name         = strings.clone("WatchWolfRoot"),
-		is_active    = true,
-		position     = {1.5, 2.25, -3.5},
-		rotation     = {0, 0, 0, 1},
-		scale        = {1, 1, 1},
-		render_layer = 3,
-	}
-	append(&tr.children, engine.Ref{pptr = engine.PPtr{local_id = 200}})
-	append(&tr.components, engine.Owned{local_id = 300})
-	append(&sf.transforms, tr)
-
-	comp_obj := make(json.Object)
-	comp_obj[strings.clone("__type")] = json.String(strings.clone("9f36ee91-34b6-4636-a360-ee872af0436b"))
-	comp_base := make(json.Object)
-	comp_base[strings.clone("local_id")] = json.Integer(300)
-	comp_obj[strings.clone("base")] = comp_base
-	comp_obj[strings.clone("intensity")] = json.Float(2.5)
-	append(&sf.components, comp_obj)
-
-	ns := engine.NestedScene{
-		local_id           = 500,
-		local_id_in_parent = 500,
-		source_prefab      = prefab_guid,
-		transform_parent   = 100,
-		sibling_index      = 1,
-	}
-	append(&ns.overrides, engine.Override{
-		target        = engine.PPtr{guid = prefab_guid, local_id = 42},
-		property_path = strings.clone("speed"),
-		value         = json.Float(9.25),
-	})
-	append(&sf.nested_scenes, ns)
-
-	append(&sf.breadcrumbs, engine.Breadcrumb{
-		local_id       = 700,
-		scene_source   = engine.PPtr{guid = prefab_guid, local_id = 42},
-		scene_instance = 500,
-	})
-	defer engine.scene_file_destroy(&sf)
-
-	bin, bok := engine.scene_binary_encode(&sf)
-	testing.expect(t, bok && len(bin) >= engine.SCENE_BINARY_HEADER_SIZE, "scene_binary_encode must succeed")
-	if !bok do return
-	defer delete(bin)
-
-	testing.expect(t, engine.scene_bytes_is_binary(bin), "encoded buffer must carry HTSCN001 magic")
-
-	summary, sok := engine.scene_extract_summary(bin, context.temp_allocator)
-	testing.expect(t, sok, "scene_extract_summary must succeed on encoded HTSCN001")
-	testing.expect(t, strings.contains(summary, "WatchWolfRoot"), "summary must list transform name")
-	testing.expect(t, strings.contains(summary, "deps: 11111111-2222-4333-8444-555555555555"), "summary must emit deps: cross-asset prefab GUID")
-
-	dec_sf: engine.SceneFile
-	uerr := engine.scene_file_unmarshal(bin, &dec_sf)
-	testing.expect(t, uerr == nil, "scene_file_unmarshal must decode HTSCN001 cleanly")
-	if uerr != nil do return
-	defer engine.scene_file_destroy(&dec_sf)
-
-	testing.expect_value(t, dec_sf.schema_version, sf.schema_version)
-	testing.expect_value(t, dec_sf.root, sf.root)
-	testing.expect_value(t, len(dec_sf.transforms), 1)
-	testing.expect_value(t, dec_sf.transforms[0].name, "WatchWolfRoot")
-	testing.expect_value(t, len(dec_sf.nested_scenes), 1)
-	testing.expect(t, dec_sf.nested_scenes[0].source_prefab == prefab_guid, "prefab GUID round-trips bit-exact")
-	testing.expect_value(t, len(dec_sf.breadcrumbs), 1)
-	testing.expect_value(t, len(dec_sf.components), 1)
-
-	// Flip 1 byte in payload -> CRC32 guard must reject cleanly without leaking.
-	corrupt := make([]u8, len(bin), context.temp_allocator)
-	copy(corrupt, bin)
-	corrupt[len(corrupt) - 1] ~= 0x55
-	corrupt_sf: engine.SceneFile
-	testing.expect(t, !engine.scene_binary_decode(corrupt, &corrupt_sf), "CRC32 must reject 1-bit payload corruption")
-	trunc_sf: engine.SceneFile
-	testing.expect(t, !engine.scene_binary_decode(bin[:len(bin) - 4], &trunc_sf), "truncated payload must be rejected cleanly")
-}
-
-// 16. Verifies embedded Watch-Wolf mascot asset decodes as a valid 96x96 PNG.
-@(test)
-test_watch_wolf_png_asset_embedded_valid :: proc(t: ^testing.T) {
-	png := widgets.watch_wolf_png_bytes()
-	testing.expect(t, len(png) > 64, "watch_wolf_96.png bytes must be embedded non-empty")
-	if len(png) < 8 do return
-	sig := [8]u8{0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'}
-	testing.expect(t, mem.compare(png[:8], sig[:]) == 0, "embedded asset must start with valid PNG header")
-
-	w, h, comp: i32
-	ok := bool(stbi.info_from_memory(raw_data(png), i32(len(png)), &w, &h, &comp))
-	testing.expect(t, ok, "stbi.info_from_memory must parse embedded Watch-Wolf PNG")
-	testing.expect_value(t, w, 96)
-	testing.expect_value(t, h, 96)
-}
-
-// 17. Verifies read-only protection blacklist rejects engine/editor/plugin paths while allowing project & user scripts.
-@(test)
-test_protected_readonly_script_blacklist :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
-	testing.expect(t, cs.is_protected_readonly_script_path("haati/engine/world.odin"), "haati/engine must be read-only")
-	testing.expect(t, cs.is_protected_readonly_script_path("C:/repo/Haati_Engine/haati/editor/main.odin"), "haati/editor must be read-only")
-	testing.expect(t, cs.is_protected_readonly_script_path("haati/hot_scripts/builtin_hot_scripts.odin"), "builtin_hot_scripts.odin must be read-only")
-	testing.expect(t, cs.is_protected_readonly_script_path("plugins/void_custom/foo.odin"), "plugins/ scripts must be read-only")
-	testing.expect(t, cs.is_protected_readonly_script_path("tools/haati/cli.odin"), "tools/ scripts must be read-only")
-
-	testing.expect(t, !cs.is_protected_readonly_script_path("assets/scripts/player.bodin"), "user .bodin scripts must be editable")
-	testing.expect(t, !cs.is_protected_readonly_script_path("C:/Projects/MyGame/player_cam.bodin"), "project .bodin scripts must be editable")
-}
-
-// 18. Verifies full-declaration Odin procedure extraction/splicing AND 3-tier smart pin/wire remapping.
+// 7. Verifies full-declaration Odin procedure extraction/splicing AND 3-tier smart pin/wire remapping.
 @(test)
 test_full_proc_extract_splice_and_smart_wire_remap :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
@@ -920,32 +497,171 @@ bobRoss :: proc(damage: u8, z: string, a: f32, bonus: f32) -> (ok: bool) {
 	testing.expect(t, kept_d_wire, "Tier-2 smart slot+type wire remap must preserve wire when `d: u8` is renamed `damage: u8`")
 }
 
-// 19. Verifies AST-backed `find_odin_proc_call_sites` ignores strings, line comments, block comments, and declarations.
+// 8. Verifies exporting a hybrid `.bodin` Blueprint script strips `@BODIN_GRAPH_V1` metadata
+//    and writes a clean standalone `.odin` file beside it.
 @(test)
-test_ast_proc_call_sites_ignores_comments_and_strings :: proc(t: ^testing.T) {
+test_ux_bodin_export_to_standalone_odin_roundtrip :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 
-	src := `package test_calls
+	tmp_dir, terr := os.temp_dir(context.temp_allocator)
+	testing.expect(t, terr == nil, "os.temp_dir must succeed")
+	bodin_p, _ := filepath.join({tmp_dir, "ux_roundtrip_test_bp.bodin"}, context.temp_allocator)
+	exp_odin_p, _ := filepath.join({tmp_dir, "ux_roundtrip_test_bp.odin"}, context.temp_allocator)
+	_ = os.remove(bodin_p)
+	_ = os.remove(exp_odin_p)
+	defer {
+		_ = os.remove(bodin_p)
+		_ = os.remove(exp_odin_p)
+	}
 
-bobRoss :: proc(a: int, s: string = "") {
-	_ = a; _ = s
+	bodin_body := strings.concatenate({
+		"package hot_scripts\n\nmy_bp_proc :: proc() -> int {\n\treturn 42\n}\n\n",
+		engine.BODIN_GRAPH_BEGIN,
+		"\n// {\"name\": \"ux_roundtrip_test_bp\"}\n",
+		engine.BODIN_GRAPH_END,
+		"\n",
+	}, context.temp_allocator)
+	werr := os.write_entire_file(bodin_p, transmute([]u8)bodin_body)
+	testing.expect(t, werr == nil, "setup write of temp .bodin must succeed")
+
+	out_odin, ok := vs.export_bodin_to_standalone_odin(bodin_p, context.temp_allocator)
+	testing.expect(t, ok, "export_bodin_to_standalone_odin must succeed on valid .bodin")
+	testing.expect(t, os.exists(out_odin), "exported .odin file must exist on disk")
+
+	raw_out, rerr := os.read_entire_file(out_odin, context.temp_allocator)
+	testing.expect(t, rerr == nil, "reading exported .odin must succeed")
+	out_str := string(raw_out)
+	testing.expect(t, strings.contains(out_str, "my_bp_proc :: proc() -> int"), "exported .odin must retain Odin procedures")
+	testing.expect(t, !strings.contains(out_str, engine.BODIN_GRAPH_BEGIN), "exported .odin must strip embedded @BODIN_GRAPH_V1 block")
 }
 
-caller :: proc() {
-	fake := "bobRoss(1)"
-	// bobRoss(2)
-	/* bobRoss(3) */
-	bobRoss(4, "hi")
-	pkg.bobRoss(5)
-	_ = fake
+// 9. Verifies Blueprint `.Delegate` pin drop target collection gathers local
+//    `.Custom_Proc_Entry` events and `@(hot_proc)` targets and filters cleanly by query.
+@(test)
+test_blueprint_delegate_pin_collect_bind_targets :: proc(t: ^testing.T) {
+	g: engine.Visual_Graph
+	g.name = strings.clone("delegate_target_test_bp")
+	defer engine.vg_destroy_graph(&g)
+
+	append(&g.nodes, engine.VG_Node{
+		uid             = 10,
+		kind            = .Custom_Proc_Entry,
+		title           = strings.clone("On Custom Jump"),
+		hot_proc_target = strings.clone("On_Custom_Jump"),
+	})
+	append(&g.nodes, engine.VG_Node{
+		uid             = 11,
+		kind            = .Custom_Proc_Entry,
+		title           = strings.clone("On Dash Start"),
+		hot_proc_target = strings.clone("On_Dash_Start"),
+	})
+
+	extra := [?]string{"play_explosion_vfx", "apply_damage"}
+
+	all_targets := vs.collect_delegate_pin_bind_targets(&g, "", extra[:], context.temp_allocator)
+	has_jump := false
+	has_dash := false
+	has_vfx := false
+	for tgt in all_targets {
+		if tgt.kind == .Custom_Event && tgt.name == "On_Custom_Jump" && tgt.node_uid == 10 do has_jump = true
+		if tgt.kind == .Custom_Event && tgt.name == "On_Dash_Start" && tgt.node_uid == 11 do has_dash = true
+		if tgt.kind == .Hot_Proc && tgt.name == "play_explosion_vfx" do has_vfx = true
+	}
+	testing.expect(t, has_jump, "expected On_Custom_Jump custom event target")
+	testing.expect(t, has_dash, "expected On_Dash_Start custom event target")
+	testing.expect(t, has_vfx, "expected extra hot_proc target play_explosion_vfx")
+
+	jump_only := vs.collect_delegate_pin_bind_targets(&g, "jump", extra[:], context.temp_allocator)
+	testing.expect(t, len(jump_only) >= 1, "expected query 'jump' to match On_Custom_Jump")
+	for tgt in jump_only {
+		testing.expect(t, strings.contains(strings.to_lower(tgt.name, context.temp_allocator), "jump"), "filtered targets must match query")
+	}
+
+	vfx_only := vs.collect_delegate_pin_bind_targets(&g, "explosion", extra[:], context.temp_allocator)
+	found_vfx := false
+	for tgt in vfx_only {
+		if tgt.kind == .Hot_Proc && tgt.name == "play_explosion_vfx" do found_vfx = true
+	}
+	testing.expect(t, found_vfx, "expected query 'explosion' to return play_explosion_vfx")
 }
-`
-	sites := cs.find_odin_proc_call_sites(src, "caller.odin", "bobRoss", context.temp_allocator)
-	testing.expect_value(t, len(sites), 2)
-	if len(sites) == 2 {
-		testing.expect_value(t, sites[0].line, 11)
-		testing.expect_value(t, sites[0].arg_count, 2)
-		testing.expect_value(t, sites[1].line, 12)
-		testing.expect_value(t, sites[1].arg_count, 1)
+
+// 10. Verifies Unified Graph Studio domains (`Anim_Motion`, `Particle_VFX`), Tier-1 live evaluation,
+//     Tier-2 Data-Oriented `.bodin` Odin transpilation of Motion & GPU VFX nodes, AND legacy Unicode
+//     pin-name sanitization (`◇` / `▷` stripped cleanly on load so `? ? Delegate` never appears)!
+@(test)
+test_unified_graph_studio_domains_transpiler_and_pin_sanitization :: proc(t: ^testing.T) {
+	tc_mem := new(TestCtx)
+	defer free(tc_mem)
+	setup(tc_mem, "")
+	context.user_ptr = &tc_mem.uc
+	defer teardown(tc_mem)
+
+	g: engine.Visual_Graph
+	g.name           = strings.clone("unit_unified_motion_vfx")
+	g.domain         = .Anim_Motion
+	g.package_target = strings.clone("haati/hot_scripts")
+	engine.vg_ensure_default_spaces(&g)
+	defer engine.vg_destroy_graph(&g)
+
+	append(&g.variables, engine.VG_Var_Decl{
+		name        = strings.clone("blended_pose"),
+		pin_type    = .Float,
+		default_f32 = 0.0,
+	})
+
+	u_tick   := engine.vg_add_node(&g, .Event_Tick,          {0, 0})
+	u_clip   := engine.vg_add_node(&g, .Anim_Clip_Eval,      {220, 0})
+	u_blend  := engine.vg_add_node(&g, .Anim_Blend_Layered,  {440, 0})
+	u_spring := engine.vg_add_node(&g, .Anim_Spring_Damper,  {660, 0})
+	u_set    := engine.vg_add_node(&g, .Set_Variable,        {880, 0}, "blended_pose")
+	u_ik     := engine.vg_add_node(&g, .Anim_IK_Target,      {1100, 0})
+	u_vfx_sp := engine.vg_add_node(&g, .VFX_Emitter_Spawn,   {1320, 0})
+	u_curl   := engine.vg_add_node(&g, .VFX_GPU_Curl_Force,  {880, 220})
+	u_life   := engine.vg_add_node(&g, .VFX_Color_Size_Life, {880, 360})
+
+	if nb := engine.vg_find_node(&g, u_blend); nb != nil && len(nb.inputs) >= 3 {
+		nb.inputs[0].default_f32 = 0.20
+		nb.inputs[1].default_f32 = 0.80
+		nb.inputs[2].default_f32 = 0.50
+	}
+	if ns := engine.vg_find_node(&g, u_spring); ns != nil && len(ns.inputs) >= 3 {
+		ns.inputs[0].default_f32 = 0.00
+		ns.inputs[2].default_f32 = 20.0
+	}
+	if nc := engine.vg_find_node(&g, u_clip); nc != nil && len(nc.outputs) > 0 {
+		delete(nc.outputs[0].name)
+		nc.outputs[0].name = strings.clone("\u25c7 Pose Weight")
+	}
+
+	append(&g.wires, engine.VG_Wire{from_uid = u_tick, from_pin = 0, to_uid = u_set,    to_pin = 0})
+	append(&g.wires, engine.VG_Wire{from_uid = u_set,  from_pin = 0, to_uid = u_ik,     to_pin = 0})
+	append(&g.wires, engine.VG_Wire{from_uid = u_ik,   from_pin = 0, to_uid = u_vfx_sp, to_pin = 0})
+	append(&g.wires, engine.VG_Wire{from_uid = u_blend,  from_pin = 0, to_uid = u_spring, to_pin = 1})
+	append(&g.wires, engine.VG_Wire{from_uid = u_spring, from_pin = 0, to_uid = u_set,    to_pin = 1})
+	append(&g.wires, engine.VG_Wire{from_uid = u_curl, from_pin = 0, to_uid = u_ik,     to_pin = 1})
+	append(&g.wires, engine.VG_Wire{from_uid = u_life, from_pin = 0, to_uid = u_vfx_sp, to_pin = 1})
+
+	ent := engine.transform_new("UnifiedMotionEntity")
+	bb: engine.VG_Runtime_Blackboard
+	defer delete(bb.last_exec_path)
+	engine.vg_eval_graph_live(&g, &bb, ent, 0.05)
+	testing.expect(t, bb.initialized && bb.slots[0].val_f32 > 0.25 && bb.slots[0].val_f32 <= 0.50, "expected Tier-1 live Blend+Spring evaluation to advance blended_pose toward 0.5")
+
+	odin_code, main_proc := vs.transpile_graph_to_odin(&g, context.temp_allocator)
+	testing.expect_value(t, main_proc, "mhgraph_unit_unified_motion_vfx")
+	testing.expect(t, strings.contains(odin_code, "math.lerp("), "expected Anim_Blend_Layered / VFX_Color_Size_Life math.lerp emission")
+	testing.expect(t, strings.contains(odin_code, "hot.damp_f32("), "expected Anim_Spring_Damper hot.damp_f32 emission")
+
+	repo_root := engine.resolve_repo_root(context.temp_allocator)
+	tmp_abs, _ := filepath.join({repo_root, fmt.tprintf("assets/scripts/_tmp_unified_%d.bodin", os.get_pid())}, context.temp_allocator)
+	testing.expect(t, engine.vg_save_bodin_file(&g, tmp_abs, odin_code), "expected .bodin save to succeed")
+	defer _ = os.remove(tmp_abs)
+
+	loaded: engine.Visual_Graph
+	defer engine.vg_destroy_graph(&loaded)
+	testing.expect(t, engine.vg_load_from_file(&loaded, tmp_abs), "expected .bodin load to succeed")
+	testing.expect_value(t, loaded.domain, engine.VG_Graph_Domain.Anim_Motion)
+	if lc := engine.vg_find_node(&loaded, u_clip); lc != nil && len(lc.outputs) > 0 {
+		testing.expect_value(t, lc.outputs[0].name, "Pose Weight")
 	}
 }

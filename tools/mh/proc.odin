@@ -66,6 +66,123 @@ run_timeout :: proc(timeout: time.Duration, command: ..string) -> int {
 	return state.exit_code
 }
 
+// run_test_checked runs the test command via inheritable OS pipes, streaming live
+// stdout/stderr while scanning combined output for Tracking_Allocator errors.
+run_test_checked :: proc(timeout: time.Duration, command: ..string) -> int {
+	stdout_r, stdout_w, oerr := os.pipe()
+	if oerr != nil {
+		return run_timeout(timeout, ..command)
+	}
+	defer os.close(stdout_r)
+
+	stderr_r, stderr_w, eerr := os.pipe()
+	if eerr != nil {
+		os.close(stdout_w)
+		return run_timeout(timeout, ..command)
+	}
+	defer os.close(stderr_r)
+
+	p: os.Process
+	{
+		defer os.close(stdout_w)
+		defer os.close(stderr_w)
+		perr: os.Error
+		p, perr = os.process_start({command = command, stdout = stdout_w, stderr = stderr_w, stdin = os.stdin})
+		if perr != nil {
+			fmt.eprintfln("mh: cannot start %s: %v", command[0], perr)
+			return -1
+		}
+	}
+
+	captured := make([dynamic]byte, 0, 16 * 1024, context.temp_allocator)
+	start_tick := time.tick_now()
+	stdout_done, stderr_done, waited: bool
+	final_state: os.Process_State
+	buf: [4096]byte = ---
+
+	drain_pipe :: proc(pipe: ^os.File, sink: ^os.File, captured: ^[dynamic]byte, buf: []byte) -> (did_work: bool, done: bool) {
+		for {
+			has_data, herr := os.pipe_has_data(pipe)
+			if herr != nil {
+				return did_work, true
+			}
+			if !has_data {
+				return did_work, false
+			}
+			n, rerr := os.read(pipe, buf)
+			if n > 0 {
+				_, _ = os.write(sink, buf[:n])
+				append(captured, ..buf[:n])
+				did_work = true
+			}
+			if rerr != nil {
+				return did_work, true
+			}
+		}
+	}
+
+	for !stdout_done || !stderr_done {
+		did_work := false
+		if !stdout_done {
+			w, d := drain_pipe(stdout_r, os.stdout, &captured, buf[:])
+			if w do did_work = true
+			if d do stdout_done = true
+		}
+		if !stderr_done {
+			w, d := drain_pipe(stderr_r, os.stderr, &captured, buf[:])
+			if w do did_work = true
+			if d do stderr_done = true
+		}
+		if stdout_done && stderr_done do break
+
+		if !waited {
+			st, werr := os.process_wait(p, 0)
+			if werr == nil {
+				waited = true
+				final_state = st
+			} else if werr != .Timeout {
+				waited = true
+				fmt.eprintfln("mh: wait failed for %s: %v", command[0], werr)
+				return -1
+			}
+		} else if !did_work {
+			break
+		}
+
+		if !waited && time.tick_since(start_tick) > timeout {
+			_ = os.process_kill(p)
+			_, _ = os.process_wait(p, 5 * time.Second)
+			fmt.eprintfln("mh: %s timed out after %v — killed process", command[0], timeout)
+			return -1
+		}
+		if !did_work && !waited {
+			time.sleep(2 * time.Millisecond)
+		}
+	}
+
+	if !waited {
+		rem := max(timeout - time.tick_since(start_tick), time.Second)
+		st, werr := os.process_wait(p, rem)
+		if werr != nil {
+			_ = os.process_kill(p)
+			_, _ = os.process_wait(p, 5 * time.Second)
+			fmt.eprintfln("mh: %s timed out or wait failed after %v (%v) — killed process", command[0], timeout, werr)
+			return -1
+		}
+		final_state = st
+	}
+
+	if final_state.exit_code != 0 {
+		return final_state.exit_code
+	}
+	txt := string(captured[:])
+	if strings.contains(txt, "+++ bad free") || strings.contains(txt, "+++ leak") {
+		fmt.eprintln("mh: test runner reported Tracking_Allocator errors (+++ bad free / +++ leak) — failing test gate!")
+		return 1
+	}
+	return 0
+}
+
 // run_env is `run` with an explicit environment, for launching the editor
 // with the variables it reads back (MH_LAUNCH, see launch_editor).
 run_env :: proc(env: []string, command: ..string) -> int {

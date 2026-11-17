@@ -290,6 +290,9 @@ cmd_check :: proc(args: []string) -> int {
 	} else {
 		append(&cmd, odin_bin(), "check", pkg, "-no-entry-point", IGNORE_ATTRS, COLLECTION_HAATI, COLLECTION_COMPAT)
 		if mount.collection_flag != "" do append(&cmd, mount.collection_flag)
+		if strings.has_prefix(pkg, "haati/tests") {
+			append(&cmd, VET, "-define:ODIN_TEST_THREADS=1")
+		}
 	}
 	if has_flag(args, "--json") {
 		append(&cmd, "-json-errors")
@@ -369,7 +372,8 @@ cmd_app :: proc(args: []string) -> int {
 // -define:ODIN_TEST_THREADS=1 keeps tests serial: they share the asset db and
 // fixture files on disk. Codegen runs first: the test binary compiles the
 // generated registrations, and a stale one fails the compile against renamed
-// types. Supports --pkg=<path> (default: haati/tests) and --name=<filter>.
+// types. Supports --pkg=<path> (default: haati/tests), --stress (haati/tests/stress),
+// and --name=<filter>.
 cmd_test :: proc(args: []string) -> int {
 	mount := mount_project_for_compile(args, explicit_only = true)
 	defer unmount_project_for_compile(&mount)
@@ -377,8 +381,11 @@ cmd_test :: proc(args: []string) -> int {
 	if !prebuild_for_project(mount.compiled_project_dir) do return 1
 	os.make_directory_all("builds")
 	sync_runtime_dlls("builds", false)
+	stress := has_flag(args, "--stress")
 	pkg := flag_value(args, "--pkg")
-	if pkg == "" do pkg = "haati/tests"
+	if pkg == "" {
+		pkg = "haati/tests/stress" if stress else "haati/tests"
+	}
 	cmd := make([dynamic]string, context.temp_allocator)
 	append(&cmd, odin_bin(), "test", pkg)
 	if pkg == "haati/tests" {
@@ -386,11 +393,13 @@ cmd_test :: proc(args: []string) -> int {
 	}
 	append(&cmd, IGNORE_ATTRS, COLLECTION_HAATI, COLLECTION_COMPAT)
 	if mount.collection_flag != "" do append(&cmd, mount.collection_flag)
-	append(&cmd, VET, "-define:ODIN_TEST_THREADS=1", fmt.tprintf("-out:builds/test_runner%s", EXE))
+	out_bin := "builds/stress_runner" if stress else "builds/test_runner"
+	append(&cmd, VET, "-define:ODIN_TEST_THREADS=1", fmt.tprintf("-out:%s%s", out_bin, EXE))
 	if name := flag_value(args, "--name"); name != "" {
 		append(&cmd, fmt.tprintf("-define:ODIN_TEST_NAMES=%s", name))
 	}
-	return run_timeout(120 * time.Second, ..cmd[:])
+	timeout := (300 * time.Second) if stress else (120 * time.Second)
+	return run_test_checked(timeout, ..cmd[:])
 }
 
 // The MCP stdio server the client spawns.
