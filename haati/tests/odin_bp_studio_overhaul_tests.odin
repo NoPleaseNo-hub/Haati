@@ -1196,7 +1196,7 @@ test_bp_v6_studio_palette_icons_and_ui_contracts :: proc(t: ^testing.T) {
 		testing.expectf(t, vis.dark_color[3] > 0, "STUDIO_PIN_TABLE[%v] must have positive alpha", pt)
 	}
 	testing.expect(t, !thm.STUDIO_PIN_TABLE[.Exec].in_picker, ".Exec must be excluded from data type pickers")
-	testing.expect_value(t, len(thm.STUDIO_PICKER_TYPES), 22)
+	testing.expect_value(t, len(thm.STUDIO_PICKER_TYPES), 23)
 
 	seen_picker: [hot.Hot_Pin_Type]bool
 	for pt in thm.STUDIO_PICKER_TYPES {

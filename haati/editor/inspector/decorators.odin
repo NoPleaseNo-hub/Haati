@@ -11,9 +11,12 @@ import "../../engine/log"
 
 Min_Value :: union { int, f64 }
 
+// Allows Settings window to render full-width section headers above per-row `[P]`/`[↻]` controls.
+suppress_field_headers: bool
+
 
 decorator_min :: proc(ctx: ^DrawContext, min_value: Min_Value) {
-	if !ctx.is_visible || ctx.is_pre do return
+	if (!ctx.is_visible && !ctx.handled_draw) || ctx.is_pre do return
 	if ctx.field_ptr == nil do return
 	switch ctx.field_type {
 	case typeid_of(int):
@@ -80,7 +83,7 @@ decorator_range :: proc(ctx: ^DrawContext, min_value: Min_Value, max_value: Min_
 }
 
 decorator_header :: proc(ctx: ^DrawContext, text:cstring = "") {
-	if !ctx.is_visible || !ctx.is_pre do return
+	if suppress_field_headers || !ctx.is_visible || !ctx.is_pre do return
 
 	im.Spacing()
     im.TextColoredUnformatted(thm.palette().accent, text)
@@ -88,7 +91,7 @@ decorator_header :: proc(ctx: ^DrawContext, text:cstring = "") {
 }
 
 decorator_tooltip :: proc(ctx: ^DrawContext, desc:cstring) {
-	if !ctx.is_visible || ctx.is_pre do return
+	if (!ctx.is_visible && !ctx.handled_draw) || ctx.is_pre do return
 
 	// Through the shared tooltip so debug tooltips can add the tag that put this
 	// decorator on the field.
@@ -98,7 +101,7 @@ decorator_tooltip :: proc(ctx: ^DrawContext, desc:cstring) {
 // Draws `text` in a help box under the field (widgets.help_box). `kind` is
 // "info" (the default), "warning" or "error" and picks the icon and color.
 decorator_help :: proc(ctx: ^DrawContext, text: cstring, kind: cstring = "info") {
-	if !ctx.is_visible || ctx.is_pre do return
+	if (!ctx.is_visible && !ctx.handled_draw) || ctx.is_pre do return
 	k: widgets.Message_Kind
 	switch string(kind) {
 	case "info":    k = .Info
@@ -269,7 +272,7 @@ _button_id :: proc(label: cstring, row, n: int) -> cstring {
 
 decorator_button :: proc(ctx: ^DrawContext, action: $P, label := cstring(""), row := 0, weight := f32(1))
 	where intrinsics.type_is_proc(P) {
-	if !ctx.is_visible do return
+	if !ctx.is_visible && !(ctx.handled_draw && row < 0) do return
 	// Above-field rows draw in the pre pass, below-field rows in post.
 	if ctx.is_pre != (row >= 0) do return
 	if ctx.owner_ptr == nil do return

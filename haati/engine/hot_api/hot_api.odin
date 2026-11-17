@@ -12,6 +12,8 @@ package hot_api
 // explicit typed pointers (`^f32`, `^[3]f32`, `rawptr` resolved by 16-byte `Type_GUID`),
 // and `proc "c"` function pointers owned by the host executable.
 
+import "base:runtime"
+import "core:fmt"
 import "core:math"
 import "core:math/linalg"
 
@@ -57,6 +59,7 @@ Hot_Pin_Type :: enum u8 {
 	Enum_U8    = 20, // User-declared Odin `enum u8`
 	BitSet_U8  = 21, // User-declared Odin `bit_set[MyEnum; u8]` (1-byte bitfield mask)
 	Struct_Val = 22, // User-declared POD `struct` value (inline bytes in `val_bytes`)
+	Raw_Ptr    = 23, // Untyped 64-bit memory address (`rawptr`) — zero-cost castable
 }
 
 // Input action / debug key trigger edge for `Bind Input Action` & `Bind Debug Key`.
@@ -102,7 +105,10 @@ Hot_Slot :: struct {
 	val_ent:      Hot_Entity,
 	val_delegate: Hot_Delegate,
 	val_bytes:    [HOT_MAX_STRUCT_BYTES]u8, // Inline value bytes for small POD `Struct_Val` slots
-	ref_ptr:      rawptr,                   // Non-nil when `pass_mode == .By_Reference` (`^T`)
+	ref_ptr:      rawptr,                   // Non-nil when `pass_mode == .By_Reference` (`^T`) or `[]T` data ptr
+	val_ptr:      rawptr,                   // Untyped 64-bit `rawptr` value when `pin_type == .Raw_Ptr`
+	slice_len:    i32,                      // Element count when slot carries a zero-copy `[]T` or `[dynamic]T` view
+	slice_cap:    i32,                      // Capacity (`< 0` for read/write slice views)
 }
 
 Hot_Call_Frame :: struct {
@@ -212,6 +218,17 @@ Engine_Hot_API :: struct {
 	anim_set_ik_target:    proc "c" (self: Hot_Entity, effector_name: cstring, world_target: [3]f32, weight: f32),
 	csg_stamp_brush:       proc "c" (world_pos: [3]f32, radius: f32, impulse: f32, cut_mat_str: cstring) -> i32,
 	get_unscaled_dt:       proc "c" () -> f32,
+
+	// V4: Host allocators, Sandbox Fault Capture, and Dynamic Float Sequence Bridge
+	host_allocator:        runtime.Allocator,
+	host_temp_allocator:   runtime.Allocator,
+	report_sandbox_fault:  proc "c" (msg: cstring, file: cstring, proc_name: cstring, line: i32),
+	var_f32_seq_ptr:       proc "c" (self: Hot_Entity, var_name: cstring, out_len: ^i32, out_cap: ^i32) -> ^f32,
+	var_f32_seq_sync:      proc "c" (self: Hot_Entity, var_name: cstring, data: ^f32, length: i32, capacity: i32),
+
+	// V5: Universal Zero-Copy Strided Sequence Bridge (`[]T` / `[dynamic]T` for ANY Odin type/struct)
+	var_seq_ptr:           proc "c" (self: Hot_Entity, var_name: cstring, elem_size: i32, elem_align: i32, out_len: ^i32, out_cap: ^i32) -> rawptr,
+	var_seq_sync:          proc "c" (self: Hot_Entity, var_name: cstring, data: rawptr, elem_size: i32, elem_align: i32, length: i32, capacity: i32),
 }
 
 // Canonical C-ABI entry signature for every hot-swappable procedure & transpiled `.mhgraph`.
@@ -728,6 +745,42 @@ slot_ref_struct_bytes :: #force_inline proc "c" (s: ^Hot_Slot) -> rawptr {
 	return &s.val_bytes[0]
 }
 
+slot_read_rawptr :: #force_inline proc "c" (s: ^Hot_Slot) -> rawptr {
+	if s == nil do return nil
+	if s.pass_mode == .By_Reference && s.ref_ptr != nil {
+		if s.pin_type == .Raw_Ptr {
+			return (cast(^rawptr)s.ref_ptr)^
+		}
+		return s.ref_ptr
+	}
+	return s.val_ptr != nil ? s.val_ptr : s.ref_ptr
+}
+
+slot_ref_rawptr :: #force_inline proc "c" (s: ^Hot_Slot) -> ^rawptr {
+	if s == nil do return nil
+	if s.pass_mode == .By_Reference && s.ref_ptr != nil && s.pin_type == .Raw_Ptr {
+		return cast(^rawptr)s.ref_ptr
+	}
+	return &s.val_ptr
+}
+
+slot_read_slice_raw :: #force_inline proc "c" (s: ^Hot_Slot) -> (data: rawptr, length: i32) {
+	if s == nil do return nil, 0
+	return s.ref_ptr, max(s.slice_len, 0)
+}
+
+// Fast sanity check for raw pointers before dereferencing across `.Raw_Ptr` casts.
+validate_raw_ptr :: #force_inline proc "c" (p: rawptr, min_align: uintptr = 1) -> (ok: bool, reason: cstring) {
+	addr := uintptr(p)
+	if p == nil do return false, "nil pointer (address 0x0)"
+	if addr < 0x10000 do return false, "null-page guard address (< 0x10000)"
+	if addr > 0x00007FFFFFFFFFFF do return false, "non-canonical or kernel-range pointer address (> 0x7FFFFFFFFFFF)"
+	if min_align > 1 && (addr & (min_align - 1)) != 0 {
+		return false, "misaligned memory address for target type"
+	}
+	return true, ""
+}
+
 // Ergonomic V2 Odin-Style Delegate & Input Binding Helpers
 bind_action :: #force_inline proc "c" (
 	api:         ^Engine_Hot_API,
@@ -921,4 +974,77 @@ anim_set_ik_target :: #force_inline proc "c" (api: ^Engine_Hot_API, self: Hot_En
 csg_stamp_brush :: #force_inline proc "c" (api: ^Engine_Hot_API, world_pos: [3]f32, radius: f32, impulse: f32 = 12.0, cut_mat_str: cstring = "") -> i32 {
 	if api == nil || api.csg_stamp_brush == nil do return 0
 	return api.csg_stamp_brush(world_pos, radius, impulse, cut_mat_str)
+}
+
+var_f32_seq_ptr :: #force_inline proc "c" (api: ^Engine_Hot_API, self: Hot_Entity, var_name: cstring, out_len: ^i32, out_cap: ^i32) -> ^f32 {
+	if api == nil || api.var_f32_seq_ptr == nil {
+		if out_len != nil do out_len^ = 0
+		if out_cap != nil do out_cap^ = 0
+		return nil
+	}
+	return api.var_f32_seq_ptr(self, var_name, out_len, out_cap)
+}
+
+var_f32_seq_sync :: #force_inline proc "c" (api: ^Engine_Hot_API, self: Hot_Entity, var_name: cstring, data: ^f32, length: i32, capacity: i32 = -1) {
+	if api != nil && api.var_f32_seq_sync != nil {
+		api.var_f32_seq_sync(self, var_name, data, length, capacity)
+	}
+}
+
+var_seq_ptr :: #force_inline proc "c" (api: ^Engine_Hot_API, self: Hot_Entity, var_name: cstring, elem_size: i32, elem_align: i32, out_len: ^i32, out_cap: ^i32) -> rawptr {
+	if api == nil || api.var_seq_ptr == nil {
+		if out_len != nil do out_len^ = 0
+		if out_cap != nil do out_cap^ = 0
+		return nil
+	}
+	return api.var_seq_ptr(self, var_name, elem_size, elem_align, out_len, out_cap)
+}
+
+var_seq_sync :: #force_inline proc "c" (api: ^Engine_Hot_API, self: Hot_Entity, var_name: cstring, data: rawptr, elem_size: i32, elem_align: i32, length: i32, capacity: i32 = -1) {
+	if api != nil && api.var_seq_sync != nil {
+		api.var_seq_sync(self, var_name, data, elem_size, elem_align, length, capacity)
+	}
+}
+
+@(private = "file")
+_copy_cstr_buf :: proc "contextless" (dst: []byte, s: string) -> cstring {
+	if len(dst) == 0 do return cstring("")
+	n := min(len(s), len(dst) - 1)
+	if n > 0 do copy(dst[:n], s[:n])
+	dst[n] = 0
+	return cstring(raw_data(dst))
+}
+
+@(private = "file")
+_hot_script_assertion_failure_proc :: proc(prefix, message: string, loc: runtime.Source_Code_Location) -> ! {
+	api := (^Engine_Hot_API)(context.user_ptr)
+	if api != nil && api.report_sandbox_fault != nil {
+		msg_buf:  [256]byte
+		file_buf: [260]byte
+		proc_buf: [128]byte
+		formatted := fmt.bprintf(msg_buf[:len(msg_buf) - 1], "%s: %s", prefix, message)
+		msg_buf[len(formatted)] = 0
+		fc := _copy_cstr_buf(file_buf[:], loc.file_path)
+		pc := _copy_cstr_buf(proc_buf[:], loc.procedure)
+		api.report_sandbox_fault(cstring(raw_data(msg_buf[:])), fc, pc, loc.line)
+	}
+	runtime.default_assertion_failure_proc(prefix, message, loc)
+}
+
+// Constructs a full Odin Context backed by the host executable's allocators and sandbox
+// assertion trap so hot-cartridge / `.bodin` scripts can freely use `defer`, raw allocators,
+// `context.temp_allocator`, slices, and dynamic arrays safely.
+make_script_context :: proc "c" (api: ^Engine_Hot_API) -> runtime.Context {
+	ctx := runtime.default_context()
+	if api != nil {
+		if api.host_allocator.procedure != nil {
+			ctx.allocator = api.host_allocator
+		}
+		if api.host_temp_allocator.procedure != nil {
+			ctx.temp_allocator = api.host_temp_allocator
+		}
+		ctx.user_ptr = api
+		ctx.assertion_failure_proc = _hot_script_assertion_failure_proc
+	}
+	return ctx
 }

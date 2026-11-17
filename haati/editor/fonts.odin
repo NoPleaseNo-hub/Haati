@@ -21,10 +21,23 @@ ICON_FONT_SIZE_LG :: 26
 // icon glyph, then pop back. Set by editor_fonts_init.
 editor_icon_font_lg: ^im.Font
 
-// Material Symbols Outlined, embedded at compile time so the editor is
-// independent of the runtime working directory (#load path resolves through the
-// `moonhug` collection). License: Apache-2.0 (see moonhug/external/fonts/material).
+// Composite Roboto + Phosphor icon font (`ICON_PH_*`), set by editor_fonts_init.
+// Push/pop with `widgets.push_phosphor_font()` / `widgets.pop_phosphor_font()` or
+// draw buttons via `widgets.phosphor_icon_button()`.
+editor_phosphor_font: ^im.Font
+
+// Embedded Material Symbols & Phosphor glyph ranges; MUST outlive ImFontAtlas because ImGui v1.92
+// lazily rasterizes scaled glyph sizes (`PushFontFloat`) from `ImFontConfig.GlyphRanges`.
+@(private = "file")
+_editor_icon_ranges := [3]im.Wchar{ icons.ICON_MD_MIN, icons.ICON_MD_MAX, 0 }
+
+@(private = "file")
+_phosphor_icon_ranges := [3]im.Wchar{ icons.ICON_PH_MIN, icons.ICON_PH_MAX, 0 }
+
+// Material Symbols Outlined (Apache-2.0) and Phosphor Regular (MIT), embedded at compile time
+// so the editor binary is independent of the runtime working directory.
 MATERIAL_FONT_DATA := #load("haati:external/fonts/material/MaterialSymbolsOutlined.ttf")
+PHOSPHOR_FONT_DATA := #load("haati:external/fonts/phosphor/Phosphor.ttf")
 
 // A VALID FontConfig at an EXPLICIT reference size. Odin zero-inits, but imgui
 // 1.92's rasterizer relies on several non-zero ctor defaults — missing any bakes
@@ -67,7 +80,6 @@ editor_fonts_init :: proc() {
 	// Merge Material icons into the base font at the same explicit size.
 	// GlyphOffset nudges the icons down onto the text baseline (Material's em
 	// box is taller than Roboto's).
-	icon_ranges := [?]im.Wchar{ icons.ICON_MD_MIN, icons.ICON_MD_MAX, 0 }
 	icon_cfg := _font_config()
 	icon_cfg.MergeMode = true
 	icon_cfg.PixelSnapH = true
@@ -80,7 +92,7 @@ editor_fonts_init :: proc() {
 		i32(len(MATERIAL_FONT_DATA)),
 		FONT_SIZE,
 		&icon_cfg,
-		&icon_ranges[0],
+		&_editor_icon_ranges[0],
 	)
 	// Scene icons draw Material Symbols glyphs from the same static data
 	// (editor/handles/icons.odin).
@@ -99,7 +111,34 @@ editor_fonts_init :: proc() {
 		i32(len(MATERIAL_FONT_DATA)),
 		ICON_FONT_SIZE_LG,
 		&lg_cfg,
-		&icon_ranges[0],
+		&_editor_icon_ranges[0],
 	)
 	widgets.dialog_icon_font = editor_icon_font_lg
+
+	// Composite Roboto Medium + Phosphor Regular font (`ICON_PH_*` glyphs alongside readable text).
+	ph_base_cfg := _font_config()
+	ph_base_cfg.FontDataOwnedByAtlas = false
+	editor_phosphor_font = im.FontAtlas_AddFontFromMemoryTTF(
+		fonts,
+		raw_data(ROBOTO_FONT_DATA),
+		i32(len(ROBOTO_FONT_DATA)),
+		FONT_SIZE,
+		&ph_base_cfg,
+	)
+
+	ph_icon_cfg := _font_config()
+	ph_icon_cfg.MergeMode = true
+	ph_icon_cfg.PixelSnapH = true
+	ph_icon_cfg.GlyphMinAdvanceX = FONT_SIZE
+	ph_icon_cfg.GlyphOffset = im.Vec2{0, 2}
+	ph_icon_cfg.FontDataOwnedByAtlas = false
+	im.FontAtlas_AddFontFromMemoryTTF(
+		fonts,
+		raw_data(PHOSPHOR_FONT_DATA),
+		i32(len(PHOSPHOR_FONT_DATA)),
+		FONT_SIZE,
+		&ph_icon_cfg,
+		&_phosphor_icon_ranges[0],
+	)
+	widgets.phosphor_font = editor_phosphor_font
 }

@@ -99,51 +99,19 @@ _tab_menu_node :: proc(node: ^im.DockNode) {
 			abs(node.Pos.y - root_node.Pos.y) < 6.0
 
 		// Layout right-to-left:
-		// Docked inside main workspace: [Undock] [Menu]
-		// Joined Floating OS Window:    [Return Tab] [Maximize/Restore] [Menu] [Close Tab]
+		// Docked inside main workspace: [Menu]
+		// Joined Floating OS Window:    [Maximize/Restore] [Menu] [Close Tab]
 		close_bmin := im.Vec2{right - size, bar.Min.y}
 		bmin       := is_floating_corner ? im.Vec2{right - 2 * size - 2.0, bar.Min.y} : im.Vec2{right - size, bar.Min.y}
 		max_bmin   := im.Vec2{bmin.x - size - 2.0, bar.Min.y}
-		undock_bmin := is_floating_corner ? im.Vec2{max_bmin.x - size - 2.0, bar.Min.y} : im.Vec2{bmin.x - size, bar.Min.y}
-		req_w := is_floating_corner ? size * 4.5 : size * 2.0
+		left_edge_x := is_floating_corner ? max_bmin.x : bmin.x
+		req_w := is_floating_corner ? size * 3.5 : size * 1.2
 
 		// Nothing to click if the bar is too narrow for the buttons.
 		if bar.Max.x - bar.Min.x > req_w {
 			dl := im.GetWindowDrawList()
 
-			// 1. Undock / Return Button (pop out as floating OS window, or return to main dock)
-			undock_id := fmt.ctprintf("##tabundock_%d", node.ID_)
-			im.SetCursorScreenPos(undock_bmin)
-			undock_clicked := im.InvisibleButton(undock_id, {size, size})
-			undock_hovered := im.IsItemHovered({})
-			if undock_hovered && (im.IsMouseDown(.Left) || im.IsMouseClicked(.Left)) {
-				im.StopMouseMovingWindow()
-			}
-			widgets.tooltip(is_floating ? "Return active tab to main editor window" : "Dock out as external floating window")
-			if undock_clicked && active_title != nil {
-				im.StopMouseMovingWindow()
-				im.ClearActiveID()
-				if is_floating {
-					wnd.reunite(active_title)
-				} else {
-					wnd.pop_out(active_title)
-				}
-			}
-			if is_floating_corner {
-				ubg := undock_hovered ? im.GetColorU32ImVec4({0.28, 0.50, 0.80, 1.0}) : im.GetColorU32ImVec4({0.22, 0.32, 0.46, 0.85})
-				im.DrawList_AddRectFilled(dl, undock_bmin, undock_bmin + {size, size}, ubg, 2.0)
-			} else if undock_hovered {
-				im.DrawList_AddRectFilled(dl, undock_bmin, undock_bmin + {size, size}, im.GetColorU32(.ButtonHovered), 3)
-			}
-			undock_icon: cstring = is_floating ? icons.ICON_MD_DOCK : icons.ICON_MD_OPEN_IN_NEW
-			undock_glyph_sz := im.CalcTextSize(undock_icon, nil, false, -1)
-			undock_glyph_pos := undock_bmin + (im.Vec2{size, size} - undock_glyph_sz) * 0.5
-			undock_col_u32 := is_floating_corner \
-				? im.GetColorU32ImVec4({0.94, 0.97, 1.0, 1.0}) \
-				: im.GetColorU32(undock_hovered ? .Text : .TextDisabled)
-			im.DrawList_AddText(dl, undock_glyph_pos, undock_col_u32, undock_icon)
-
-			// 1b. Maximize / Restore Button on Joined Floating OS Windows
+			// 1. Maximize / Restore Button on Joined Floating OS Windows
 			if is_floating_corner {
 				max_id := fmt.ctprintf("##tabmax_%d", node.ID_)
 				im.SetCursorScreenPos(max_bmin)
@@ -216,12 +184,12 @@ _tab_menu_node :: proc(node: ^im.DockNode) {
 			// 3. Hover & Right-Click on any Dock Tab in `tab_bar.Tabs` -> Focus Tab + Open Tab / Script Inspector Menu!
 			if tab_bar.Tabs.Size > 0 {
 				mp := im.GetMousePos()
-				if mp.y >= bar.Min.y && mp.y <= bar.Max.y && mp.x >= bar.Min.x && mp.x < undock_bmin.x {
+				if mp.y >= bar.Min.y && mp.y <= bar.Max.y && mp.x >= bar.Min.x && mp.x < left_edge_x {
 					tabs := ([^]im.TabItem)(tab_bar.Tabs.Data)[:tab_bar.Tabs.Size]
 					for &tab in tabs {
 						if transmute(i32)tab.Flags & _TAB_ITEM_FLAG_BUTTON != 0 do continue
 						tx0 := max(bar.Min.x, bar.Min.x + tab.Offset - tab_bar.ScrollingAnim)
-						tx1 := min(undock_bmin.x, bar.Min.x + tab.Offset - tab_bar.ScrollingAnim + tab.Width)
+						tx1 := min(left_edge_x, bar.Min.x + tab.Offset - tab_bar.ScrollingAnim + tab.Width)
 						if mp.x >= tx0 && mp.x <= tx1 {
 							tab_title: cstring = tab.Window_.Name if tab.Window_ != nil else im.TabBarGetTabName(tab_bar, &tab)
 							if widgets.ui_debug_tooltips && !im.IsPopupOpen("", im.PopupFlags_AnyPopupId) {
@@ -242,7 +210,7 @@ _tab_menu_node :: proc(node: ^im.DockNode) {
 				}
 			}
 
-			// The visible tab's toolbar items, left of the undock button.
+			// The visible tab's toolbar items, left of the right-hand chrome buttons.
 			if active_title != nil {
 				bar_h := bar.Max.y - bar.Min.y
 				INSET :: f32(4)
@@ -254,10 +222,10 @@ _tab_menu_node :: proc(node: ^im.DockNode) {
 
 				view := view_id_of(active_title)
 				items_w := view_tab_bar_width(view)
-				if items_w > 0 && undock_bmin.x - items_w - style.ItemSpacing.x > bar.Min.x + tab_bar.WidthAllTabs {
+				if items_w > 0 && left_edge_x - items_w - style.ItemSpacing.x > bar.Min.x + tab_bar.WidthAllTabs {
 					item_h := im.GetFrameHeight()
 					y := bar.Min.y + max((bar_h - item_h) * 0.5, 0)
-					im.SetCursorScreenPos({undock_bmin.x - items_w, y})
+					im.SetCursorScreenPos({left_edge_x - items_w, y})
 					view_tab_bar_draw(view)
 				}
 
@@ -348,7 +316,6 @@ _tab_menu_contents :: proc(node: ^im.DockNode) {
 	if active_title == nil && node.VisibleWindow != nil {
 		active_title = node.VisibleWindow.Name
 	}
-	is_floating := im.DockNode_IsFloatingNode(node)
 
 	if active_title != nil {
 		// Clean display name (strip "###id")
@@ -388,15 +355,6 @@ _tab_menu_contents :: proc(node: ^im.DockNode) {
 			im.Separator()
 		}
 
-		if is_floating {
-			if im.MenuItem(fmt.ctprintf("%s  Return to Main Window", icons.ICON_MD_DOCK)) {
-				wnd.reunite(active_title)
-			}
-		} else {
-			if im.MenuItem(fmt.ctprintf("%s  Dock Out Window", icons.ICON_MD_OPEN_IN_NEW)) {
-				wnd.pop_out(active_title)
-			}
-		}
 		if im.MenuItem(fmt.ctprintf("%s  Close Tab", icons.ICON_MD_CLOSE)) {
 			close_editor_view(active_title)
 		}

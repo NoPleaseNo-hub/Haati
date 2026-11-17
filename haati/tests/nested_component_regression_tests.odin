@@ -401,7 +401,10 @@ test_float_canonical_formatting :: proc(t: ^testing.T) {
 
 	saved, rerr := os.read_entire_file(path, context.temp_allocator)
 	testing.expect(t, rerr == nil, "read saved")
-	text := string(saved)
+	testing.expect(t, engine.scene_bytes_is_binary(saved), "saved scene uses HTSCN001 binary format")
+	json_bytes, jok := engine.scene_bytes_to_json_if_binary(saved, context.temp_allocator)
+	testing.expect(t, jok, "binary scene converts to canonical JSON for float inspection")
+	text := string(json_bytes)
 	testing.expect(t, !strings.contains(text, "0.10000000"), "f32 padding must be trimmed")
 	testing.expect(t, !strings.contains(text, "2.50000000"), "f32 padding must be trimmed")
 	testing.expect(t, !strings.contains(text, "0.00000000"), "f32 padding must be trimmed")

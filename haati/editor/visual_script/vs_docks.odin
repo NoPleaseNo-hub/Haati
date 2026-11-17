@@ -17,6 +17,132 @@ import "haati:engine"
 import hot "haati:engine/hot_api"
 import im "haati:external/odin-imgui"
 
+@(private = "file")
+_container_short_badge :: #force_inline proc(ck: engine.VG_Container_Kind) -> cstring {
+	switch ck {
+	case .Single:        return icons.ICON_MD_CIRCLE
+	case .Fixed_Array:   return "[N]"
+	case .Bounded_Array: return "[<=]"
+	case .Slice:         return fmt.ctprintf("%s []", icons.ICON_MD_VIEW_TIMELINE)
+	case .Dynamic_Array: return fmt.ctprintf("%s [+]", icons.ICON_MD_STACKS)
+	}
+	return icons.ICON_MD_CIRCLE
+}
+
+@(private = "file")
+_container_display_label :: #force_inline proc(ck: engine.VG_Container_Kind) -> cstring {
+	switch ck {
+	case .Single:        return "Single Value"
+	case .Slice:         return fmt.ctprintf("%s [] Slice View ([]T)", icons.ICON_MD_VIEW_TIMELINE)
+	case .Dynamic_Array: return fmt.ctprintf("%s [dynamic] Heap Array ([dynamic]T)", icons.ICON_MD_STACKS)
+	case .Fixed_Array:   return "[N] Fixed Stack Array"
+	case .Bounded_Array: return "[<=N] Bounded Stack Array"
+	}
+	return "Single Value"
+}
+
+@(private = "file")
+_container_icon_and_color :: proc(v: engine.VG_Var_Decl) -> (c_icon: cstring, t_icon: cstring, col: im.Vec4) {
+	ck := engine.vg_resolve_container_kind(v)
+	c_icon, t_icon, col = thm.studio_var_icon_and_color(v.pin_type, ck != .Single, ck == .Bounded_Array, false)
+	if ck == .Slice {
+		c_icon = icons.ICON_MD_VIEW_TIMELINE
+	} else if ck == .Dynamic_Array {
+		c_icon = icons.ICON_MD_STACKS
+	}
+	return
+}
+
+@(private = "file")
+_apply_var_container_kind :: proc(v: ^engine.VG_Var_Decl, ck: engine.VG_Container_Kind) {
+	if v == nil do return
+	v.container_kind   = ck
+	v.is_array         = ck != .Single
+	v.array_is_bounded = ck == .Bounded_Array
+}
+
+@(private = "file")
+_draw_container_kind_menu_items :: proc(cur_ck: engine.VG_Container_Kind, pt: hot.Hot_Pin_Type) -> (chosen: engine.VG_Container_Kind, changed: bool) {
+	_ = pt
+	order := [5]engine.VG_Container_Kind{.Single, .Slice, .Dynamic_Array, .Fixed_Array, .Bounded_Array}
+	for opt in order {
+		if im.MenuItem(_container_display_label(opt), nil, cur_ck == opt) {
+			return opt, opt != cur_ck
+		}
+		if opt == .Slice {
+			widgets.tooltip_unsafe("Zero-copy []T view compatible with native Odin slices & sub-slices.", bp_unsafe_tooltip_warning(pt, .Slice, false))
+		}
+	}
+	return cur_ck, false
+}
+
+// Shared inline `[+ Element]` / `DragFloat` / `[x]` float slice & dynamic-array editor used by Blueprint Details & Scene Inspector.
+draw_f32_list_editor :: proc(
+	id_prefix: string,
+	list: ^[dynamic]f32,
+	min_v: f32 = 0.0,
+	max_v: f32 = 0.0,
+	use_temp_alloc: bool = false,
+) -> (changed: bool) {
+	if list == nil do return false
+	prev_alloc := context.allocator
+	if use_temp_alloc {
+		context.allocator = context.temp_allocator
+	} else {
+		context.allocator = runtime.default_allocator()
+	}
+	defer context.allocator = prev_alloc
+
+	has_range := max_v > min_v
+	for i := 0; i < len(list^); i += 1 {
+		im.PushIDInt(i32(i))
+		im.TextDisabled("[%d]", i32(i))
+		im.SameLine(0, 4)
+		im.SetNextItemWidth(max(im.GetContentRegionAvail().x - 28.0, 64.0))
+		val := list^[i]
+		ch := has_range \
+			? im.SliderFloat(fmt.ctprintf("##%s_el", id_prefix), &val, min_v, max_v, "%.3f") \
+			: im.DragFloat(fmt.ctprintf("##%s_el", id_prefix), &val, 0.05)
+		_record_undo_on_widget_activate()
+		if ch {
+			list^[i] = val
+			changed = true
+		}
+		im.SameLine(0, 4)
+		if im.SmallButton(fmt.ctprintf("%s##%s_del", icons.ICON_MD_CLOSE, id_prefix)) {
+			ordered_remove(list, i)
+			changed = true
+			im.PopID()
+			break
+		}
+		im.PopID()
+	}
+	if im.SmallButton(fmt.ctprintf("+ Element##%s_add", id_prefix)) {
+		append(list, f32(0.0))
+		changed = true
+	}
+	if len(list^) > 0 {
+		im.SameLine(0, 6)
+		if im.SmallButton(fmt.ctprintf("Clear##%s_clr", id_prefix)) {
+			clear(list)
+			changed = true
+		}
+	}
+	return changed
+}
+
+// Formats a float slice/dynamic array into `[a,b,c]` instance_overrides syntax.
+format_f32_list_override :: proc(vals: []f32, allocator := context.temp_allocator) -> string {
+	sb := strings.builder_make(0, len(vals) * 10 + 4, allocator)
+	strings.write_byte(&sb, '[')
+	for v, i in vals {
+		if i > 0 do strings.write_byte(&sb, ',')
+		fmt.sbprintf(&sb, "%.4g", v)
+	}
+	strings.write_byte(&sb, ']')
+	return strings.to_string(sb)
+}
+
 // =============================================================================
 // Column 1 (Left Dock): Unreal-Style "My Blueprint" + Domain Quick Spawners
 // =============================================================================
@@ -37,6 +163,9 @@ _draw_pin_type_combo :: proc(id: cstring, cur_pt_i32: ^i32, width: f32 = 72.0) {
 				cur_pt_i32^ = i32(pt)
 			}
 			im.PopStyleColor()
+			if pt == .Raw_Ptr {
+				widgets.tooltip_unsafe("Zero-cost 64-bit untyped Odin rawptr.", bp_unsafe_tooltip_warning(.Raw_Ptr, .Single, false))
+			}
 			if is_sel do im.SetItemDefaultFocus()
 		}
 		im.EndCombo()
@@ -151,91 +280,334 @@ _draw_left_my_blueprint_dock :: proc(height: f32) {
 
 	im.Separator()
 
-	// --- Section 2: Variables (`using self` + Eye Instance-Editable + Unreal Drag-Drop) ---
-	if im.CollapsingHeader(icons.ICON_MD_DATA_OBJECT + " Variables (using self)", {.DefaultOpen}) {
+	// --- Section 2: Unified Structs & Fields (Self State Component + POD Structs, Active Struct Target) ---
+	if im.CollapsingHeader(icons.ICON_MD_DATA_OBJECT + " Structs & Fields", {.DefaultOpen}) {
 		engine.vg_sync_blackboard(&_vs.graph, &_vs.preview_bb)
 
-		for &v, vi in _vs.graph.variables {
-			im.PushIDInt(i32(vi))
-			eye_col := v.instance_editable ? p.status_success : p.text_muted
-			im.PushStyleColorImVec4(.Text, eye_col)
-			if im.SmallButton(v.instance_editable ? icons.ICON_MD_VISIBILITY : icons.ICON_MD_VISIBILITY_OFF) {
-				vs_push_undo()
-				v.instance_editable = !v.instance_editable
-				_vs.dirty_unbaked   = true
-				_sync_ide_blueprint_context()
+		// Ensure `_vs.active_struct_target` still resolves to an existing struct (else fall back to Self State).
+		active_st_idx := -1
+		if _vs.active_struct_target != "" {
+			for &st, si in _vs.graph.structs {
+				if st.name == _vs.active_struct_target {
+					active_st_idx = si
+					break
+				}
 			}
-			im.PopStyleColor()
-			widgets.tooltip(v.instance_editable ? "Instance Editable ON: Exposed per-entity in the Scene Inspector! (Click to hide)" : "Instance Editable OFF: Internal Blueprint variable (Click to expose in Scene Inspector)")
-
-			im.SameLine(0, 4)
-			c_icon, t_icon, v_col := thm.studio_var_icon_and_color(v.pin_type, v.is_array, v.array_is_bounded, false)
-			im.TextColored(v_col, "%s", fmt.ctprintf("%s %s", c_icon, t_icon))
-			im.SameLine(0, 4)
-			is_vsel := _vs.selected_var_idx == vi
-			if im.Selectable(fmt.ctprintf("%s : %s", v.name, engine.vg_var_odin_type_ex(&_vs.graph, v)), is_vsel, {}, {88, 0}) {
-				_vs.selected_var_idx  = vi
-				_vs.selected_node_uid = 0
+			if active_st_idx < 0 {
+				prev_alloc := context.allocator
+				context.allocator = runtime.default_allocator()
+				delete(_vs.active_struct_target)
+				_vs.active_struct_target = ""
+				context.allocator = prev_alloc
 			}
-			if im.BeginDragDropSource() {
-				cname := fmt.ctprintf("%s", v.name)
-				im.SetDragDropPayload("MH_BP_VAR", rawptr(cname), uint(len(v.name) + 1))
-				im.Text("%s", fmt.ctprintf("%s %s (Ctrl = Get, Alt = Set)", icons.ICON_MD_DATA_OBJECT, v.name))
-				im.EndDragDropSource()
-			}
-			widgets.tooltip_delayed("Drag into canvas (Ctrl=Get, Alt=Set, plain=choose) or click to edit in Right Details")
-
-			im.SameLine()
-			if im.SmallButton("Get") {
-				_spawn_graph_node(.Get_Variable, _canvas_view_spawn_pos(0.34), v.name)
-			}
-			widgets.tooltip("Spawn Get node (Copy `T` & Mutable `^Ref` outputs)")
-			im.SameLine()
-			if im.SmallButton("Set") {
-				_spawn_graph_node(.Set_Variable, _canvas_view_spawn_pos(0.38), v.name)
-			}
-			im.PopID()
 		}
 
-		im.SetNextItemWidth(110)
-		im.InputTextWithHint("##new_vname", "var_name", cstring(raw_data(_vs.new_var_buf[:])), len(_vs.new_var_buf))
-		im.SameLine()
-		_draw_pin_type_combo("##new_vtype", &_vs.new_var_type, 74.0)
-		im.SameLine()
-		im.Checkbox("[8]", &_vs.new_var_is_array)
-		widgets.tooltip("Create as fixed `[8]T` stack array variable")
-		if im.Button("+ Add Variable", {-1, 0}) {
-			vn := sanitize_odin_ident(strings.trim_space(_c_str(_vs.new_var_buf[:])), context.temp_allocator)
-			if vn != "" && engine.vg_find_var_index(&_vs.graph, vn) < 0 {
+		active_lbl := active_st_idx >= 0 \
+			? fmt.ctprintf("%s %s", icons.ICON_MD_WIDGETS, _vs.graph.structs[active_st_idx].name) \
+			: fmt.ctprintf("%s Self State (Component)", icons.ICON_MD_DATA_OBJECT)
+		im.TextDisabled("Active:")
+		im.SameLine(0, 4)
+		im.SetNextItemWidth(max(im.GetContentRegionAvail().x - 4.0, 120.0))
+		if im.BeginCombo("##active_struct_sel", active_lbl) {
+			if im.Selectable(fmt.ctprintf("%s Self State (Component — using self)", icons.ICON_MD_DATA_OBJECT), active_st_idx < 0) {
+				if _vs.active_struct_target != "" {
+					prev_alloc := context.allocator
+					context.allocator = runtime.default_allocator()
+					delete(_vs.active_struct_target)
+					_vs.active_struct_target = ""
+					context.allocator = prev_alloc
+				}
+			}
+			for &st, si in _vs.graph.structs {
+				tag := st.code_authored ? " [Zone 1]" : ""
+				if im.Selectable(fmt.ctprintf("%s %s%s##sel_st_%d", icons.ICON_MD_WIDGETS, st.name, tag, si), active_st_idx == si) {
+					prev_alloc := context.allocator
+					context.allocator = runtime.default_allocator()
+					if _vs.active_struct_target != "" do delete(_vs.active_struct_target)
+					_vs.active_struct_target = strings.clone(st.name)
+					context.allocator = prev_alloc
+				}
+			}
+			im.EndCombo()
+		}
+		widgets.tooltip("Select which Struct (`Self State` or any POD struct) new variables/fields & the `::` RAM Scratchpad target")
+
+		if active_st_idx < 0 {
+			for &v, vi in _vs.graph.variables {
+				im.PushIDInt(i32(vi))
+				eye_col := v.instance_editable ? p.status_success : p.text_muted
+				im.PushStyleColorImVec4(.Text, eye_col)
+				if im.SmallButton(v.instance_editable ? icons.ICON_MD_VISIBILITY : icons.ICON_MD_VISIBILITY_OFF) {
+					vs_push_undo()
+					v.instance_editable = !v.instance_editable
+					_vs.dirty_unbaked   = true
+					_sync_ide_blueprint_context()
+				}
+				im.PopStyleColor()
+				widgets.tooltip(v.instance_editable ? "Instance Editable ON: Exposed per-entity in the Scene Inspector! (Click to hide)" : "Instance Editable OFF: Internal Blueprint variable (Click to expose in Scene Inspector)")
+
+				im.SameLine(0, 4)
+				c_icon, t_icon, v_col := _container_icon_and_color(v)
+				im.TextColored(v_col, "%s", fmt.ctprintf("%s %s", c_icon, t_icon))
+				im.SameLine(0, 4)
+				is_vsel := _vs.selected_var_idx == vi
+				sel_w := max(im.GetContentRegionAvail().x - 42.0, 64.0)
+				if im.Selectable(fmt.ctprintf("%s : %s", v.name, engine.vg_var_odin_type_ex(&_vs.graph, v)), is_vsel, {}, {sel_w, 0}) {
+					_vs.selected_var_idx  = vi
+					_vs.selected_node_uid = 0
+				}
+				if im.BeginDragDropSource() {
+					cname := fmt.ctprintf("%s", v.name)
+					im.SetDragDropPayload("MH_BP_VAR", rawptr(cname), uint(len(v.name) + 1))
+					im.Text("%s", fmt.ctprintf("%s %s (Ctrl = Get, Alt = Set)", icons.ICON_MD_DATA_OBJECT, v.name))
+					im.EndDragDropSource()
+				}
+				widgets.tooltip_unsafe_delayed(
+					"Drag into canvas (plain = Get/Set popup, Ctrl = Get, Alt = Set), or click to inspect in Right Details",
+					bp_unsafe_tooltip_warning(v.pin_type, engine.vg_resolve_container_kind(v), false),
+				)
+
+				im.SameLine(0, 4)
+				v_ck := engine.vg_resolve_container_kind(v)
+				im.PushStyleColorImVec4(.Button, thm.with_alpha(v_col, 0.20))
+				im.PushStyleColorImVec4(.Text, v_col)
+				if im.SmallButton(fmt.ctprintf("%s##vck_btn", _container_short_badge(v_ck))) {
+					im.OpenPopup("##vck_pop")
+				}
+				im.PopStyleColor(2)
+				widgets.tooltip_unsafe(
+					"Switch container type: Single, Slice ([]T), Dynamic Array ([dynamic]T), Fixed ([N]T), Bounded ([<=N]T)",
+					bp_unsafe_tooltip_warning(v.pin_type, v_ck, false),
+				)
+				if im.BeginPopup("##vck_pop") {
+					if next_ck, ck_ch := _draw_container_kind_menu_items(v_ck, v.pin_type); ck_ch {
+						vs_push_undo()
+						_apply_var_container_kind(&v, next_ck)
+						_vs.dirty_unbaked = true
+						_sync_ide_blueprint_context()
+					}
+					im.EndPopup()
+				}
+				im.PopID()
+			}
+
+			im.SetNextItemWidth(104)
+			im.InputTextWithHint("##new_vname", "field_name", cstring(raw_data(_vs.new_var_buf[:])), len(_vs.new_var_buf))
+			im.SameLine(0, 4)
+			_draw_pin_type_combo("##new_vtype", &_vs.new_var_type, 72.0)
+			im.SameLine(0, 4)
+			new_vpt := hot.Hot_Pin_Type(clamp(_vs.new_var_type, 0, i32(len(hot.Hot_Pin_Type) - 1)))
+			im.SetNextItemWidth(max(im.GetContentRegionAvail().x, 48.0))
+			if im.BeginCombo("##new_vck", _container_short_badge(_vs.new_var_container)) {
+				if next_ck, ck_ch := _draw_container_kind_menu_items(_vs.new_var_container, new_vpt); ck_ch {
+					_vs.new_var_container = next_ck
+					_vs.new_var_is_array  = next_ck != .Single
+				}
+				im.EndCombo()
+			}
+			widgets.tooltip_unsafe(
+				"Container kind: Single, [] Slice (all types), [+] Dynamic Array (all types), [N] Fixed Stack Array, [<=] Bounded Array",
+				bp_unsafe_tooltip_warning(new_vpt, _vs.new_var_container, false),
+			)
+			if im.Button("+ Add Field (Self State)", {-1, 0}) {
+				vn := sanitize_odin_ident(strings.trim_space(_c_str(_vs.new_var_buf[:])), context.temp_allocator)
+				if vn != "" && engine.vg_find_var_index(&_vs.graph, vn) < 0 {
+					vs_push_undo()
+					prev_alloc := context.allocator
+					context.allocator = runtime.default_allocator()
+					defer context.allocator = prev_alloc
+					vpt := hot.Hot_Pin_Type(_vs.new_var_type)
+					default_custom := ""
+					if (vpt == .Enum_U8 || vpt == .BitSet_U8) && len(_vs.graph.enums) > 0 {
+						default_custom = strings.clone(_vs.graph.enums[0].name)
+					} else if vpt == .Struct_Val && len(_vs.graph.structs) > 0 {
+						default_custom = strings.clone(_vs.graph.structs[0].name)
+					}
+					ck_add := _vs.new_var_container
+					append(&_vs.graph.variables, engine.VG_Var_Decl{
+						name              = strings.clone(vn),
+						pin_type          = vpt,
+						is_array          = ck_add != .Single,
+						container_kind    = ck_add,
+						array_is_bounded  = ck_add == .Bounded_Array,
+						custom_type_name  = default_custom,
+						instance_editable = true,
+						category          = strings.clone("Default"),
+						slider_min        = 0.0,
+						slider_max        = 10.0,
+					})
+					_vs.new_var_buf[0]         = 0
+					_vs.selected_var_idx       = len(_vs.graph.variables) - 1
+					_vs.selected_node_uid      = 0
+					_vs.preview_bb.initialized = false
+					_vs.dirty_unbaked          = true
+					_sync_ide_blueprint_context()
+				}
+			}
+		} else {
+			st := &_vs.graph.structs[active_st_idx]
+			im.PushIDInt(i32(3000 + active_st_idx))
+			im.TextColored(thm.studio_pin_color(.Struct_Val), "%s", fmt.ctprintf("%s", st.name))
+			im.SameLine()
+			if im.SmallButton("Make") {
+				n_uid := _spawn_graph_node(.Make_Struct, _canvas_view_spawn_pos(0.36), st.name)
+				if nd := engine.vg_find_node(&_vs.graph, n_uid); nd != nil {
+					engine.vg_sync_struct_node_pins(&_vs.graph, nd, st.name)
+					_vs.dirty_unbaked = true
+				}
+			}
+			im.SameLine(0, 3)
+			if im.SmallButton("Break") {
+				n_uid := _spawn_graph_node(.Break_Struct, _canvas_view_spawn_pos(0.40), st.name)
+				if nd := engine.vg_find_node(&_vs.graph, n_uid); nd != nil {
+					engine.vg_sync_struct_node_pins(&_vs.graph, nd, st.name)
+					_vs.dirty_unbaked = true
+				}
+			}
+			im.SameLine(0, 3)
+			if st.code_authored {
+				im.PushStyleColorImVec4(.Text, thm.studio_tokens().domain_odin)
+				if im.SmallButton(fmt.ctprintf("%s L%d##jcode_st", icons.ICON_MD_CODE, max(st.source_line, 1))) {
+					_jump_to_bodin_line(st.source_line)
+				}
+				im.PopStyleColor()
+				widgets.tooltip("Struct declared in Zone 1 raw Odin code — click to view in Full .bodin!")
+			} else if im.SmallButton("X") {
 				vs_push_undo()
 				prev_alloc := context.allocator
 				context.allocator = runtime.default_allocator()
-				defer context.allocator = prev_alloc
-				vpt := hot.Hot_Pin_Type(_vs.new_var_type)
-				default_custom := ""
-				if (vpt == .Enum_U8 || vpt == .BitSet_U8) && len(_vs.graph.enums) > 0 {
-					default_custom = strings.clone(_vs.graph.enums[0].name)
-				} else if vpt == .Struct_Val && len(_vs.graph.structs) > 0 {
-					default_custom = strings.clone(_vs.graph.structs[0].name)
+				delete(st.name)
+				delete(st.using_parent_name)
+				for &f in st.fields {
+					delete(f.name)
+					delete(f.custom_type)
 				}
-				append(&_vs.graph.variables, engine.VG_Var_Decl{
-					name              = strings.clone(vn),
-					pin_type          = vpt,
-					is_array          = _vs.new_var_is_array,
-					custom_type_name  = default_custom,
-					instance_editable = true,
-					category          = strings.clone("Default"),
-					slider_min        = 0.0,
-					slider_max        = 10.0,
-				})
-				_vs.new_var_buf[0]         = 0
-				_vs.selected_var_idx       = len(_vs.graph.variables) - 1
-				_vs.selected_node_uid      = 0
-				_vs.preview_bb.initialized = false
-				_vs.dirty_unbaked          = true
+				delete(st.fields)
+				ordered_remove(&_vs.graph.structs, active_st_idx)
+				if _vs.active_struct_target != "" {
+					delete(_vs.active_struct_target)
+					_vs.active_struct_target = ""
+				}
+				context.allocator = prev_alloc
+				_vs.dirty_unbaked = true
 				_sync_ide_blueprint_context()
+				im.PopID()
+				active_st_idx = -1
+			}
+
+			if active_st_idx >= 0 {
+				st = &_vs.graph.structs[active_st_idx]
+				im.SetNextItemWidth(148)
+				cur_par := st.using_parent_name != "" ? fmt.ctprintf("%s", st.using_parent_name) : cstring("(no using parent)")
+				if im.BeginCombo("using##up", cur_par) {
+					if im.Selectable("(no using parent)", st.using_parent_name == "") {
+						vs_push_undo()
+						prev_alloc := context.allocator
+						context.allocator = runtime.default_allocator()
+						delete(st.using_parent_name)
+						st.using_parent_name = ""
+						for &gn in _vs.graph.nodes {
+							if (gn.kind == .Make_Struct || gn.kind == .Break_Struct) && gn.target_var_or_type == st.name {
+								engine.vg_sync_struct_node_pins(&_vs.graph, &gn, st.name)
+							}
+						}
+						context.allocator = prev_alloc
+						_vs.dirty_unbaked = true
+						_sync_ide_blueprint_context()
+					}
+					for &ost in _vs.graph.structs {
+						if ost.name == st.name do continue
+						if im.Selectable(fmt.ctprintf("%s", ost.name), st.using_parent_name == ost.name) {
+							vs_push_undo()
+							prev_alloc := context.allocator
+							context.allocator = runtime.default_allocator()
+							delete(st.using_parent_name)
+							st.using_parent_name = strings.clone(ost.name)
+							for &gn in _vs.graph.nodes {
+								if (gn.kind == .Make_Struct || gn.kind == .Break_Struct) && gn.target_var_or_type == st.name {
+									engine.vg_sync_struct_node_pins(&_vs.graph, &gn, st.name)
+								}
+							}
+							context.allocator = prev_alloc
+							_vs.dirty_unbaked = true
+							_sync_ide_blueprint_context()
+						}
+					}
+					im.EndCombo()
+				}
+
+				for fi := 0; fi < len(st.fields); fi += 1 {
+					fld := &st.fields[fi]
+					im.PushIDInt(i32(fi))
+					ft_lbl := fld.custom_type != "" ? fld.custom_type : engine.vg_pin_odin_type(fld.pin_type, false)
+					im.TextDisabled("  %s", fmt.ctprintf("%s : %s", fld.name, ft_lbl))
+					if !st.code_authored {
+						im.SameLine()
+						if im.SmallButton("-##rm_sf") {
+							vs_push_undo()
+							prev_alloc := context.allocator
+							context.allocator = runtime.default_allocator()
+							delete(fld.name)
+							delete(fld.custom_type)
+							ordered_remove(&st.fields, fi)
+							for &gn in _vs.graph.nodes {
+								if (gn.kind == .Make_Struct || gn.kind == .Break_Struct) && gn.target_var_or_type == st.name {
+									engine.vg_sync_struct_node_pins(&_vs.graph, &gn, st.name)
+								}
+							}
+							context.allocator = prev_alloc
+							_vs.dirty_unbaked = true
+							_sync_ide_blueprint_context()
+							im.PopID()
+							break
+						}
+					}
+					im.PopID()
+				}
+
+				im.SetNextItemWidth(92)
+				im.InputTextWithHint("##add_sf_nm", "field...", cstring(raw_data(_vs.new_struct_field_buf[:])), len(_vs.new_struct_field_buf))
+				im.SameLine(0, 4)
+				_draw_pin_type_combo("##add_sf_tp", &_vs.new_struct_field_type, 76.0)
+				im.SameLine(0, 4)
+				if im.SmallButton("+ Field") {
+					fnm := sanitize_odin_ident(strings.trim_space(_c_str(_vs.new_struct_field_buf[:])), context.temp_allocator)
+					fpt := hot.Hot_Pin_Type(clamp(_vs.new_struct_field_type, 0, i32(len(hot.Hot_Pin_Type) - 1)))
+					ft_str := engine.vg_pin_odin_type(fpt, false)
+					if _add_field_to_active_struct_in_ram(fnm, ft_str) {
+						_vs.new_struct_field_buf[0] = 0
+					}
+				}
+				im.PopID()
 			}
 		}
+
+		im.Separator()
+		im.SetNextItemWidth(144)
+		im.InputTextWithHint("##new_struct_nm", "Damage_Info...", cstring(raw_data(_vs.new_struct_buf[:])), len(_vs.new_struct_buf))
+		im.SameLine()
+		if im.Button("+ Struct") {
+			snm := sanitize_odin_ident(strings.trim_space(_c_str(_vs.new_struct_buf[:])), context.temp_allocator)
+			if snm != "" {
+				dup := false
+				for &es in _vs.graph.structs do if es.name == snm { dup = true; break }
+				if !dup {
+					vs_push_undo()
+					prev_alloc := context.allocator
+					context.allocator = runtime.default_allocator()
+					append(&_vs.graph.structs, engine.VG_Struct_Decl{
+						name = strings.clone(snm),
+					})
+					if _vs.active_struct_target != "" do delete(_vs.active_struct_target)
+					_vs.active_struct_target = strings.clone(snm)
+					context.allocator = prev_alloc
+					_vs.new_struct_buf[0] = 0
+					_vs.dirty_unbaked     = true
+					_sync_ide_blueprint_context()
+				}
+			}
+		}
+		widgets.tooltip("Declare a zero-heap POD Odin struct (supports `using` inheritance & Pin Splitting) and set it as Active Struct")
 	}
 
 	im.Separator()
@@ -265,22 +637,31 @@ _draw_left_my_blueprint_dock :: proc(height: f32) {
 			}
 			widgets.tooltip("Spawn `bit_set[Enum; u8]` operation node")
 			im.SameLine(0, 3)
-			if im.SmallButton("X") {
-				vs_push_undo()
-				prev_alloc := context.allocator
-				context.allocator = runtime.default_allocator()
-				delete(en.name)
-				delete(en.bitset_name)
-				for vr in en.variants do delete(vr)
-				delete(en.variants)
-				ordered_remove(&_vs.graph.enums, ei)
-				context.allocator = prev_alloc
-				_vs.dirty_unbaked = true
-				_sync_ide_blueprint_context()
-				im.PopID()
-				break
+			if en.code_authored {
+				im.PushStyleColorImVec4(.Text, thm.studio_tokens().domain_odin)
+				if im.SmallButton(fmt.ctprintf("%s L%d##jcode_en", icons.ICON_MD_CODE, max(en.source_line, 1))) {
+					_jump_to_bodin_line(en.source_line)
+				}
+				im.PopStyleColor()
+				widgets.tooltip("Declared in Zone 1 raw Odin code — click to jump directly to its declaration in Full .bodin!")
+			} else {
+				if im.SmallButton("X") {
+					vs_push_undo()
+					prev_alloc := context.allocator
+					context.allocator = runtime.default_allocator()
+					delete(en.name)
+					delete(en.bitset_name)
+					for vr in en.variants do delete(vr)
+					delete(en.variants)
+					ordered_remove(&_vs.graph.enums, ei)
+					context.allocator = prev_alloc
+					_vs.dirty_unbaked = true
+					_sync_ide_blueprint_context()
+					im.PopID()
+					break
+				}
+				widgets.tooltip("Delete enum declaration")
 			}
-			widgets.tooltip("Delete enum declaration")
 
 			im.Indent(12)
 			hb := en.has_bitset
@@ -378,184 +759,6 @@ _draw_left_my_blueprint_dock :: proc(height: f32) {
 			}
 		}
 		widgets.tooltip("Declare an Odin `enum u8` + optional `bit_set[Enum; u8]`")
-	}
-
-	im.Separator()
-
-	// --- Section 2C: Odin POD Structs (`using`) ---
-	if im.CollapsingHeader(icons.ICON_MD_WIDGETS + " POD Structs (using)") {
-		for si := 0; si < len(_vs.graph.structs); si += 1 {
-			st := &_vs.graph.structs[si]
-			im.PushIDInt(i32(3000 + si))
-			im.TextColored(thm.studio_pin_color(.Struct_Val), "%s", fmt.ctprintf("%s", st.name))
-			im.SameLine()
-			if im.SmallButton("Make") {
-				n_uid := _spawn_graph_node(.Make_Struct, _canvas_view_spawn_pos(0.36), st.name)
-				if nd := engine.vg_find_node(&_vs.graph, n_uid); nd != nil {
-					engine.vg_sync_struct_node_pins(&_vs.graph, nd, st.name)
-					_vs.dirty_unbaked = true
-				}
-			}
-			im.SameLine(0, 3)
-			if im.SmallButton("Break") {
-				n_uid := _spawn_graph_node(.Break_Struct, _canvas_view_spawn_pos(0.40), st.name)
-				if nd := engine.vg_find_node(&_vs.graph, n_uid); nd != nil {
-					engine.vg_sync_struct_node_pins(&_vs.graph, nd, st.name)
-					_vs.dirty_unbaked = true
-				}
-			}
-			im.SameLine(0, 3)
-			if im.SmallButton("X") {
-				vs_push_undo()
-				prev_alloc := context.allocator
-				context.allocator = runtime.default_allocator()
-				delete(st.name)
-				delete(st.using_parent_name)
-				for &f in st.fields {
-					delete(f.name)
-					delete(f.custom_type)
-				}
-				delete(st.fields)
-				ordered_remove(&_vs.graph.structs, si)
-				context.allocator = prev_alloc
-				_vs.dirty_unbaked = true
-				_sync_ide_blueprint_context()
-				im.PopID()
-				break
-			}
-
-			im.Indent(12)
-			im.SetNextItemWidth(130)
-			cur_par := st.using_parent_name != "" ? fmt.ctprintf("%s", st.using_parent_name) : cstring("(no using parent)")
-			if im.BeginCombo("using##up", cur_par) {
-				if im.Selectable("(no using parent)", st.using_parent_name == "") {
-					vs_push_undo()
-					prev_alloc := context.allocator
-					context.allocator = runtime.default_allocator()
-					delete(st.using_parent_name)
-					st.using_parent_name = ""
-					for &gn in _vs.graph.nodes {
-						if (gn.kind == .Make_Struct || gn.kind == .Break_Struct) && gn.target_var_or_type == st.name {
-							engine.vg_sync_struct_node_pins(&_vs.graph, &gn, st.name)
-						}
-					}
-					context.allocator = prev_alloc
-					_vs.dirty_unbaked = true
-					_sync_ide_blueprint_context()
-				}
-				for &ost in _vs.graph.structs {
-					if ost.name == st.name do continue
-					if im.Selectable(fmt.ctprintf("%s", ost.name), st.using_parent_name == ost.name) {
-						vs_push_undo()
-						prev_alloc := context.allocator
-						context.allocator = runtime.default_allocator()
-						delete(st.using_parent_name)
-						st.using_parent_name = strings.clone(ost.name)
-						for &gn in _vs.graph.nodes {
-							if (gn.kind == .Make_Struct || gn.kind == .Break_Struct) && gn.target_var_or_type == st.name {
-								engine.vg_sync_struct_node_pins(&_vs.graph, &gn, st.name)
-							}
-						}
-						context.allocator = prev_alloc
-						_vs.dirty_unbaked = true
-						_sync_ide_blueprint_context()
-					}
-				}
-				im.EndCombo()
-			}
-
-			for fi := 0; fi < len(st.fields); fi += 1 {
-				fld := &st.fields[fi]
-				im.PushIDInt(i32(fi))
-				ft_lbl := fld.custom_type != "" ? fld.custom_type : engine.vg_pin_odin_type(fld.pin_type, false)
-				im.TextDisabled("  %s", fmt.ctprintf("%s : %s", fld.name, ft_lbl))
-				im.SameLine()
-				if im.SmallButton("-##rm_sf") {
-					vs_push_undo()
-					prev_alloc := context.allocator
-					context.allocator = runtime.default_allocator()
-					delete(fld.name)
-					delete(fld.custom_type)
-					ordered_remove(&st.fields, fi)
-					for &gn in _vs.graph.nodes {
-						if (gn.kind == .Make_Struct || gn.kind == .Break_Struct) && gn.target_var_or_type == st.name {
-							engine.vg_sync_struct_node_pins(&_vs.graph, &gn, st.name)
-						}
-					}
-					context.allocator = prev_alloc
-					_vs.dirty_unbaked = true
-					_sync_ide_blueprint_context()
-					im.PopID()
-					break
-				}
-				im.PopID()
-			}
-
-			im.SetNextItemWidth(76)
-			im.InputTextWithHint("##add_sf_nm", "field...", cstring(raw_data(_vs.new_struct_field_buf[:])), len(_vs.new_struct_field_buf))
-			im.SameLine()
-			_draw_pin_type_combo("##add_sf_tp", &_vs.new_struct_field_type, 64.0)
-			im.SameLine()
-			if im.SmallButton("+ Fld") {
-				fnm := sanitize_odin_ident(strings.trim_space(_c_str(_vs.new_struct_field_buf[:])), context.temp_allocator)
-				if fnm != "" {
-					dup := false
-					for &ef in st.fields do if ef.name == fnm { dup = true; break }
-					if !dup {
-						vs_push_undo()
-						prev_alloc := context.allocator
-						context.allocator = runtime.default_allocator()
-						defer context.allocator = prev_alloc
-						fpt := hot.Hot_Pin_Type(_vs.new_struct_field_type)
-						fc := ""
-						if (fpt == .Enum_U8 || fpt == .BitSet_U8) && len(_vs.graph.enums) > 0 {
-							fc = strings.clone(_vs.graph.enums[0].name)
-						} else if fpt == .Struct_Val && len(_vs.graph.structs) > 0 {
-							fc = strings.clone(_vs.graph.structs[0].name)
-						}
-						append(&st.fields, engine.VG_Struct_Field{
-							name        = strings.clone(fnm),
-							pin_type    = fpt,
-							custom_type = fc,
-						})
-						_vs.new_struct_field_buf[0] = 0
-						for &gn in _vs.graph.nodes {
-							if (gn.kind == .Make_Struct || gn.kind == .Break_Struct) && gn.target_var_or_type == st.name {
-								engine.vg_sync_struct_node_pins(&_vs.graph, &gn, st.name)
-							}
-						}
-						_vs.dirty_unbaked = true
-						_sync_ide_blueprint_context()
-					}
-				}
-			}
-			im.Unindent(12)
-			im.PopID()
-		}
-
-		im.SetNextItemWidth(144)
-		im.InputTextWithHint("##new_struct_nm", "Damage_Info...", cstring(raw_data(_vs.new_struct_buf[:])), len(_vs.new_struct_buf))
-		im.SameLine()
-		if im.Button("+ Struct") {
-			snm := sanitize_odin_ident(strings.trim_space(_c_str(_vs.new_struct_buf[:])), context.temp_allocator)
-			if snm != "" {
-				dup := false
-				for &es in _vs.graph.structs do if es.name == snm { dup = true; break }
-				if !dup {
-					vs_push_undo()
-					prev_alloc := context.allocator
-					context.allocator = runtime.default_allocator()
-					defer context.allocator = prev_alloc
-					append(&_vs.graph.structs, engine.VG_Struct_Decl{
-						name = strings.clone(snm),
-					})
-					_vs.new_struct_buf[0] = 0
-					_vs.dirty_unbaked     = true
-					_sync_ide_blueprint_context()
-				}
-			}
-		}
-		widgets.tooltip("Declare a zero-heap POD Odin struct (supports `using` inheritance & Pin Splitting)")
 	}
 
 	im.Separator()
@@ -769,6 +972,15 @@ _sync_var_default_to_preview_bb :: proc(vi: int, v: ^engine.VG_Var_Decl) {
 	case .Vec4:                   _vs.preview_bb.slots[vi].val_vec4 = v.default_vec4
 	case .Quat:                   _vs.preview_bb.slots[vi].val_quat = v.default_vec4
 	case .String, .Asset:         _vs.preview_bb.initialized = false
+	}
+	if ck := engine.vg_resolve_container_kind(v^); v.pin_type == .Float && (ck == .Slice || ck == .Dynamic_Array) {
+		if seq, has := &_vs.preview_bb.var_f32_seqs[v.name]; has {
+			prev_alloc := context.allocator
+			context.allocator = runtime.default_allocator()
+			resize(seq, len(v.default_f32_list))
+			if len(v.default_f32_list) > 0 do copy(seq^[:], v.default_f32_list[:])
+			context.allocator = prev_alloc
+		}
 	}
 }
 
@@ -1111,21 +1323,18 @@ _draw_right_details_inspector :: proc(height: f32) {
 		}
 
 		im.TextDisabled("Odin Type: %s", fmt.ctprintf("%s", engine.vg_var_odin_type_ex(&_vs.graph, v^)))
-		arr_tmp := v.is_array
-		if im.Checkbox("Fixed/Bounded Array##vd_arr", &arr_tmp) {
-			vs_push_undo()
-			v.is_array = arr_tmp
-			_vs.dirty_unbaked = true
-			_sync_ide_blueprint_context()
-		}
-		if v.is_array {
-			bnd_tmp := v.array_is_bounded
-			if im.Checkbox("Bounded Array (data + count)##vd_bnd", &bnd_tmp) {
+		cur_ck := engine.vg_resolve_container_kind(v^)
+		im.SetNextItemWidth(-1)
+		if im.BeginCombo("Container##vd_ck", _container_display_label(cur_ck)) {
+			if next_ck, ck_ch := _draw_container_kind_menu_items(cur_ck, v.pin_type); ck_ch {
 				vs_push_undo()
-				v.array_is_bounded = bnd_tmp
+				_apply_var_container_kind(v, next_ck)
 				_vs.dirty_unbaked = true
 				_sync_ide_blueprint_context()
 			}
+			im.EndCombo()
+		}
+		if cur_ck == .Fixed_Array || cur_ck == .Bounded_Array {
 			cap_tmp := i32(v.array_count)
 			im.SetNextItemWidth(-1)
 			cap_ch := im.DragInt("Capacity (0=[8]T)##vd_cap", &cap_tmp, 0.25, 0, 64)
@@ -1188,7 +1397,12 @@ _draw_right_details_inspector :: proc(height: f32) {
 
 		im.Separator()
 		im.TextDisabled("Default Value:")
-		if _draw_default_value_widgets(
+		if v.pin_type == .Float && cur_ck != .Single {
+			if draw_f32_list_editor(fmt.tprintf("vd_f32l_%d", vi), &v.default_f32_list, v.slider_min, v.slider_max) {
+				_sync_var_default_to_preview_bb(vi, v)
+				_vs.dirty_unbaked = true
+			}
+		} else if _draw_default_value_widgets(
 			&_vs.graph, fmt.tprintf("vd_%d", vi), v.pin_type, v.custom_type_name,
 			&v.default_bool, &v.default_int, &v.default_i64, &v.default_u64,
 			&v.default_f32, &v.default_f64, &v.default_vec2, &v.default_vec3, &v.default_vec4,
@@ -1326,10 +1540,10 @@ _draw_right_details_inspector :: proc(height: f32) {
 
 		case .Array_Op:
 			im.TextDisabled("Array Operation Mode:")
-			aop_lbls := [8]cstring{"Get Copy arr[i]", "Get ^Ref (&arr[i])", "Set Element", "Append (Bounded)", "Pop (Bounded)", "Clear (Bounded)", "Len / Count", "Swap Remove"}
-			ai := clamp(i32(n.sub_op), 0, 7)
+			aop_lbls := [9]cstring{"Get Copy arr[i]", "Get ^Ref (&arr[i])", "Set Element", "Append", "Pop", "Clear", "Len / Count", "Swap Remove", "Sub-Slice (arr[start:end])"}
+			ai := clamp(i32(n.sub_op), 0, 8)
 			im.SetNextItemWidth(-1)
-			if im.ComboChar("##det_aop_mode", &ai, raw_data(aop_lbls[:]), 8) {
+			if im.ComboChar("##det_aop_mode", &ai, raw_data(aop_lbls[:]), 9) {
 				vs_push_undo()
 				prev_alloc := context.allocator
 				context.allocator = runtime.default_allocator()
@@ -1648,7 +1862,14 @@ _draw_right_details_inspector :: proc(height: f32) {
 			im.InputTextWithHint("##det_pnm", "pin_name", cstring(raw_data(_vs.new_pin_buf[:])), len(_vs.new_pin_buf))
 			im.SameLine()
 			_draw_pin_type_combo("##det_pt", &_vs.new_pin_type, 74.0)
-			im.Checkbox(fmt.ctprintf("Pass By Reference (%s ^T)##det_pref", icons.ICON_MD_DIAMOND), &_vs.new_pin_is_ref)
+			if im.Checkbox(fmt.ctprintf("Pass By Reference (%s ^T)##det_pref", icons.ICON_MD_DIAMOND), &_vs.new_pin_is_ref) && _vs.new_pin_is_ref {
+				_vs.new_pin_is_slice = false
+			}
+			widgets.tooltip_unsafe("Pass mutable ^T address directly into node.", bp_unsafe_tooltip_warning(.Float, .Single, true))
+			if im.Checkbox("Pass As Slice ([]T)##det_pslice", &_vs.new_pin_is_slice) && _vs.new_pin_is_slice {
+				_vs.new_pin_is_ref = false
+			}
+			widgets.tooltip_unsafe("Pass a zero-copy []T slice into node.", bp_unsafe_tooltip_warning(.Float, .Slice, false))
 			if im.Button("+ Add Pin to Node", {-1, 0}) {
 				pnm := sanitize_odin_ident(strings.trim_space(_c_str(_vs.new_pin_buf[:])), context.temp_allocator)
 				if pnm != "" {
@@ -1656,9 +1877,11 @@ _draw_right_details_inspector :: proc(height: f32) {
 					prev_alloc := context.allocator
 					context.allocator = runtime.default_allocator()
 					append(&n.inputs, engine.VG_Pin_Def{
-						name      = strings.clone(pnm),
-						pin_type  = hot.Hot_Pin_Type(_vs.new_pin_type),
-						pass_mode = _vs.new_pin_is_ref ? .By_Reference : .Copy_Value,
+						name           = strings.clone(pnm),
+						pin_type       = hot.Hot_Pin_Type(_vs.new_pin_type),
+						pass_mode      = _vs.new_pin_is_ref ? .By_Reference : .Copy_Value,
+						is_array       = _vs.new_pin_is_slice,
+						container_kind = _vs.new_pin_is_slice ? .Slice : .Single,
 					})
 					context.allocator = prev_alloc
 					_vs.new_pin_buf[0] = 0

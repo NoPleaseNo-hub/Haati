@@ -21,10 +21,7 @@ import engine "../engine"
 import "haati:engine_editor/asset_pipeline"
 import "../engine/serialization"
 
-@(menu_separator={path="Assets", order=-45})
-extract_gltf_separator :: proc() {}
-
-@(menu_item={path="Assets/Extract Assets", order=-40, shortcut=""})
+@(menu_item={path="Tools/Extract glTF Assets...", order=21, shortcut=""})
 extract_gltf_menu :: proc() {
 	path := projectViewData.selectedFile
 	if !strings.has_suffix(path, ".glb") && !strings.has_suffix(path, ".gltf") {

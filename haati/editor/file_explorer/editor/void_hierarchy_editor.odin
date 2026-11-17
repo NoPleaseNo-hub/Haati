@@ -2541,14 +2541,6 @@ void_hierarchy_window_draw :: proc() {
 	}
 	widgets.tooltip("Collapse All Nodes Recursively")
 
-	im.SameLine()
-	is_docked := im.IsWindowDocked()
-	dock_icon := is_docked ? icons.ICON_MD_OPEN_IN_NEW : icons.ICON_MD_DOCK
-	if im.Button(fmt.ctprintf("%s##VHDockToggle", dock_icon)) {
-		wnd.toggle_window_dock("void_hierarchy")
-	}
-	widgets.tooltip(is_docked ? "Dock Out as Floating Window" : "Dock Window Back into Workspace")
-
 	// Filter Input with Clear button (wraps cleanly onto its own row if zoomed/narrow!)
 	im.SameLine()
 	avail_w := im.GetContentRegionAvail().x

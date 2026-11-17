@@ -968,8 +968,11 @@ _capture_component_edits :: proc(
 // arrays. Used by the override cleanup pass.
 _collect_prefab_local_ids :: proc(base_raw: []byte, allocator := context.allocator) -> (map[Local_ID]bool, bool) {
 	out := make(map[Local_ID]bool, 0, allocator)
-	base_copy := make([]byte, len(base_raw), context.temp_allocator)
-	copy(base_copy, base_raw)
+	base_copy, cok := scene_bytes_to_json_if_binary(base_raw, context.temp_allocator)
+	if !cok {
+		delete(out)
+		return nil, false
+	}
 	val: json.Value
 	if json.unmarshal_string(string(base_copy), &val) != nil {
 		delete(out)
@@ -1314,25 +1317,12 @@ scene_serialize :: proc(s: ^Scene) -> ([]byte, bool) {
 		}
 	}
 
-	opts := json.Marshal_Options{
-		spec       = .JSON,
-		pretty     = true,
-		use_spaces = true,
-		spaces     = 2,
-		// Deterministic key order for json.Object values (ext components):
-		// "__type" sorts before lowercase field names, so it leads each record.
-		sort_maps_by_key = true,
-	}
-	raw, err := json.marshal(sf, opts)
-	if err != nil {
-		fmt.printf("[Scene] Failed to marshal scene: %v\n", err)
-		scene_file_destroy_shallow(&sf)
+	data, bin_ok := scene_binary_encode(&sf)
+	scene_file_destroy_shallow(&sf)
+	if !bin_ok {
+		fmt.printf("[Scene] Failed to encode HTSCN001 scene\n")
 		return nil, false
 	}
-
-	scene_file_destroy_shallow(&sf)
-	data := json_canonicalize_floats(raw)
-	delete(raw)
 	return data, true
 }
 // Canonicalizes float text in marshaled JSON. Core's writer emits floats at
@@ -1479,14 +1469,11 @@ scene_create_variant_file :: proc(base_path: string, out_path: string) -> bool {
 	})
 	defer scene_file_destroy(&vf)
 
-	opts := json.Marshal_Options{spec = .JSON, pretty = true, use_spaces = true, spaces = 2}
-	raw, err := json.marshal(vf, opts)
-	if err != nil {
-		fmt.printf("[Scene] Failed to marshal variant: %v\n", err)
+	data, bin_ok := scene_binary_encode(&vf)
+	if !bin_ok {
+		fmt.printf("[Scene] Failed to encode variant HTSCN001 scene\n")
 		return false
 	}
-	data := json_canonicalize_floats(raw)
-	delete(raw)
 	defer delete(data)
 
 	if write_err := os.write_entire_file(out_path, data); write_err != nil {
@@ -1614,6 +1601,12 @@ scene_file_load :: proc(filepath: string) -> (SceneFile, bool) {
 // populated fields allocated — free the partial result so callers can just
 // bail.
 scene_file_unmarshal :: proc(data: []byte, sf: ^SceneFile) -> json.Unmarshal_Error {
+	if scene_bytes_is_binary(data) {
+		if !scene_binary_decode(data, sf) {
+			return json.Unmarshal_Data_Error.Invalid_Data
+		}
+		return nil
+	}
 	payload := data
 	migrated, _, _, mok := scene_migrate_json_bytes(data, context.temp_allocator)
 	if mok && len(migrated) > 0 {
@@ -1948,61 +1941,60 @@ scene_save_subtrees_to_file :: proc(
 
 	if !collected_any do return false
 
-	opts := json.Marshal_Options{
-		spec             = .JSON,
-		pretty           = true,
-		use_spaces       = true,
-		spaces           = 2,
-		sort_maps_by_key = true,
-	}
-	raw, err := json.marshal(sf, opts)
-	if err != nil {
-		fmt.printf("[Scene] Failed to marshal separated subtrees: %v\n", err)
-		return false
-	}
-	defer delete(raw)
+	data: []byte
+	encoded_merged := false
 
-	// When appending into an existing scene on disk, unmarshal `raw` into a clean owned SceneFile
+	// When appending into an existing scene on disk, unmarshal `sf` into a clean owned SceneFile
 	// and merge its non-root transforms and components into the existing scene file.
 	if append_to_existing && os.exists(out_path) {
 		if existing_sf, ok := scene_file_load(out_path); ok && len(existing_sf.transforms) > 0 {
 			defer scene_file_destroy(&existing_sf)
-			sub_sf: SceneFile
-			if scene_file_unmarshal(raw, &sub_sf) == nil {
-				defer scene_file_destroy(&sub_sf)
-				root_idx := 0
-				for tr, ti in existing_sf.transforms {
-					if tr.local_id == root_lid {
-						root_idx = ti
-						break
+			opts := json.Marshal_Options{spec = .JSON, pretty = false}
+			if raw, merr := json.marshal(sf, opts, context.temp_allocator); merr == nil {
+				sub_sf: SceneFile
+				if scene_file_unmarshal(raw, &sub_sf) == nil {
+					defer scene_file_destroy(&sub_sf)
+					root_idx := 0
+					for tr, ti in existing_sf.transforms {
+						if tr.local_id == root_lid {
+							root_idx = ti
+							break
+						}
 					}
-				}
-				if len(sub_sf.transforms) > 0 {
-					for ch in sub_sf.transforms[0].children {
-						append(&existing_sf.transforms[root_idx].children, ch)
+					if len(sub_sf.transforms) > 0 {
+						for ch in sub_sf.transforms[0].children {
+							append(&existing_sf.transforms[root_idx].children, ch)
+						}
+						for ti in 1 ..< len(sub_sf.transforms) {
+							append(&existing_sf.transforms, sub_sf.transforms[ti])
+						}
+						// Clear sub_sf.transforms[1:] so scene_file_destroy(&sub_sf) only frees sub_sf.transforms[0]
+						if len(sub_sf.transforms) > 1 {
+							resize(&sub_sf.transforms, 1)
+						}
 					}
-					for ti in 1 ..< len(sub_sf.transforms) {
-						append(&existing_sf.transforms, sub_sf.transforms[ti])
+					for comp_val in sub_sf.components {
+						append(&existing_sf.components, comp_val)
 					}
-					// Clear sub_sf.transforms[1:] so scene_file_destroy(&sub_sf) only frees sub_sf.transforms[0]
-					if len(sub_sf.transforms) > 1 {
-						resize(&sub_sf.transforms, 1)
-					}
-				}
-				for comp_val in sub_sf.components {
-					append(&existing_sf.components, comp_val)
-				}
-				clear(&sub_sf.components)
+					clear(&sub_sf.components)
 
-				if merged_raw, merr := json.marshal(existing_sf, opts); merr == nil {
-					delete(raw)
-					raw = merged_raw
+					if mbin, mbok := scene_binary_encode(&existing_sf); mbok {
+						data = mbin
+						encoded_merged = true
+					}
 				}
 			}
 		}
 	}
 
-	data := json_canonicalize_floats(raw)
+	if !encoded_merged {
+		bin, bok := scene_binary_encode(&sf)
+		if !bok {
+			fmt.printf("[Scene] Failed to encode separated HTSCN001 scene\n")
+			return false
+		}
+		data = bin
+	}
 	defer delete(data)
 
 	if write_err := os.write_entire_file(out_path, data); write_err != nil {
@@ -2041,17 +2033,8 @@ scene_save_empty_to_file :: proc(root_name: string, out_path: string) -> bool {
 	root_t.components   = make([dynamic]Owned)
 	append(&sf.transforms, root_t)
 
-	opts := json.Marshal_Options{
-		spec             = .JSON,
-		pretty           = true,
-		use_spaces       = true,
-		spaces           = 2,
-		sort_maps_by_key = true,
-	}
-	raw, err := json.marshal(sf, opts)
-	if err != nil do return false
-	data := json_canonicalize_floats(raw)
-	delete(raw)
+	data, bin_ok := scene_binary_encode(&sf)
+	if !bin_ok do return false
 	defer delete(data)
 
 	if write_err := os.write_entire_file(out_path, data); write_err != nil do return false

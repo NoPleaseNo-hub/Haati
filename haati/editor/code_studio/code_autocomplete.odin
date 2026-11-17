@@ -26,6 +26,7 @@ import "core:sync"
 import "core:thread"
 import "core:time"
 import "haati:engine"
+import crash_journal "haati:engine/crash_journal"
 
 AUTOCOMPLETE_DEBOUNCE_MS :: 120
 AUTOCOMPLETE_MAX_RESULTS :: 12
@@ -95,7 +96,9 @@ _ac: _AC_Worker_State
 
 @(private = "file")
 _free_indexed_symbol :: proc(s: Indexed_Symbol) {
+	prev_alloc := context.allocator
 	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev_alloc
 	if s.name        != "" do delete(s.name)
 	if s.insert_text != "" do delete(s.insert_text)
 	if s.detail      != "" do delete(s.detail)
@@ -196,6 +199,7 @@ _walk_stmt_locals :: proc(
 		_walk_stmt_locals(src, s.body, seen, out_syms, out_types, allocator)
 	case ^ast.Range_Stmt:
 		for val_expr in s.vals {
+			if val_expr == nil do continue
 			if id, ok := val_expr.derived_expr.(^ast.Ident); ok && id.name != "_" && !(id.name in seen^) {
 				seen^[id.name] = true
 				append(out_syms, Indexed_Symbol{
@@ -217,6 +221,7 @@ _walk_stmt_locals :: proc(
 	case ^ast.Value_Decl:
 		explicit_t := s.type != nil ? _node_slice(src, s.type) : ""
 		for name_expr, ni in s.names {
+			if name_expr == nil do continue
 			id, is_id := name_expr.derived_expr.(^ast.Ident)
 			if !is_id || id.name == "_" || id.name == "_mh_body" do continue
 			inferred_t := explicit_t
@@ -242,16 +247,25 @@ _walk_stmt_locals :: proc(
 // Pure in-RAM AST symbol & struct-field extractor (`< 0.25 ms`, zero disk IO).
 // Callable synchronously in unit tests and asynchronously on the autocomplete worker thread!
 parse_buffer_symbols_in_ram :: proc(
-	code:           string,
-	is_scoped_body: bool,
-	allocator       := context.temp_allocator,
+	code:                string,
+	is_scoped_body:      bool,
+	allocator            := context.temp_allocator,
+	include_body_locals: bool = true,
 ) -> (
 	symbols:     []Indexed_Symbol,
 	local_types: map[string]string,
 ) {
 	arena: mem.Dynamic_Arena
+	prev_arena_alloc := context.allocator
+	context.allocator = runtime.default_allocator()
 	mem.dynamic_arena_init(&arena)
-	defer mem.dynamic_arena_destroy(&arena)
+	context.allocator = prev_arena_alloc
+	defer {
+		pa := context.allocator
+		context.allocator = runtime.default_allocator()
+		mem.dynamic_arena_destroy(&arena)
+		context.allocator = pa
+	}
 
 	f, _, wrapped := parse_odin_in_arena(code, "ac_buffer.odin", is_scoped_body, &arena)
 
@@ -260,10 +274,12 @@ parse_buffer_symbols_in_ram :: proc(
 	seen := make(map[string]bool, 64, mem.dynamic_arena_allocator(&arena))
 
 	for decl in f.decls {
+		if decl == nil do continue
 		vd, is_vd := decl.derived.(^ast.Value_Decl)
 		if !is_vd do continue
 
 		for name_expr, ni in vd.names {
+			if name_expr == nil do continue
 			id, is_id := name_expr.derived_expr.(^ast.Ident)
 			if !is_id || id.name == "_" do continue
 
@@ -281,29 +297,33 @@ parse_buffer_symbols_in_ram :: proc(
 							kind        = .Procedure,
 						})
 					}
-					// Extract parameters & body locals
-					if v.type != nil && v.type.params != nil {
-						for field in v.type.params.list {
-							ft := field.type != nil ? _node_slice(wrapped, field.type) : "param"
-							for pn in field.names {
-								if pid, pok := pn.derived_expr.(^ast.Ident); pok && pid.name != "_" {
-									if !(pid.name in ltypes) {
-										ltypes[strings.clone(pid.name, allocator)] = strings.clone(ft, allocator)
-									}
-									if !(pid.name in seen) {
-										seen[pid.name] = true
-										append(&out, Indexed_Symbol{
-											name        = strings.clone(pid.name, allocator),
-											insert_text = strings.clone(pid.name, allocator),
-											detail      = strings.clone(ft, allocator),
-											kind        = .Local_Var,
-										})
+					if include_body_locals {
+						// Extract parameters & body locals
+						if v.type != nil && v.type.params != nil {
+							for field in v.type.params.list {
+								if field == nil do continue
+								ft := field.type != nil ? _node_slice(wrapped, field.type) : "param"
+								for pn in field.names {
+									if pn == nil do continue
+									if pid, pok := pn.derived_expr.(^ast.Ident); pok && pid.name != "_" {
+										if !(pid.name in ltypes) {
+											ltypes[strings.clone(pid.name, allocator)] = strings.clone(ft, allocator)
+										}
+										if !(pid.name in seen) {
+											seen[pid.name] = true
+											append(&out, Indexed_Symbol{
+												name        = strings.clone(pid.name, allocator),
+												insert_text = strings.clone(pid.name, allocator),
+												detail      = strings.clone(ft, allocator),
+												kind        = .Local_Var,
+											})
+										}
 									}
 								}
 							}
 						}
+						_walk_stmt_locals(wrapped, v.body, &seen, &out, &ltypes, allocator)
 					}
-					_walk_stmt_locals(wrapped, v.body, &seen, &out, &ltypes, allocator)
 					continue
 
 				case ^ast.Struct_Type:
@@ -318,8 +338,10 @@ parse_buffer_symbols_in_ram :: proc(
 					}
 					if v.fields != nil {
 						for fld in v.fields.list {
+							if fld == nil do continue
 							ft := fld.type != nil ? _node_slice(wrapped, fld.type) : "field"
 							for fn in fld.names {
+								if fn == nil do continue
 								if fid, fok := fn.derived_expr.(^ast.Ident); fok && fid.name != "_" {
 									append(&out, Indexed_Symbol{
 										name        = strings.clone(fid.name, allocator),
@@ -345,6 +367,7 @@ parse_buffer_symbols_in_ram :: proc(
 						})
 					}
 					for ev in v.fields {
+						if ev == nil do continue
 						ev_txt := _node_slice(wrapped, ev)
 						if eq := strings.index_byte(ev_txt, '='); eq > 0 {
 							ev_txt = strings.trim_space(ev_txt[:eq])
@@ -382,35 +405,56 @@ parse_buffer_symbols_in_ram :: proc(
 	return out[:], ltypes
 }
 
-@(private = "file")
-_index_package_dir_symbols :: proc(pkg_dir: string, allocator := context.temp_allocator) -> []Indexed_Symbol {
+// Indexes top-level procs, types, and struct/enum fields across all non-test `.odin`
+// files in `pkg_dir` using isolated heap-backed Dynamic_Arenas so indexing large engine
+// packages (90+ files) never overflows or corrupts the 4 MB `context.temp_allocator` ring buffer.
+index_package_dir_symbols :: proc(pkg_dir: string, allocator := context.temp_allocator) -> []Indexed_Symbol {
 	out := make([dynamic]Indexed_Symbol, 0, 64, allocator)
 	if pkg_dir == "" do return out[:]
 
+	dir_arena: mem.Dynamic_Arena
+	file_arena: mem.Dynamic_Arena
+	prev_arena_alloc := context.allocator
+	context.allocator = runtime.default_allocator()
+	mem.dynamic_arena_init(&dir_arena)
+	mem.dynamic_arena_init(&file_arena)
+	context.allocator = prev_arena_alloc
+	defer {
+		pa := context.allocator
+		context.allocator = runtime.default_allocator()
+		mem.dynamic_arena_destroy(&file_arena)
+		mem.dynamic_arena_destroy(&dir_arena)
+		context.allocator = pa
+	}
+
+	dir_alloc  := mem.dynamic_arena_allocator(&dir_arena)
+	file_alloc := mem.dynamic_arena_allocator(&file_arena)
+
 	abs_dir := pkg_dir
 	if !filepath.is_abs(pkg_dir) {
-		repo_root := engine.engine_root(context.temp_allocator)
+		repo_root := engine.engine_root(dir_alloc)
 		if repo_root == "" {
-			repo_root = engine.resolve_repo_root(context.temp_allocator)
+			repo_root = engine.resolve_repo_root(dir_alloc)
 		}
-		abs_dir, _ = filepath.join({repo_root, pkg_dir}, context.temp_allocator)
+		abs_dir, _ = filepath.join({repo_root, pkg_dir}, dir_alloc)
 	}
 	if !os.is_dir(abs_dir) do return out[:]
-	entries, err := os.read_all_directory_by_path(abs_dir, context.temp_allocator)
+	entries, err := os.read_all_directory_by_path(abs_dir, dir_alloc)
 	if err != nil do return out[:]
 
-	seen := make(map[string]bool, 128, context.temp_allocator)
+	seen := make(map[string]bool, 256, dir_alloc)
 	for fi in entries {
 		if !strings.has_suffix(fi.name, ".odin") || strings.has_suffix(fi.name, "_test.odin") do continue
-		raw, rerr := os.read_entire_file(fi.fullpath, context.temp_allocator)
+		mem.dynamic_arena_reset(&file_arena)
+		raw, rerr := os.read_entire_file(fi.fullpath, file_alloc)
 		if rerr != nil do continue
-		file_syms, _ := parse_buffer_symbols_in_ram(string(raw), false, context.temp_allocator)
+		file_syms, _ := parse_buffer_symbols_in_ram(string(raw), false, file_alloc, false)
 		for s in file_syms {
 			// Only keep top-level procs, types, and struct/enum fields from sibling files (not private locals)
 			if s.kind == .Local_Var do continue
-			key := s.receiver != "" ? fmt.tprintf("%s.%s", s.receiver, s.name) : s.name
+			key := s.receiver != "" ? fmt.aprintf("%s.%s", s.receiver, s.name, allocator = file_alloc) : s.name
 			if key in seen do continue
-			seen[key] = true
+			seen[strings.clone(key, dir_alloc)] = true
 			append(&out, _clone_indexed_symbol(s, allocator))
 		}
 	}
@@ -420,6 +464,7 @@ _index_package_dir_symbols :: proc(pkg_dir: string, allocator := context.temp_al
 @(private = "file")
 _ac_worker_proc :: proc(_t: ^thread.Thread) {
 	context = runtime.default_context()
+	context.assertion_failure_proc = crash_journal.assertion_failure
 	last_rev: u64 = 0
 
 	for {
@@ -441,31 +486,35 @@ _ac_worker_proc :: proc(_t: ^thread.Thread) {
 			continue
 		}
 
-		code_copy  := strings.clone(_ac.req_code, context.temp_allocator)
+		pass_arena: mem.Dynamic_Arena
+		mem.dynamic_arena_init(&pass_arena)
+		pass_alloc := mem.dynamic_arena_allocator(&pass_arena)
+
+		code_copy  := strings.clone(_ac.req_code, pass_alloc)
 		is_scoped  := _ac.req_is_scoped
-		pkg_dir    := strings.clone(_ac.req_pkg_dir, context.temp_allocator)
-		extra_dirs := strings.clone(_ac.req_extra_dirs, context.temp_allocator)
+		pkg_dir    := strings.clone(_ac.req_pkg_dir, pass_alloc)
+		extra_dirs := strings.clone(_ac.req_extra_dirs, pass_alloc)
 		need_pkg   := (pkg_dir != "" && pkg_dir != _ac.cached_pkg_dir) || (extra_dirs != _ac.cached_extra_dirs)
 		sync.mutex_unlock(&_ac.mu)
 
-		buf_syms, ltypes := parse_buffer_symbols_in_ram(code_copy, is_scoped, context.temp_allocator)
-		var_pkg_syms := make([dynamic]Indexed_Symbol, 0, 64, context.temp_allocator)
+		buf_syms, ltypes := parse_buffer_symbols_in_ram(code_copy, is_scoped, pass_alloc)
+		var_pkg_syms := make([dynamic]Indexed_Symbol, 0, 64, pass_alloc)
 		if need_pkg {
 			if pkg_dir != "" {
-				for s in _index_package_dir_symbols(pkg_dir, context.temp_allocator) {
+				for s in index_package_dir_symbols(pkg_dir, pass_alloc) {
 					append(&var_pkg_syms, s)
 				}
 			}
 			if extra_dirs != "" {
-				for entry in strings.split(extra_dirs, ";", context.temp_allocator) {
+				for entry in strings.split(extra_dirs, ";", pass_alloc) {
 					eq := strings.index_byte(entry, '=')
 					if eq <= 0 do continue
 					alias := strings.trim_space(entry[:eq])
 					edir  := strings.trim_space(entry[eq + 1:])
-					for s in _index_package_dir_symbols(edir, context.temp_allocator) {
+					for s in index_package_dir_symbols(edir, pass_alloc) {
 						if s.receiver == "" {
-							cs := _clone_indexed_symbol(s, context.temp_allocator)
-							cs.receiver = strings.clone(alias, context.temp_allocator)
+							cs := _clone_indexed_symbol(s, pass_alloc)
+							cs.receiver = strings.clone(alias, pass_alloc)
 							append(&var_pkg_syms, cs)
 						} else {
 							append(&var_pkg_syms, s)
@@ -478,6 +527,7 @@ _ac_worker_proc :: proc(_t: ^thread.Thread) {
 
 		sync.mutex_lock(&_ac.mu)
 		if _ac.req_revision == cur_rev {
+			prev_alloc := context.allocator
 			context.allocator = runtime.default_allocator()
 			for s in _ac.buf_symbols do _free_indexed_symbol(s)
 			clear(&_ac.buf_symbols)
@@ -506,8 +556,10 @@ _ac_worker_proc :: proc(_t: ^thread.Thread) {
 				_ac.cached_extra_dirs = strings.clone(extra_dirs)
 			}
 			_ac.pub_revision = cur_rev
+			context.allocator = prev_alloc
 		}
 		sync.mutex_unlock(&_ac.mu)
+		mem.dynamic_arena_destroy(&pass_arena)
 		free_all(context.temp_allocator)
 	}
 }
@@ -516,7 +568,9 @@ ensure_autocomplete_started :: proc() {
 	sync.mutex_lock(&_ac.mu)
 	defer sync.mutex_unlock(&_ac.mu)
 	if _ac.started do return
+	prev_alloc := context.allocator
 	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev_alloc
 	_ac.started        = true
 	_ac.stop_requested = false
 	_ac.local_types    = make(map[string]string, 32)
@@ -544,7 +598,9 @@ shutdown_autocomplete :: proc() {
 	}
 
 	sync.mutex_lock(&_ac.mu)
+	prev_alloc := context.allocator
 	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev_alloc
 	for s in _ac.buf_symbols do _free_indexed_symbol(s)
 	delete(_ac.buf_symbols)
 	for s in _ac.pkg_symbols do _free_indexed_symbol(s)
@@ -604,7 +660,9 @@ USING_SPACE_CATALOG := [?]Using_Space_Spec{
 set_blueprint_autocomplete_context :: proc(vars: []Scoped_Pin_Badge, procs: []string, active_spaces: []string) {
 	sync.mutex_lock(&_ac.mu)
 	defer sync.mutex_unlock(&_ac.mu)
+	prev_alloc := context.allocator
 	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev_alloc
 
 	for v in _ac.bp_vars {
 		delete(v.name)
@@ -634,24 +692,151 @@ set_blueprint_autocomplete_context :: proc(vars: []Scoped_Pin_Badge, procs: []st
 }
 
 @(private = "file")
+_resolve_import_spec_to_dir :: proc(imp_spec: string, allocator := context.temp_allocator) -> (dir: string, default_alias: string) {
+	spec := strings.trim_space(imp_spec)
+	if spec == "" do return "", ""
+
+	colon := strings.index_byte(spec, ':')
+	if colon < 0 do return "", ""
+	col_name := spec[:colon]
+	sub_raw, _ := strings.replace_all(spec[colon + 1:], "\\", "/", context.temp_allocator)
+	sub := strings.trim_prefix(strings.trim_space(sub_raw), "/")
+
+	has_proj := engine.has_active_project()
+	proj_root := has_proj ? engine.active_project_root() : ""
+	proj_slug := (has_proj && proj_root != "") ? engine.active_project_slug(context.temp_allocator) : ""
+
+	_map_packages_sub :: proc(p_sub, p_root, p_slug: string, alloc: mem.Allocator) -> string {
+		rest := strings.trim_prefix(p_sub, "packages/")
+		if p_slug != "" && p_root != "" {
+			if rest == p_slug {
+				return strings.clone(p_root, alloc)
+			}
+			pref := fmt.tprintf("%s/", p_slug)
+			if strings.has_prefix(rest, pref) {
+				joined, _ := filepath.join({p_root, rest[len(pref):]}, alloc)
+				return joined
+			}
+		}
+		return fmt.aprintf("haati/packages/%s", rest, allocator = alloc)
+	}
+
+	switch col_name {
+	case "haati":
+		if sub == "" || sub == "." {
+			dir = strings.clone("haati", allocator)
+		} else if strings.has_prefix(sub, "packages/") {
+			dir = _map_packages_sub(sub, proj_root, proj_slug, allocator)
+		} else {
+			dir = fmt.aprintf("haati/%s", sub, allocator = allocator)
+		}
+	case "moonhug":
+		if sub == "" || sub == "." {
+			dir = strings.clone("haati", allocator)
+		} else if strings.has_prefix(sub, "packages/") {
+			dir = _map_packages_sub(sub, proj_root, proj_slug, allocator)
+		} else if strings.has_prefix(sub, "app") {
+			dir = fmt.aprintf("haati/packages/%s", sub, allocator = allocator)
+		} else {
+			dir = fmt.aprintf("haati/%s", sub, allocator = allocator)
+		}
+	case "project":
+		if proj_root != "" && proj_slug != "" {
+			if sub == "" || sub == "." {
+				dir = strings.clone(proj_root, allocator)
+			} else {
+				dir, _ = filepath.join({proj_root, sub}, allocator)
+			}
+		}
+	case:
+		if proj_root != "" && proj_slug != "" && col_name == proj_slug {
+			if sub == "" || sub == "." {
+				dir = strings.clone(proj_root, allocator)
+			} else {
+				dir, _ = filepath.join({proj_root, sub}, allocator)
+			}
+		}
+	}
+
+	if dir == "" {
+		return "", ""
+	}
+	if sub != "" && sub != "." {
+		trimmed := strings.trim_suffix(sub, "/")
+		if sl := strings.last_index_byte(trimmed, '/'); sl >= 0 {
+			default_alias = strings.clone(trimmed[sl + 1:], allocator)
+		} else {
+			default_alias = strings.clone(trimmed, allocator)
+		}
+	} else {
+		norm_dir, _ := strings.replace_all(dir, "\\", "/", context.temp_allocator)
+		norm_dir = strings.trim_suffix(norm_dir, "/")
+		if sl := strings.last_index_byte(norm_dir, '/'); sl >= 0 {
+			default_alias = strings.clone(norm_dir[sl + 1:], allocator)
+		} else {
+			default_alias = strings.clone(norm_dir, allocator)
+		}
+	}
+	return dir, default_alias
+}
+
+@(private = "file")
 _extract_imported_package_dirs :: proc(code: string, allocator := context.temp_allocator) -> string {
 	pairs := make([dynamic]string, 0, 8, allocator)
-	for ln in strings.split_lines(code, allocator) {
-		tl := strings.trim_space(ln)
-		if strings.has_prefix(tl, "package ") do continue
-		if !strings.contains(tl, "import ") do continue
+	seen := make(map[string]bool, 16, context.temp_allocator)
+
+	_push_pair :: proc(pairs: ^[dynamic]string, seen: ^map[string]bool, alias, dir: string, alloc: mem.Allocator) {
+		if alias == "" || alias == "_" || dir == "" do return
+		entry := fmt.aprintf("%s=%s", alias, dir, allocator = alloc)
+		if !(entry in seen^) {
+			seen^[entry] = true
+			append(pairs, entry)
+		}
+	}
+
+	for raw_ln in strings.split_lines(code, context.temp_allocator) {
+		tl := strings.trim_space(strings.trim_suffix(raw_ln, "\r"))
+		if tl == "" || strings.has_prefix(tl, "//") || strings.has_prefix(tl, "package ") do continue
+
+		// Check catalog shortcuts first for exact line matches
 		for spec in USING_SPACE_CATALOG {
 			if spec.repo_dir == "" do continue
-			needle := fmt.tprintf("\"%s\"", strings.trim_prefix(spec.import_line[strings.index_byte(spec.import_line, '"') + 1:], ""))
-			_ = needle
 			q1 := strings.index_byte(spec.import_line, '"')
 			q2 := strings.last_index_byte(spec.import_line, '"')
 			if q1 >= 0 && q2 > q1 {
 				imp_path := spec.import_line[q1:q2 + 1]
 				if strings.contains(tl, imp_path) {
-					append(&pairs, fmt.tprintf("%s=%s", spec.pkg_alias, spec.repo_dir))
+					_push_pair(&pairs, &seen, spec.pkg_alias, spec.repo_dir, allocator)
 				}
 			}
+		}
+
+		// Strip leading `@(...)` attributes (e.g. `@(require) import ...`)
+		work := tl
+		for strings.has_prefix(work, "@(") {
+			rp := strings.index_byte(work, ')')
+			if rp < 0 do break
+			work = strings.trim_left_space(work[rp + 1:])
+		}
+		if strings.has_prefix(work, "import ") {
+			work = strings.trim_left_space(work[len("import "):])
+		} else if strings.has_prefix(work, "import\t") {
+			work = strings.trim_left_space(work[len("import\t"):])
+		} else {
+			continue
+		}
+
+		q1 := strings.index_byte(work, '"')
+		if q1 < 0 do continue
+		q2_rel := strings.index_byte(work[q1 + 1:], '"')
+		if q2_rel <= 0 do continue
+
+		explicit_alias := strings.trim_space(work[:q1])
+		imp_spec := work[q1 + 1 : q1 + 1 + q2_rel]
+		dir, def_alias := _resolve_import_spec_to_dir(imp_spec, context.temp_allocator)
+		if dir != "" {
+			alias := explicit_alias != "" ? explicit_alias : def_alias
+			_push_pair(&pairs, &seen, alias, dir, allocator)
 		}
 	}
 	return strings.join(pairs[:], ";", allocator)
@@ -665,7 +850,9 @@ submit_async_autocomplete_index :: proc(code: string, is_scoped_body: bool, pkg_
 	sync.mutex_lock(&_ac.mu)
 	defer sync.mutex_unlock(&_ac.mu)
 
+	prev_alloc := context.allocator
 	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev_alloc
 	if _ac.req_code       != "" do delete(_ac.req_code)
 	if _ac.req_pkg_dir    != "" do delete(_ac.req_pkg_dir)
 	if _ac.req_extra_dirs != "" do delete(_ac.req_extra_dirs)
@@ -889,33 +1076,169 @@ _IMPORT_PKG_SUGGESTIONS := [?][3]string{
 }
 
 @(private = "file")
-_line_import_context :: proc(src: string, cursor_pos: int) -> (is_import_line: bool, pkg_query: string, replace_start: int) {
+_is_import_query_char :: #force_inline proc(c: byte) -> bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+	       c == '_' || c == ':' || c == '/' || c == '.' || c == '-'
+}
+
+@(private = "file")
+_line_import_context :: proc(src: string, cursor_pos: int) -> (is_import_line: bool, pkg_query: string, replace_start: int, inside_quotes: bool, has_close_quote: bool, has_alias: bool) {
 	pos := clamp(cursor_pos, 0, len(src))
 	ls := pos
 	for ls > 0 && src[ls - 1] != '\n' {
 		ls -= 1
 	}
-	line_prefix := src[ls:pos]
-	trimmed := strings.trim_left_space(line_prefix)
-	if strings.has_prefix(trimmed, "@(require)") {
-		trimmed = strings.trim_left_space(trimmed[len("@(require)"):])
+	le := pos
+	for le < len(src) && src[le] != '\n' && src[le] != '\r' {
+		le += 1
 	}
-	if strings.has_prefix(trimmed, "import ") || strings.has_prefix(trimmed, "import\t") || trimmed == "import" {
-		if trimmed == "import" {
-			return false, "", pos
+	line_prefix := src[ls:pos]
+	line_rest := src[pos:le]
+
+	work := strings.trim_left_space(line_prefix)
+	for strings.has_prefix(work, "@(") {
+		rp := strings.index_byte(work, ')')
+		if rp < 0 do break
+		work = strings.trim_left_space(work[rp + 1:])
+	}
+	if strings.has_prefix(work, "import ") || strings.has_prefix(work, "import\t") || work == "import" {
+		if work == "import" {
+			return false, "", pos, false, false, false
 		}
-		q_idx := strings.last_index_byte(line_prefix, '"')
-		if q_idx >= 0 {
-			return true, line_prefix[q_idx + 1:], ls + q_idx
+		after_imp := strings.trim_left_space(work[len("import"):])
+		after_imp_abs := ls + len(line_prefix) - len(after_imp)
+
+		if q1 := strings.index_byte(line_prefix, '"'); q1 >= 0 {
+			if strings.index_byte(line_prefix[q1 + 1:], '"') >= 0 {
+				return false, "", pos, false, false, false
+			}
+			q_abs := ls + q1
+			has_al := q_abs > after_imp_abs && strings.trim_space(src[after_imp_abs:q_abs]) != ""
+			has_close := strings.index_byte(line_rest, '"') >= 0
+			return true, line_prefix[q1 + 1:], q_abs, true, has_close, has_al
 		}
+
 		// User typed `import ` or `import foo` without quotes yet
 		sp := pos
-		for sp > ls && src[sp - 1] != ' ' && src[sp - 1] != '\t' {
+		for sp > after_imp_abs && _is_import_query_char(src[sp - 1]) {
 			sp -= 1
 		}
-		return true, src[sp:pos], sp
+		has_al := sp > after_imp_abs && strings.trim_space(src[after_imp_abs:sp]) != ""
+		return true, src[sp:pos], sp, false, false, has_al
 	}
-	return false, "", pos
+	return false, "", pos, false, false, false
+}
+
+@(private = "file")
+_dir_has_odin_files :: proc(abs_dir: string) -> bool {
+	if abs_dir == "" || !os.is_dir(abs_dir) do return false
+	dh, derr := os.open(abs_dir)
+	if derr != nil do return false
+	defer os.close(dh)
+	entries, rerr := os.read_dir(dh, -1, context.temp_allocator)
+	if rerr != nil do return false
+	for fi in entries {
+		if fi.type == .Regular && strings.has_suffix(fi.name, ".odin") && !strings.has_suffix(fi.name, "_test.odin") {
+			return true
+		}
+	}
+	return false
+}
+
+@(private = "file")
+_collect_dynamic_import_packages :: proc(allocator := context.temp_allocator) -> [][2]string {
+	out := make([dynamic][2]string, 0, 24, allocator)
+	eng_root := engine.engine_root(context.temp_allocator)
+	if eng_root == "" {
+		eng_root = engine.resolve_repo_root(context.temp_allocator)
+	}
+
+	_scan_subdirs :: proc(base_abs, imp_prefix, desc: string, skip_names: []string, out: ^[dynamic][2]string, alloc: mem.Allocator) {
+		if base_abs == "" || !os.is_dir(base_abs) do return
+		dh, derr := os.open(base_abs)
+		if derr != nil do return
+		defer os.close(dh)
+		entries, rerr := os.read_dir(dh, -1, context.temp_allocator)
+		if rerr != nil do return
+		for fi in entries {
+			if fi.type != .Directory do continue
+			if strings.has_prefix(fi.name, ".") do continue
+			skip := false
+			for s in skip_names do if fi.name == s { skip = true; break }
+			if skip do continue
+			sub_abs, _ := filepath.join({base_abs, fi.name}, context.temp_allocator)
+			if _dir_has_odin_files(sub_abs) {
+				append(out, [2]string{
+					fmt.aprintf("%s%s", imp_prefix, fi.name, allocator = alloc),
+					strings.clone(desc, alloc),
+				})
+			}
+		}
+	}
+
+	if eng_root != "" {
+		h_dir, _ := filepath.join({eng_root, "haati"}, context.temp_allocator)
+		_scan_subdirs(h_dir, "haati:", "Haati engine package", []string{"packages", "external", "builds"}, &out, allocator)
+
+		e_dir, _ := filepath.join({h_dir, "engine"}, context.temp_allocator)
+		_scan_subdirs(e_dir, "haati:engine/", "Haati engine subpackage", nil, &out, allocator)
+
+		p_dir, _ := filepath.join({h_dir, "packages"}, context.temp_allocator)
+		_scan_subdirs(p_dir, "haati:packages/", "Haati package", []string{"void_odin"}, &out, allocator)
+	}
+
+	if engine.has_active_project() {
+		proj_root := engine.active_project_root()
+		slug := engine.active_project_slug(context.temp_allocator)
+		if proj_root != "" && slug != "" && os.is_dir(proj_root) {
+			if _dir_has_odin_files(proj_root) {
+				append(&out, [2]string{strings.clone("project:.", allocator), strings.clone("Active project root package", allocator)})
+			}
+			proj_skip := []string{"builds", "cache"}
+			if dh1, d1err := os.open(proj_root); d1err == nil {
+				if e1, r1err := os.read_dir(dh1, -1, context.temp_allocator); r1err == nil {
+					for fi1 in e1 {
+						if fi1.type != .Directory || strings.has_prefix(fi1.name, ".") do continue
+						skip1 := false
+						for s in proj_skip do if fi1.name == s { skip1 = true; break }
+						if skip1 do continue
+						abs1, _ := filepath.join({proj_root, fi1.name}, context.temp_allocator)
+						if _dir_has_odin_files(abs1) {
+							append(&out, [2]string{fmt.aprintf("project:%s", fi1.name, allocator = allocator), strings.clone("Active project package", allocator)})
+						}
+						if dh2, d2err := os.open(abs1); d2err == nil {
+							if e2, r2err := os.read_dir(dh2, -1, context.temp_allocator); r2err == nil {
+								for fi2 in e2 {
+									if fi2.type != .Directory || strings.has_prefix(fi2.name, ".") do continue
+									skip2 := false
+									for s in proj_skip do if fi2.name == s { skip2 = true; break }
+									if skip2 do continue
+									abs2, _ := filepath.join({abs1, fi2.name}, context.temp_allocator)
+									if _dir_has_odin_files(abs2) {
+										append(&out, [2]string{fmt.aprintf("project:%s/%s", fi1.name, fi2.name, allocator = allocator), strings.clone("Active project subpackage", allocator)})
+									}
+								}
+							}
+							os.close(dh2)
+						}
+					}
+				}
+				os.close(dh1)
+			}
+		}
+	}
+	return out[:]
+}
+
+@(private = "file")
+_format_import_insert_text :: proc(pkg: string, inside_quotes, has_close_quote, has_alias: bool, allocator: mem.Allocator) -> string {
+	if inside_quotes {
+		return has_close_quote ? fmt.aprintf("\"%s", pkg, allocator = allocator) : fmt.aprintf("\"%s\"", pkg, allocator = allocator)
+	}
+	if !has_alias && pkg == "haati:engine/hot_api" {
+		return strings.clone("hot \"haati:engine/hot_api\"", allocator)
+	}
+	return fmt.aprintf("\"%s\"", pkg, allocator = allocator)
 }
 
 // Queries ranked smart completions for `(src, cursor_pos)` without blocking the main thread!
@@ -932,42 +1255,44 @@ query_autocomplete_suggestions :: proc(
 	items:         []Autocomplete_Item,
 	replace_start: int,
 ) {
-	if is_imp, imp_q, imp_rep := _line_import_context(src, cursor_pos); is_imp {
-		cands := make([dynamic]Autocomplete_Item, 0, 16, allocator)
-		for entry in _IMPORT_PKG_SUGGESTIONS {
-			pkg := entry[0]
-			ins := entry[1]
-			det := entry[2]
-			sc := len(imp_q) == 0 ? 900 : fuzzy_match_score(imp_q, pkg)
+	if is_imp, imp_q, imp_rep, in_quotes, has_close, has_al := _line_import_context(src, cursor_pos); is_imp {
+		cands := make([dynamic]Autocomplete_Item, 0, 24, allocator)
+		_push_imp_cand :: proc(
+			cands: ^[dynamic]Autocomplete_Item,
+			pkg, det, imp_q: string,
+			base_score: int,
+			kind: Completion_Kind,
+			in_quotes, has_close, has_al: bool,
+			alloc: mem.Allocator,
+		) {
+			if pkg == "" do return
+			for ex in cands^ {
+				if ex.label == pkg do return
+			}
+			sc := len(imp_q) == 0 ? base_score : fuzzy_match_score(imp_q, pkg)
 			if sc > 0 {
-				append(&cands, Autocomplete_Item{
-					label       = strings.clone(pkg, allocator),
-					insert_text = strings.clone(ins, allocator),
-					detail      = strings.clone(det, allocator),
-					kind        = .Type_Sym,
+				append(cands, Autocomplete_Item{
+					label       = strings.clone(pkg, alloc),
+					insert_text = _format_import_insert_text(pkg, in_quotes, has_close, has_al, alloc),
+					detail      = strings.clone(det, alloc),
+					kind        = kind,
 					score       = sc,
 				})
 			}
+		}
+
+		for entry in _IMPORT_PKG_SUGGESTIONS {
+			_push_imp_cand(&cands, entry[0], entry[2], imp_q, 900, .Type_Sym, in_quotes, has_close, has_al, allocator)
 		}
 		for spec in USING_SPACE_CATALOG {
 			q1 := strings.index_byte(spec.import_line, '"')
 			q2 := strings.last_index_byte(spec.import_line, '"')
 			if q1 < 0 || q2 <= q1 do continue
 			pkg := spec.import_line[q1 + 1:q2]
-			sc := len(imp_q) == 0 ? 850 : fuzzy_match_score(imp_q, pkg)
-			if sc > 0 {
-				dup := false
-				for ex in cands do if ex.label == pkg { dup = true; break }
-				if !dup {
-					append(&cands, Autocomplete_Item{
-						label       = strings.clone(pkg, allocator),
-						insert_text = strings.clone(fmt.tprintf("\"%s\"", pkg), allocator),
-						detail      = strings.clone(spec.description, allocator),
-						kind        = spec.hot_safe ? .Hot_API : .Type_Sym,
-						score       = sc,
-					})
-				}
-			}
+			_push_imp_cand(&cands, pkg, spec.description, imp_q, 850, spec.hot_safe ? .Hot_API : .Type_Sym, in_quotes, has_close, has_al, allocator)
+		}
+		for dyn in _collect_dynamic_import_packages(context.temp_allocator) {
+			_push_imp_cand(&cands, dyn[0], dyn[1], imp_q, 800, .Type_Sym, in_quotes, has_close, has_al, allocator)
 		}
 		slice.sort_by(cands[:], proc(a, b: Autocomplete_Item) -> bool {
 			if a.score != b.score do return a.score > b.score

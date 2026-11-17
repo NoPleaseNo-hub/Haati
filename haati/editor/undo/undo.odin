@@ -287,7 +287,21 @@ Undo_Stack :: struct {
 	disturbed:  bool,
 	// Between play_begin and play_end: undo and redo move only through
 	// entries recorded in this run (Entry.in_play).
-	playing:    bool,
+	playing:           bool,
+	scene_mutation_seq: u64,
+}
+
+current_scene_mutation_seq :: proc() -> u64 {
+	s := get()
+	if s == nil do return 0
+	return s.scene_mutation_seq
+}
+
+@(private = "file")
+_bump_scene_mutation_seq :: proc(s: ^Undo_Stack, cmd: ^Command) {
+	if s == nil || cmd == nil || s.playing do return
+	if _, is_sel := cmd.(Selection_Command); is_sel do return
+	s.scene_mutation_seq += 1
 }
 
 init :: proc(s: ^Undo_Stack) {
@@ -309,6 +323,7 @@ clear :: proc(s: ^Undo_Stack) {
 	s.top = 0
 	s.activity = true
 	s.disturbed = true
+	s.scene_mutation_seq += 1
 }
 
 destroy :: proc(s: ^Undo_Stack) {
@@ -376,6 +391,7 @@ push :: proc(s: ^Undo_Stack, cmd: Command, label := "") {
 	append(&s.items, Entry{label = strings.clone(effective_label), cmd = cmd, in_play = s.playing})
 	s.top = len(s.items)
 	_mark_scenes_dirty(&s.items[len(s.items) - 1].cmd)
+	_bump_scene_mutation_seq(s, &s.items[len(s.items) - 1].cmd)
 	if on_undo_event_hook != nil do on_undo_event_hook("Edit", effective_label)
 }
 
@@ -519,6 +535,7 @@ end_group_command :: proc(s: ^Undo_Stack, label := "") {
 	s.landed = true
 	// Lands outside push(), so the dirty mark is made here as well.
 	_mark_scenes_dirty(&s.items[len(s.items) - 1].cmd)
+	_bump_scene_mutation_seq(s, &s.items[len(s.items) - 1].cmd)
 	if on_undo_event_hook != nil do on_undo_event_hook("Edit Group", label != "" ? label : "Group")
 }
 
@@ -582,6 +599,7 @@ apply_undo :: proc(s: ^Undo_Stack) -> bool {
 	lbl := s.items[s.top].label
 	cmd := &s.items[s.top].cmd
 	_revert_command(cmd)
+	_bump_scene_mutation_seq(s, cmd)
 	if on_undo_event_hook != nil do on_undo_event_hook("Undo", lbl)
 	return true
 }
@@ -596,6 +614,7 @@ apply_redo :: proc(s: ^Undo_Stack) -> bool {
 	cmd := &s.items[s.top].cmd
 	_apply_command(cmd)
 	s.top += 1
+	_bump_scene_mutation_seq(s, cmd)
 	if on_undo_event_hook != nil do on_undo_event_hook("Redo", lbl)
 	return true
 }

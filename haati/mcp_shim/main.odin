@@ -19,6 +19,7 @@ import "core:encoding/json"
 import "core:fmt"
 import "core:net"
 import "core:os"
+import "core:path/filepath"
 import "core:strings"
 import "core:sync"
 import "core:thread"
@@ -59,9 +60,38 @@ _watch_editor :: proc(_: ^thread.Thread) {
 	}
 }
 
+_resolve_bridge_path :: proc(explicit_arg: string, allocator := context.temp_allocator) -> string {
+	if explicit_arg != "" do return strings.clone(explicit_arg, allocator)
+	candidates := [?]string{
+		mcp.BRIDGE_FILE_USER_SETTINGS,
+		mcp.BRIDGE_FILE_HAATI_USER_SETTINGS,
+		mcp.BRIDGE_FILE_FROM_EDITOR,
+		mcp.BRIDGE_FILE_FROM_ROOT,
+		"../UserSettings/mcp_bridge.json",
+		"Haati_Engine/haati/UserSettings/mcp_bridge.json",
+		"Haati_Engine/UserSettings/mcp_bridge.json",
+	}
+	for c in candidates {
+		if os.exists(c) do return strings.clone(c, allocator)
+	}
+	if len(os.args) > 0 && os.args[0] != "" {
+		exe_dir: string
+		{
+			context.allocator = context.temp_allocator
+			exe_dir = filepath.dir(os.args[0])
+		}
+		for rel in ([2]string{"../UserSettings/mcp_bridge.json", "../../UserSettings/mcp_bridge.json"}) {
+			if p, err := filepath.join({exe_dir, rel}, context.temp_allocator); err == nil && os.exists(p) {
+				return strings.clone(p, allocator)
+			}
+		}
+	}
+	return strings.clone(mcp.BRIDGE_FILE_USER_SETTINGS, allocator)
+}
+
 main :: proc() {
-	_shim.bridge_path = mcp.BRIDGE_FILE_FROM_ROOT
-	if len(os.args) > 1 do _shim.bridge_path = os.args[1]
+	explicit_arg := len(os.args) > 1 ? os.args[1] : ""
+	_shim.bridge_path = _resolve_bridge_path(explicit_arg, runtime.default_allocator())
 	_shim.fb.data = make([dynamic]u8, 0, 0, runtime.default_allocator())
 
 	watcher := thread.create(_watch_editor)
@@ -289,6 +319,13 @@ _disconnect :: proc() {
 _connect :: proc() -> (err_msg: string) {
 	if _shim.connected do return ""
 
+	if len(os.args) <= 1 && !os.exists(_shim.bridge_path) {
+		cand := _resolve_bridge_path("", context.temp_allocator)
+		if os.exists(cand) {
+			delete(_shim.bridge_path)
+			_shim.bridge_path = strings.clone(cand, runtime.default_allocator())
+		}
+	}
 	data, rerr := os.read_entire_file(_shim.bridge_path, context.temp_allocator)
 	if rerr != nil {
 		return "MoonHug editor is not running (no bridge file) — start the editor and retry in a few seconds"

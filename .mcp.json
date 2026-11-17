@@ -1,8 +1,8 @@
 {
   "mcpServers": {
-    "moonhug": {
-      "command": "odin",
-      "args": ["run", "tools/mh", "--", "mcp"]
+    "haati": {
+      "command": "tools/odin/odin.exe",
+      "args": ["run", "haati/mcp_shim", "-collection:haati=haati", "--"]
     }
   }
 }

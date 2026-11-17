@@ -328,8 +328,10 @@ os_create_dir_link :: proc(link_path, target_dir: string) -> bool {
         }
         win_link, _ := strings.replace_all(link_path, "/", "\\", context.temp_allocator)
         win_target, _ := strings.replace_all(abs_target, "/", "\\", context.temp_allocator)
-        state, _, _, err := os.process_exec({command = {"cmd", "/C", "mklink", "/J", win_link, win_target}}, context.temp_allocator)
-        return err == nil && state.exit_code == 0
+        p, started := bg_process_start_to_file(".", {"cmd", "/C", "mklink", "/J", win_link, win_target}, nil, "")
+        if !started do return false
+        exited, code := bg_process_wait(&p, 5000)
+        return exited && code == 0
     } else {
         return os.symlink(target_dir, link_path) == nil
     }
@@ -339,8 +341,10 @@ os_create_dir_link :: proc(link_path, target_dir: string) -> bool {
 os_remove_dir_link :: proc(link_path: string) -> bool {
     when ODIN_OS == .Windows {
         win_link, _ := strings.replace_all(link_path, "/", "\\", context.temp_allocator)
-        state, _, _, err := os.process_exec({command = {"cmd", "/C", "rmdir", win_link}}, context.temp_allocator)
-        return err == nil && state.exit_code == 0
+        p, started := bg_process_start_to_file(".", {"cmd", "/C", "rmdir", win_link}, nil, "")
+        if !started do return false
+        exited, code := bg_process_wait(&p, 5000)
+        return exited && code == 0
     } else {
         return os.remove(link_path) == nil
     }

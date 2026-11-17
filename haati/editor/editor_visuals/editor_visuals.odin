@@ -42,9 +42,9 @@ Graph_Wire_Style_Choice :: enum {
 }
 
 Editor_Appearance_Settings :: struct {
-	ui_scale:                 f32  `decor:range(0.75, 1.75) decor:tooltip(desc="Global font & widget scale across editor panels.")`,
+	ui_scale:                 f32  `decor:header("Display & Tooltips") decor:range(0.75, 1.75) decor:tooltip(desc="Global font & widget scale across editor panels.")`,
 	tooltip_idle_delay_sec:   f32  `decor:range(0.10, 2.00) decor:tooltip(desc="Seconds the mouse must rest calmly before showing IDE/Graph hover tooltips.")`,
-	keep_secondary_alive_min: bool `decor:tooltip(desc="Keep popped-out secondary OS windows live when the main editor window is minimized.")`,
+	keep_secondary_alive_min: bool `decor:header("Multi-Window & Frame Pacing") decor:tooltip(desc="Keep popped-out secondary OS windows live when the main editor window is minimized.")`,
 	background_fps_cap:       int  `decor:range(15, 144) decor:tooltip(desc="Frame pacing cap (FPS) when minimized or unfocused.")`,
 }
 
@@ -57,14 +57,16 @@ appearance_settings := Editor_Appearance_Settings{
 }
 
 Code_IDE_Settings :: struct {
-	prefer_external_ide:     bool                     `decor:tooltip(desc="Open .odin source files in an external IDE instead of the built-in Odin Micro-Studio (.bodin/.mhgraph still open in Blueprint Studio).")`,
+	prefer_external_ide:     bool                     `decor:header("External IDE") decor:tooltip(desc="Open .odin source files in an external IDE instead of the built-in Odin Micro-Studio (.bodin/.mhgraph still open in Blueprint Studio).")`,
 	external_ide:            External_IDE_Choice      `decor:tooltip(desc="External IDE preset used for .odin files when Prefer External IDE is enabled or Open in External IDE is clicked.")`,
 	custom_ide_executable:   string                   `decor:tooltip(desc="Custom external IDE executable path (used when External IDE is Custom, or as fallback).")`,
+	ide_sandbox_mode:        bool                     `decor:header("Odin Micro-Studio & Sandbox") decor:tooltip(desc="Stage unsaved scripts into builds/sandbox_cartridge/ on F7 without touching disk files, and trap runtime panics/exceptions safely.")`,
+	enable_crash_watchdog:   bool                     `decor:tooltip(desc="Keep an idle 0% CPU out-of-process Crash Watchdog Guardian & Kernel RAM Vault active to resurrect unsaved scene, camera, and dirty Code Studio tabs after a hard crash and quarantine the crashing script.")`,
 	problem_check_delay_sec: f32                      `decor:range(0.25, 3.00) decor:tooltip(desc="Repeatable idle delay (seconds) after your last keystroke before checking code for errors/warnings.")`,
-	ide_explorer_zoom:       f32                      `decor:range(0.75, 2.00) decor:tooltip(desc="Independent zoom scale for the Micro-Studio Explorer/Structure pane.")`,
+	ide_explorer_zoom:       f32                      `decor:header("Pane Zooms") decor:range(0.75, 2.00) decor:tooltip(desc="Independent zoom scale for the Micro-Studio Explorer/Structure pane.")`,
 	ide_code_zoom:           f32                      `decor:range(0.75, 2.40) decor:tooltip(desc="Independent zoom scale for the Micro-Studio code editor surface.")`,
 	ide_problems_zoom:       f32                      `decor:range(0.75, 2.00) decor:tooltip(desc="Independent zoom scale for the Micro-Studio Problems & Output dock.")`,
-	ide_show_breadcrumbs:    bool                     `decor:tooltip(desc="Show file > proc/struct breadcrumb scope bar above the code editor.")`,
+	ide_show_breadcrumbs:    bool                     `decor:header("Blueprint & Graph Studio") decor:tooltip(desc="Show file > proc/struct breadcrumb scope bar above the code editor.")`,
 	ide_show_error_lens:     bool                     `decor:tooltip(desc="Show inline diagnostic text next to lines once idle problem check finishes.")`,
 	graph_wire_style:        Graph_Wire_Style_Choice  `decor:tooltip(desc="Default global wire routing style across Blueprint, Motion, VFX, and Audio graph studios.")`,
 	graph_auto_bake_on_save: bool                     `decor:tooltip(desc="Automatically transpile/bake .bodin native Odin code when saving a Blueprint graph.")`,
@@ -75,6 +77,8 @@ code_ide_settings := Code_IDE_Settings{
 	prefer_external_ide     = false,
 	external_ide            = .Auto_Detect,
 	custom_ide_executable   = "",
+	ide_sandbox_mode        = true,
+	enable_crash_watchdog   = true,
 	problem_check_delay_sec = 0.90,
 	ide_explorer_zoom       = 1.00,
 	ide_code_zoom           = 1.00,

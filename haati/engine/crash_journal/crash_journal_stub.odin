@@ -7,6 +7,7 @@ package crash_journal
 // / `SymGetLineFromAddrW64`), and zero-heap Win32 `WriteFile` flushing to both
 // `logs/crash_<pid>.log` and `logs/crash_last.log`.
 
+import "base:runtime"
 import "core:c"
 import "core:c/libc"
 import win32 "core:sys/windows"
@@ -86,6 +87,15 @@ refresh_symbols :: proc() {
 	}
 }
 
+@(private = "package")
+_ensure_sandbox_veh_installed :: proc() {
+	when ODIN_OS == .Windows {
+		if _win_veh_handle == nil {
+			_win_veh_handle = win32.AddVectoredExceptionHandler(1, _win_veh_handler)
+		}
+	}
+}
+
 @(private = "file")
 _c_sigabrt_handler :: proc "c" (_sig: c.int) {
 	if !_crash.in_handler {
@@ -128,11 +138,93 @@ when ODIN_OS == .Windows {
 	}
 
 	@(private = "file")
+	_copy_utf8_from_utf16 :: proc "contextless" (dst: []byte, ws: [^]u16, units := -1) -> int {
+		if len(dst) == 0 || ws == nil do return 0
+		out_i := 0
+		in_i  := 0
+		for out_i < len(dst) - 4 {
+			if units >= 0 && in_i >= units do break
+			u := ws[in_i]
+			if u == 0 do break
+			in_i += 1
+			cp := u32(u)
+			if cp >= 0xD800 && cp <= 0xDBFF && (units < 0 || in_i < units) {
+				lo := u32(ws[in_i])
+				if lo >= 0xDC00 && lo <= 0xDFFF {
+					cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00)
+					in_i += 1
+				}
+			}
+			if cp < 0x80 {
+				dst[out_i] = byte(cp); out_i += 1
+			} else if cp < 0x800 {
+				dst[out_i] = byte(0xC0 | (cp >> 6)); out_i += 1
+				dst[out_i] = byte(0x80 | (cp & 0x3F)); out_i += 1
+			} else if cp < 0x10000 {
+				dst[out_i] = byte(0xE0 | (cp >> 12)); out_i += 1
+				dst[out_i] = byte(0x80 | ((cp >> 6) & 0x3F)); out_i += 1
+				dst[out_i] = byte(0x80 | (cp & 0x3F)); out_i += 1
+			} else {
+				dst[out_i] = byte(0xF0 | (cp >> 18)); out_i += 1
+				dst[out_i] = byte(0x80 | ((cp >> 12) & 0x3F)); out_i += 1
+				dst[out_i] = byte(0x80 | ((cp >> 6) & 0x3F)); out_i += 1
+				dst[out_i] = byte(0x80 | (cp & 0x3F)); out_i += 1
+			}
+		}
+		dst[out_i] = 0
+		return out_i
+	}
+
+	@(private = "file")
+	_win_sandbox_abort_trampoline :: proc "c" () {
+		context = runtime.default_context()
+		libc.longjmp(&_sandbox_jmp_buf, 1)
+	}
+
+	@(private = "file")
 	_win_veh_handler :: proc "system" (ep: ^win32.EXCEPTION_POINTERS) -> win32.LONG {
 		if ep == nil || ep.ExceptionRecord == nil {
 			return win32.EXCEPTION_CONTINUE_SEARCH
 		}
-		if ep.ExceptionRecord.ExceptionCode != win32.EXCEPTION_STACK_OVERFLOW {
+		code := ep.ExceptionRecord.ExceptionCode
+		if _sandbox_active && ep.ContextRecord != nil && code != win32.EXCEPTION_STACK_OVERFLOW {
+			reason, fatal := _fatal_exception_reason(code)
+			is_trap := fatal || code == win32.EXCEPTION_BREAKPOINT
+			if is_trap {
+				if reason == "" && code == win32.EXCEPTION_BREAKPOINT {
+					reason = "Runtime Trap / Bounds Check Failure (EXCEPTION_BREAKPOINT)"
+				}
+				_sandbox_active = false
+				_sandbox_fault = {
+					occurred = true,
+					code     = u32(code),
+				}
+				_sandbox_fault.reason_len = _sandbox_copy_str(_sandbox_fault.reason[:], reason)
+				addr := ep.ExceptionRecord.ExceptionAddress
+				if _syms_ready && addr != nil {
+					proc_h := win32.GetCurrentProcess()
+					_sym_buf = {}
+					sym := (^win32.SYMBOL_INFOW)(raw_data(_sym_buf[:]))
+					sym.SizeOfStruct = size_of(win32.SYMBOL_INFOW)
+					sym.MaxNameLen   = 255
+					disp64: win32.DWORD64 = 0
+					if win32.SymFromAddrW(proc_h, win32.DWORD64(uintptr(addr)), &disp64, sym) != win32.FALSE {
+						_sandbox_fault.proc_len = _copy_utf8_from_utf16(_sandbox_fault.proc_name[:], &sym.Name[0], int(sym.NameLen))
+					}
+					_line_info = {}
+					_line_info.SizeOfStruct = size_of(win32.IMAGEHLP_LINE64)
+					disp32: win32.DWORD = 0
+					if win32.SymGetLineFromAddrW64(proc_h, win32.DWORD64(uintptr(addr)), &disp32, &_line_info) != win32.FALSE && _line_info.FileName != nil {
+						_sandbox_fault.file_len = _copy_utf8_from_utf16(_sandbox_fault.file[:], ([^]u16)(_line_info.FileName), -1)
+						_sandbox_fault.line     = i32(_line_info.LineNumber)
+					}
+				}
+				ep.ContextRecord.Rip = u64(uintptr(rawptr(_win_sandbox_abort_trampoline)))
+				ep.ContextRecord.Rsp = (ep.ContextRecord.Rsp & ~u64(15)) - 8
+				return win32.EXCEPTION_CONTINUE_EXECUTION
+			}
+		}
+		if code != win32.EXCEPTION_STACK_OVERFLOW {
 			return win32.EXCEPTION_CONTINUE_SEARCH
 		}
 		if !_crash.in_handler {

@@ -53,6 +53,8 @@ _hub: struct {
 	launcher_cfg:       engine.Launcher_Config,
 	workspace_scanned:  bool,
 	workspace_projects: [dynamic]_Hub_Workspace_Entry,
+	zoom:               f32,
+	modal_zoom_resized: bool,
 }
 
 @(private = "file")
@@ -192,6 +194,7 @@ _refresh_launcher_and_workspace :: proc() {
 _ensure_hub_init :: proc() {
 	if !_hub.initialized {
 		_hub.initialized = true
+		_hub.zoom = 1.20
 		_hub.workspace_projects = make([dynamic]_Hub_Workspace_Entry, runtime.default_allocator())
 		_set_buf(_hub.new_name_buf[:], "MyHaatiGame")
 		if umb := _default_umbrella_dir(context.temp_allocator); umb != "" {
@@ -269,7 +272,8 @@ _draw_project_row :: proc(
 	defer im.PopID()
 
 	im.PushStyleColorImVec4(.ChildBg, p.bg_elevated)
-	if im.BeginChild("##proj_card", {0, 56}, {.Borders}) {
+	row_h := max(im.GetFrameHeight() * 2.55, 52.0)
+	if im.BeginChild("##proj_card", {0, row_h}, {.Borders}) {
 		im.AlignTextToFramePadding()
 		if is_active {
 			im.TextColoredUnformatted(p.status_success, fmt.ctprintf("%s  %s  [Active]", icons.ICON_MD_FOLDER_OPEN, name))
@@ -279,15 +283,18 @@ _draw_project_row :: proc(
 			im.TextColoredUnformatted(p.text_primary, fmt.ctprintf("%s  %s", icons.ICON_MD_FOLDER, name))
 		}
 
+		st := im.GetStyle()
+		open_lbl := cstring(needs_rebuild ? "Build & Open" : "Open")
+		open_w := max(im.CalcTextSize(open_lbl).x + st.FramePadding.x * 2.4, 72.0)
+		rem_w := can_remove ? max(im.CalcTextSize("Remove").x + st.FramePadding.x * 2.4, 60.0) + 6.0 : f32(0)
 		avail_x := im.GetContentRegionAvail().x
-		btn_w: f32 = can_remove ? 165 : 88
-		im.SameLine(max(180.0, avail_x - btn_w))
+		im.SameLine(max(140.0, avail_x - open_w - rem_w))
 
 		im.BeginDisabled(!exists_on_disk || is_active || relaunch_pending())
 		open_col := needs_rebuild ? p.status_warning : p.status_success
 		im.PushStyleColorImVec4(.Button, thm.with_alpha(open_col, 0.24))
 		im.PushStyleColorImVec4(.ButtonHovered, thm.with_alpha(open_col, 0.38))
-		if im.Button(needs_rebuild ? "Build & Open" : "Open", {86, 0}) {
+		if im.Button(open_lbl, {open_w, 0}) {
 			_try_open_project(path)
 		}
 		im.PopStyleColor(2)
@@ -295,7 +302,7 @@ _draw_project_row :: proc(
 
 		if can_remove {
 			im.SameLine(0, 6)
-			if im.Button("Remove", {70, 0}) {
+			if im.Button("Remove", {rem_w - 6.0, 0}) {
 				_ = engine.launcher_remove_recent_project(path)
 				_refresh_launcher_and_workspace()
 			}
@@ -312,6 +319,39 @@ _draw_project_hub_contents :: proc(is_modal: bool) {
 	_ensure_hub_init()
 	_poll_folder_picker()
 	p := thm.palette()
+	io := im.GetIO()
+	if _hub.zoom < 0.90 || _hub.zoom > 1.80 {
+		_hub.zoom = 1.20
+	}
+
+	if io.KeyCtrl && io.MouseWheel != 0 && im.IsWindowHovered(im.HoveredFlags_RootAndChildWindows) {
+		next_zm := clamp(_hub.zoom + io.MouseWheel * 0.08, 0.90, 1.80)
+		io.MouseWheel = 0
+		if abs(next_zm - _hub.zoom) > 0.005 {
+			_hub.zoom = next_zm
+			_hub.modal_zoom_resized = true
+			if !is_modal {
+				dx, dy, dw, dh := gfx.display_usable_bounds()
+				cur_pos := gfx.window_position()
+				cur_sz := gfx.window_size()
+				cx := cur_pos.x + cur_sz.x / 2
+				cy := cur_pos.y + cur_sz.y / 2
+				nw := clamp(i32(f32(860) * (_hub.zoom / 1.20)), 660, max(dw - 60, 660))
+				nh := clamp(i32(f32(540) * (_hub.zoom / 1.20)), 440, max(dh - 60, 440))
+				nx := clamp(cx - nw / 2, dx, max(dx + dw - nw, dx))
+				ny := clamp(cy - nh / 2, dy, max(dy + dh - nh, dy))
+				gfx.set_window_geometry(nx, ny, nw, nh)
+			}
+		}
+	}
+
+	st := im.GetStyle()
+	im.PushFontFloat(nil, st.FontSizeBase * _hub.zoom)
+	defer im.PopFont()
+	zoom_style := clamp(_hub.zoom, 0.95, 1.50)
+	im.PushStyleVarImVec2(.FramePadding, {st.FramePadding.x * zoom_style, st.FramePadding.y * zoom_style})
+	im.PushStyleVarImVec2(.ItemSpacing, {st.ItemSpacing.x * zoom_style, st.ItemSpacing.y * zoom_style})
+	defer im.PopStyleVar(2)
 
 	// Header banner
 	im.TextColoredUnformatted(p.accent, fmt.ctprintf("%s  Haati Engine — Project Hub", icons.ICON_MD_HUB))
@@ -319,8 +359,20 @@ _draw_project_hub_contents :: proc(is_modal: bool) {
 	if registration.COMPILED_PROJECT_DIR != "" {
 		compiled_label = filepath.base(registration.COMPILED_PROJECT_DIR)
 	}
-	im.SameLine(0, 14)
-	im.TextDisabled("%s", fmt.ctprintf("Compiled Gameplay: %s   |   Hold Shift on startup to open Hub", compiled_label))
+	im.SameLine(0, 12)
+	im.TextDisabled("%s", fmt.ctprintf("Compiled: %s | Hold Shift for Hub", compiled_label))
+	zoom_pill := fmt.ctprintf("Zoom %d%%##hub_zoom_rst", int(_hub.zoom * 100.0 + 0.5))
+	zoom_w := im.CalcTextSize(zoom_pill).x + 14.0
+	if im.GetContentRegionAvail().x > zoom_w + 16.0 {
+		im.SameLine(im.GetCursorPosX() + im.GetContentRegionAvail().x - zoom_w)
+	} else {
+		im.SameLine()
+	}
+	if im.SmallButton(zoom_pill) {
+		_hub.zoom = 1.20
+		_hub.modal_zoom_resized = true
+	}
+	widgets.tooltip("Ctrl+MouseWheel scales both Hub text and window size (click to reset to 120%)")
 	im.Separator()
 	im.Spacing()
 
@@ -412,7 +464,10 @@ _draw_project_hub_contents :: proc(is_modal: bool) {
 			len(_hub.browse_path_buf),
 			{.EnterReturnsTrue},
 		)
-		if im.Button(fmt.ctprintf("%s  Browse Folder...", icons.ICON_MD_SEARCH), {150, 28}) {
+		btn_h := max(im.GetFrameHeight() * 1.15, 28.0)
+		browse_lbl := fmt.ctprintf("%s  Browse Folder...", icons.ICON_MD_SEARCH)
+		browse_w := max(im.CalcTextSize(browse_lbl).x + im.GetStyle().FramePadding.x * 2.4, 140.0)
+		if im.Button(browse_lbl, {browse_w, btn_h}) {
 			start_dir := _buf_str(_hub.browse_path_buf[:])
 			if start_dir == "" do start_dir = _default_umbrella_dir(context.temp_allocator)
 			_open_folder_picker(.Open_Project, start_dir)
@@ -420,7 +475,8 @@ _draw_project_hub_contents :: proc(is_modal: bool) {
 		im.SameLine(0, 8)
 		open_cand := _buf_str(_hub.browse_path_buf[:])
 		im.BeginDisabled(open_cand == "")
-		if im.Button("Open Folder", {130, 28}) || (enter_open && open_cand != "") {
+		open_f_w := max(im.CalcTextSize("Open Folder").x + im.GetStyle().FramePadding.x * 2.4, 118.0)
+		if im.Button("Open Folder", {open_f_w, btn_h}) || (enter_open && open_cand != "") {
 			_try_open_project(open_cand)
 		}
 		im.EndDisabled()
@@ -479,7 +535,10 @@ _draw_project_hub_contents :: proc(is_modal: bool) {
 		im.BeginDisabled(!can_create)
 		im.PushStyleColorImVec4(.Button, thm.with_alpha(p.status_success, 0.28))
 		im.PushStyleColorImVec4(.ButtonHovered, thm.with_alpha(p.status_success, 0.42))
-		if im.Button(fmt.ctprintf("%s  Create & Open Project", icons.ICON_MD_ADD_CIRCLE_OUTLINE), {210, 32}) || (enter_create && can_create) {
+		create_lbl := fmt.ctprintf("%s  Create & Open Project", icons.ICON_MD_ADD_CIRCLE_OUTLINE)
+		create_w := max(im.CalcTextSize(create_lbl).x + im.GetStyle().FramePadding.x * 2.6, 195.0)
+		create_h := max(im.GetFrameHeight() * 1.25, 32.0)
+		if im.Button(create_lbl, {create_w, create_h}) || (enter_create && can_create) {
 			created_dir, sc_err, sc_ok := engine.project_scaffold_new(raw_parent, raw_name, context.temp_allocator)
 			if !sc_ok {
 				_set_status(sc_err, true)
@@ -510,12 +569,20 @@ project_hub_draw_startup_screen :: proc() {
 
 project_hub_draw_modal :: proc() {
 	if !_hub.modal_open do return
+	_ensure_hub_init()
 	if _hub.modal_open_pending || !im.IsPopupOpen("Project Hub##modal", {}) {
 		im.OpenPopup("Project Hub##modal", {})
 		_hub.modal_open_pending = false
 	}
 	widgets.center_next_window_on_active_monitor(.Appearing)
-	im.SetNextWindowSize({880, 560}, .Appearing)
+	vp := im.GetMainViewport()
+	max_w := vp != nil ? vp.WorkSize.x * 0.88 : f32(1080)
+	max_h := vp != nil ? vp.WorkSize.y * 0.88 : f32(760)
+	zm := clamp(_hub.zoom, 0.90, 1.80) / 1.20
+	target_sz := im.Vec2{clamp(760.0 * zm, 620.0, max(max_w, 620.0)), clamp(490.0 * zm, 400.0, max(max_h, 400.0))}
+	sz_cond: im.Cond = _hub.modal_zoom_resized ? .Always : .Appearing
+	_hub.modal_zoom_resized = false
+	im.SetNextWindowSize(target_sz, sz_cond)
 	if im.BeginPopupModal("Project Hub##modal", &_hub.modal_open, {.NoSavedSettings}) {
 		_draw_project_hub_contents(is_modal = true)
 		im.Spacing()

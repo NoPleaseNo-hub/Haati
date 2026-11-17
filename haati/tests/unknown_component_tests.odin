@@ -5,7 +5,6 @@ package tests
 // VERBATIM, still attached to its transform — a binary without some package
 // compiled in must never wipe that package's components from a scene.
 
-import "core:encoding/json"
 import "core:os"
 import "core:strings"
 import "core:testing"
@@ -58,7 +57,7 @@ test_unknown_component_survives_resave :: proc(t: ^testing.T) {
 	// The transform attachment survives: the root's components list references
 	// the record's lid again.
 	sf: engine.SceneFile
-	uerr := json.unmarshal(data, &sf)
+	uerr := engine.scene_file_unmarshal(data, &sf)
 	testing.expect(t, uerr == nil, "resaved scene should parse")
 	if uerr != nil do return
 	defer engine.scene_file_destroy(&sf)

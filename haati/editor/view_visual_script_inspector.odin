@@ -126,13 +126,31 @@ _visual_script_runner_inspector :: proc(ctx: ^inspector.Component_Ctx) {
 				}
 
 				im.PushIDInt(i32(vi))
-				c_icon, t_icon, v_col := thm.studio_var_icon_and_color(v.pin_type, v.is_array, v.array_is_bounded, false)
-				if v.is_array {
+				ck := engine.vg_resolve_container_kind(v)
+				c_icon, t_icon, v_col := thm.studio_var_icon_and_color(v.pin_type, ck != .Single, ck == .Bounded_Array, false)
+				if ck != .Single {
 					im.TextColored(v_col, "%s", fmt.ctprintf("%s", c_icon))
 					im.SameLine(0, 4)
-					im.TextDisabled("%s", fmt.ctprintf("%s : %s (Array)", v.name, engine.vg_var_odin_type_ex(g, v)))
+					im.TextDisabled("%s", fmt.ctprintf("%s : %s", v.name, engine.vg_var_odin_type_ex(g, v)))
 					if v.tooltip_text != "" {
 						widgets.tooltip(fmt.ctprintf("%s", v.tooltip_text))
+					}
+					if v.pin_type == .Float {
+						edit_seq := make([dynamic]f32, 0, len(v.default_f32_list), context.temp_allocator)
+						if cur_seq, has_seq := bb.var_f32_seqs[v.name]; has_seq {
+							for val in cur_seq do append(&edit_seq, val)
+						} else {
+							for val in v.default_f32_list do append(&edit_seq, val)
+						}
+						im.Indent(10)
+						if vs.draw_f32_list_editor(fmt.tprintf("vsr_f32s_%d", vi), &edit_seq, v.slider_min, v.slider_max, use_temp_alloc = true) {
+							new_list_str := vs.format_f32_list_override(edit_seq[:], context.temp_allocator)
+							updated := engine.vg_set_instance_override_value(r.instance_overrides, v.name, new_list_str, context.temp_allocator)
+							if r.instance_overrides != "" do delete(r.instance_overrides)
+							r.instance_overrides = strings.clone(updated)
+							engine.visual_script_sync_entity_var_f32_seq(r.owner, v.name, raw_data(edit_seq[:]), i32(len(edit_seq)), -1)
+						}
+						im.Unindent(10)
 					}
 					im.PopID()
 					continue

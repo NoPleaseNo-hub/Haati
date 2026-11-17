@@ -341,7 +341,14 @@ _normalize_component_records :: proc(raw: []byte, allocator := context.temp_allo
 	context.allocator = context.temp_allocator
 	defer context.allocator = prev
 
-	root, perr := json.parse(raw, .JSON, true)
+	json_raw := raw
+	if scene_bytes_is_binary(raw) {
+		conv, cok := scene_bytes_to_json_if_binary(raw, context.temp_allocator)
+		if !cok do return nil, false
+		json_raw = conv
+	}
+
+	root, perr := json.parse(json_raw, .JSON, true)
 	if perr != nil do return nil, false
 	obj, is_obj := root.(json.Object)
 	if !is_obj do return nil, false

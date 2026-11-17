@@ -408,6 +408,20 @@ cmd_mcp :: proc(args: []string) -> int {
 // the directory is emptied rather than removed.
 cmd_clean :: proc(args: []string) -> int {
 	_ = sweep_stale_compile_mount()
+	// Safely remove isolated Code Studio checker junctions before removing builds/ (Hard Invariant #4).
+	for sub in ([]string{"builds/_studio_check_env/haati_col/packages", "builds/_studio_check_env/haati_col"}) {
+		if dh, derr := os.open(sub); derr == nil {
+			if entries, rerr := os.read_dir(dh, -1, context.temp_allocator); rerr == nil {
+				for e in entries {
+					if e.type == .Directory || e.type == .Symlink {
+						p := fmt.tprintf("%s/%s", sub, e.name)
+						_ = _remove_dir_link_os(p)
+					}
+				}
+			}
+			os.close(dh)
+		}
+	}
 	os.remove_all("builds")
 	os.make_directory_all("builds")
 	_ = os.write_entire_file("builds/.gitkeep", []u8{})

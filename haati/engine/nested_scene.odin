@@ -183,9 +183,8 @@ _json_set_path :: proc(obj: ^json.Object, path: string, value: json.Value, alloc
 nested_scene_apply_overrides :: proc(raw: []byte, overrides: []Override, prefab_guid: Asset_GUID = {}) -> []byte {
 	if len(overrides) == 0 do return raw
 
-	raw_copy := make([]byte, len(raw))
-	defer delete(raw_copy)
-	copy(raw_copy, raw)
+	raw_copy, cok := scene_bytes_to_json_if_binary(raw, context.temp_allocator)
+	if !cok do return raw
 
 	root_val: json.Value
 	err := json.unmarshal_string(string(raw_copy), &root_val)
@@ -246,8 +245,8 @@ nested_scene_apply_component_edits :: proc(
     context.allocator = context.temp_allocator
     defer context.allocator = prev_alloc
 
-    raw_copy := make([]byte, len(raw), context.temp_allocator)
-    copy(raw_copy, raw)
+    raw_copy, cok := scene_bytes_to_json_if_binary(raw, context.temp_allocator)
+    if !cok do return raw
 
     root_val: json.Value
     if json.unmarshal_string(string(raw_copy), &root_val) != nil do return raw
@@ -547,9 +546,13 @@ nested_scene_diff_component_sets :: proc(
     prefab_guid: Asset_GUID,
     live_added: ^map[Local_ID]bool,
 ) -> (removed: []Removed_Component, added: []Added_Component, ok: bool) {
+    base_json, bok := scene_bytes_to_json_if_binary(base_raw, context.temp_allocator)
+    work_json, wok := scene_bytes_to_json_if_binary(work_raw, context.temp_allocator)
+    if !bok || !wok do return nil, nil, false
+
     base_val, work_val: json.Value
-    if json.unmarshal(base_raw, &base_val, .JSON, context.temp_allocator) != nil do return nil, nil, false
-    if json.unmarshal(work_raw, &work_val, .JSON, context.temp_allocator) != nil do return nil, nil, false
+    if json.unmarshal(base_json, &base_val, .JSON, context.temp_allocator) != nil do return nil, nil, false
+    if json.unmarshal(work_json, &work_val, .JSON, context.temp_allocator) != nil do return nil, nil, false
     base_obj, b_ok := base_val.(json.Object)
     work_obj, w_ok := work_val.(json.Object)
     if !b_ok || !w_ok do return nil, nil, false
@@ -747,12 +750,9 @@ _json_diff_objects :: proc(base_obj, work_obj: json.Object, prefix: string, targ
 nested_scene_diff_overrides :: proc(base_raw: []byte, work_raw: []byte, prefab_guid: Asset_GUID = {}) -> [dynamic]Override {
 	out := make([dynamic]Override)
 
-	base_copy := make([]byte, len(base_raw))
-	defer delete(base_copy)
-	copy(base_copy, base_raw)
-	work_copy := make([]byte, len(work_raw))
-	defer delete(work_copy)
-	copy(work_copy, work_raw)
+	base_copy, bok := scene_bytes_to_json_if_binary(base_raw, context.temp_allocator)
+	work_copy, wok := scene_bytes_to_json_if_binary(work_raw, context.temp_allocator)
+	if !bok || !wok do return out
 
 	base_val: json.Value
 	work_val: json.Value
@@ -2840,8 +2840,8 @@ _nested_resolved_field_json :: proc(s: ^Scene, leaf_ns: ^NestedScene, leaf_lid: 
     if !ok do return nil, false
     defer delete(raw)
 
-    cpy := make([]byte, len(raw), context.temp_allocator)
-    copy(cpy, raw)
+    cpy, cok := scene_bytes_to_json_if_binary(raw, context.temp_allocator)
+    if !cok do return nil, false
     root_val: json.Value
     if json.unmarshal_string(string(cpy), &root_val) != nil do return nil, false
     defer json.destroy_value(root_val)
@@ -3628,13 +3628,7 @@ _apply_file_edit_bytes :: proc(fe: ^_File_Edit) -> ([]byte, bool) {
         _sf_clear_override(&sf, &c)
     }
 
-    opts := json.Marshal_Options{
-        spec = .JSON, pretty = true, use_spaces = true, spaces = 2,
-        sort_maps_by_key = true,
-    }
-    marshaled, merr := json.marshal(sf, opts)
-    if merr != nil do return nil, false
-    return json_canonicalize_floats(marshaled), true
+    return scene_binary_encode(&sf, context.temp_allocator)
 }
 
 @(private = "file")

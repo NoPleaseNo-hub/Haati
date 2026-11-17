@@ -1052,7 +1052,7 @@ draw_inspector_default :: proc(ptr: rawptr, tid: typeid, label: cstring, path_pr
 
 // Draws a single reflected field `i` of struct `(ptr, tid)` with its full
 // decorator chain, undo transaction, property drawer, and context menu.
-draw_struct_field_at :: proc(ptr: rawptr, tid: typeid, i: int, path_prefix: string = "") {
+draw_struct_field_at :: proc(ptr: rawptr, tid: typeid, i: int, path_prefix: string = "", label_override: string = "") {
     names := reflect.struct_field_names(tid)
     types := reflect.struct_field_types(tid)
     if i < 0 || i >= len(names) do return
@@ -1070,8 +1070,11 @@ draw_struct_field_at :: proc(ptr: rawptr, tid: typeid, i: int, path_prefix: stri
     }
 
     field_name := names[i]
+    display_name := label_override != "" ? label_override : field_name
     c_field_name := strings.clone_to_cstring(field_name)
     defer delete(c_field_name)
+    c_display_name := strings.clone_to_cstring(display_name)
+    defer delete(c_display_name)
     field_type := types[i]
     field_val := reflect.struct_field_value(xAny, field_info)
 
@@ -1090,7 +1093,7 @@ draw_struct_field_at :: proc(ptr: rawptr, tid: typeid, i: int, path_prefix: stri
         }
     }
 
-    ctx := DrawContext{is_visible = true, is_pre = true, field_ptr = field_ptr, field_type = field_type.id, field_label = c_field_name, owner_ptr = ptr, owner_type = tid}
+    ctx := DrawContext{is_visible = true, is_pre = true, field_ptr = field_ptr, field_type = field_type.id, field_label = c_display_name, owner_ptr = ptr, owner_type = tid}
 
     im.PushID(c_field_name)
     prev_changed_outside := inspector_changed
@@ -1149,7 +1152,7 @@ draw_struct_field_at :: proc(ptr: rawptr, tid: typeid, i: int, path_prefix: stri
             // the path names which field — see field_edit.odin.
             prev_path := field_edit_set_path(full_path)
             finished := field_edit_row(field_ptr, field_type.id, multi_offset,
-                                       field_name, drawer, c_field_name)
+                                       field_name, drawer, c_display_name)
             field_edit_set_path(prev_path)
             im.EndGroup()
             current_field_trailing_w = 0
@@ -1166,13 +1169,13 @@ draw_struct_field_at :: proc(ptr: rawptr, tid: typeid, i: int, path_prefix: stri
             // Elements multi-edit through their own rebased peer list —
             // draw_inspector_array does that itself, since only it knows
             // where the element storage is.
-            draw_inspector_array_multi(field_ptr, field_type.id, c_field_name, multi_offset_of(field_ptr, ptr))
+            draw_inspector_array_multi(field_ptr, field_type.id, c_display_name, multi_offset_of(field_ptr, ptr))
             row_popup_done = true
         } else if is_union_type(field_type.id) {
             // A union's payload type can differ per object, so the same
             // bytes would mean different things — see multi_suspend.
             mprev := multi_suspend()
-            draw_inspector_union(field_ptr, field_type.id, c_field_name)
+            draw_inspector_union(field_ptr, field_type.id, c_display_name)
             multi_resume(mprev)
             row_popup_done = true
         } else if is_enum_type(field_type.id) {
@@ -1182,10 +1185,12 @@ draw_struct_field_at :: proc(ptr: rawptr, tid: typeid, i: int, path_prefix: stri
             // other row's gesture in flight on every frame this row draws.
             multi_offset := multi_offset_of(field_ptr, ptr)
             multi_probe_field(field_ptr, field_type.id, multi_offset)
+            im.BeginGroup()
             prev_path := field_edit_set_path(full_path)
             finished := field_edit_row(field_ptr, field_type.id, multi_offset,
-                                       field_name, draw_inspector_enum, c_field_name)
+                                       field_name, draw_inspector_enum, c_display_name)
             field_edit_set_path(prev_path)
+            im.EndGroup()
             record_nested_override(field_ptr, field_type.id, full_path, finished)
             row_popup_done = true
         } else if reflect.is_struct(field_type) || reflect.is_union(field_type) {
@@ -1199,7 +1204,7 @@ draw_struct_field_at :: proc(ptr: rawptr, tid: typeid, i: int, path_prefix: stri
                 draw_inspector(field_val, "", full_path)
                 row_popup_done = true
             } else {
-                tree_open := im.TreeNode(c_field_name)
+                tree_open := im.TreeNode(c_display_name)
                 draw_field_context_menu(field_ptr, field_type.id, full_path)
                 row_popup_done = true
                 if tree_open {
@@ -1211,7 +1216,7 @@ draw_struct_field_at :: proc(ptr: rawptr, tid: typeid, i: int, path_prefix: stri
             draw_inspector(field_val, "", full_path)
             row_popup_done = true
         } else {
-            widgets.textf("%s: %v", field_name, field_val)
+            widgets.textf("%s: %v", display_name, field_val)
         }
         if !row_popup_done {
             draw_field_context_menu(field_ptr, field_type.id, full_path)
@@ -1223,7 +1228,7 @@ draw_struct_field_at :: proc(ptr: rawptr, tid: typeid, i: int, path_prefix: stri
         multi_offset := multi_offset_of(field_ptr, ptr)
         prev_path := field_edit_set_path(full_path)
         finished := field_edit_row(field_ptr, field_type.id, multi_offset,
-                                   field_name, nil, c_field_name, pre_before)
+                                   field_name, nil, c_display_name, pre_before)
         field_edit_set_path(prev_path)
         record_nested_override(field_ptr, field_type.id, full_path, finished)
         draw_field_context_menu(field_ptr, field_type.id, full_path)

@@ -1,6 +1,7 @@
 package editor_visuals_editor
 
 import "core:fmt"
+import "core:math"
 import "core:strings"
 import im "haati:external/odin-imgui"
 import wnd "haati:editor/window"
@@ -429,7 +430,35 @@ editor_visuals_window_draw :: proc() {
 		im.TextWrappedUnformatted("This font is bundled directly into the Editor Visuals plugin so other plugins can load it without requiring separate font files.")
 		im.TextDisabled("Plugin API usage: data := editor_visuals.get_shared_font_data()")
 	}
+
+	// 7. LOADING SCREEN PREVIEW (same widget the startup/import overlay draws)
+	if im.CollapsingHeader("Loading Screen Preview") {
+		im.SliderFloat("Ripple Strength", &_splash_ripple, 0.0, 3.0)
+		im.Checkbox("Ice Glow Halo", &_splash_glow)
+		im.SameLine()
+		im.Checkbox("Expanding Rings", &_splash_rings)
+
+		t := f32(im.GetTime())
+		avail := im.GetContentRegionAvail()
+		box_h := min(avail.x * 0.75, f32(420))
+		origin := im.GetCursorScreenPos()
+		dl := im.GetWindowDrawList()
+		im.DrawList_AddRectFilled(dl, origin, {origin.x + avail.x, origin.y + box_h}, im.GetColorU32ImVec4(p.bg_canvas), 6)
+		logo := box_h * 0.62
+		cx := origin.x + avail.x * 0.5
+		widgets.splash_logo_draw(dl, {cx, origin.y + box_h * 0.06 + logo * 0.5}, logo, t, _splash_ripple, _splash_glow, _splash_rings)
+		im.Dummy({avail.x, box_h})
+
+		// Fake load cycle so the bar + percentage under the logo are visible.
+		bar_w := min(avail.x, f32(440))
+		im.SetCursorPosX(im.GetCursorPosX() + (avail.x - bar_w) * 0.5)
+		im.ProgressBar(math.mod(t / 6.0, 1.0), {bar_w, 0})
+	}
 }
+
+@(private = "file") _splash_ripple: f32 = 1.0
+@(private = "file") _splash_glow := true
+@(private = "file") _splash_rings := true
 
 @(menu_item={path="Window/Themes & Visuals", shortcut=""})
 editor_visuals_window_open :: proc() {

@@ -76,8 +76,13 @@ CARD_SIZE_STEP    :: f32(12.0)
 
 LIST_SCALE_MIN     :: f32(0.75)
 LIST_SCALE_DEFAULT :: f32(1.00)
-LIST_SCALE_MAX     :: f32(1.65)
+LIST_SCALE_MAX     :: f32(2.00)
 LIST_SCALE_STEP    :: f32(0.10)
+
+TREE_SCALE_MIN     :: f32(0.80)
+TREE_SCALE_DEFAULT :: f32(1.00)
+TREE_SCALE_MAX     :: f32(2.00)
+TREE_SCALE_STEP    :: f32(0.10)
 
 External_IDE_Preset :: enum {
 	Auto_Detect = 0,
@@ -123,9 +128,10 @@ File_Explorer_Settings :: struct {
 	show_hidden:       bool,
 	grid_card_size:    f32,
 	list_row_scale:    f32,
+	tree_scale:        f32,
 	is_grid_view:      bool,
 	auto_refresh_sec:  f32,
-	ide_executable:    string,
+	ide_executable:    string `inspect:"-"`,
 }
 
 @(project_settings={name="Void File Explorer"})
@@ -133,6 +139,7 @@ settings := File_Explorer_Settings{
 	show_hidden      = false,
 	grid_card_size   = CARD_SIZE_DEFAULT,
 	list_row_scale   = LIST_SCALE_DEFAULT,
+	tree_scale       = TREE_SCALE_DEFAULT,
 	is_grid_view     = true,
 	auto_refresh_sec = 2.0,
 	ide_executable   = "",
@@ -156,17 +163,30 @@ step_card_size :: proc(curr_px: f32, wheel_notches: f32) -> f32 {
 	return clamp(math.round(raw), CARD_SIZE_MIN, CARD_SIZE_MAX)
 }
 
-// Clamps details/list row density scale to `[0.75, 1.65]`, defaulting zero-initialized
+// Clamps details/list row density scale to `[0.75, 2.00]`, defaulting zero-initialized
 // legacy settings values cleanly to `1.00`.
 clamp_list_scale :: proc(scale: f32) -> f32 {
 	if scale == 0 do return LIST_SCALE_DEFAULT
 	return clamp(math.round(scale * 100.0) / 100.0, LIST_SCALE_MIN, LIST_SCALE_MAX)
 }
 
-// Steps details/list density scale by wheel/hotkey notches within `[0.75, 1.65]`.
+// Steps details/list density scale by wheel/hotkey notches within `[0.75, 2.00]`.
 step_list_scale :: proc(curr_scale: f32, wheel_notches: f32) -> f32 {
 	raw := clamp_list_scale(curr_scale) + wheel_notches * LIST_SCALE_STEP
 	return clamp(math.round(raw * 100.0) / 100.0, LIST_SCALE_MIN, LIST_SCALE_MAX)
+}
+
+// Clamps project folder tree zoom scale to `[0.80, 2.00]`, defaulting zero-initialized
+// legacy settings values cleanly to `1.00`.
+clamp_tree_scale :: proc(scale: f32) -> f32 {
+	if scale == 0 do return TREE_SCALE_DEFAULT
+	return clamp(math.round(scale * 100.0) / 100.0, TREE_SCALE_MIN, TREE_SCALE_MAX)
+}
+
+// Steps project folder tree zoom scale by wheel/hotkey notches within `[0.80, 2.00]`.
+step_tree_scale :: proc(curr_scale: f32, wheel_notches: f32) -> f32 {
+	raw := clamp_tree_scale(curr_scale) + wheel_notches * TREE_SCALE_STEP
+	return clamp(math.round(raw * 100.0) / 100.0, TREE_SCALE_MIN, TREE_SCALE_MAX)
 }
 
 @(private = "file")

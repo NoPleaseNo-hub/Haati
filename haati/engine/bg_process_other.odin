@@ -11,11 +11,13 @@ BG_Process :: struct {
 }
 
 bg_process_start_to_file :: proc(
-	working_dir:   string,
-	command:       []string,
-	env:           []string = nil,
-	log_file_path: string   = "",
+	working_dir:           string,
+	command:               []string,
+	env:                   []string = nil,
+	log_file_path:         string   = "",
+	below_normal_priority: bool     = false,
 ) -> (proc_out: BG_Process, ok: bool) {
+	_ = below_normal_priority
 	if len(command) == 0 do return {}, false
 
 	out_fd: ^os.File = nil

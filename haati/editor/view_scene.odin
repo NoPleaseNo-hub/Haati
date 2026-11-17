@@ -917,6 +917,8 @@ _check_scene_view_switch :: proc() {
 	}
 }
 
+@(private = "file") _scene_was_docked: bool = true
+
 draw_scene_view :: proc() {
 	_check_scene_view_switch()
 
@@ -941,9 +943,14 @@ draw_scene_view :: proc() {
 	if active := engine.sm_scene_get_active(); active != nil && active.dirty {
 		scene_title = icons.ICON_MD_LANDSCAPE + " Scene3D *###Scene"
 	}
-	open := wnd.begin(scene_title, &menu.show_scene, {.NoCollapse, .NoScrollbar, .NoScrollWithMouse, .NoMove})
+	scene_flags: im.WindowFlags = {.NoCollapse, .NoScrollbar, .NoScrollWithMouse}
+	if _scene_was_docked {
+		scene_flags += {.NoMove}
+	}
+	open := wnd.begin(scene_title, &menu.show_scene, scene_flags)
 	im.PopStyleVar()
 	if open {
+		_scene_was_docked = im.IsWindowDocked()
 		wnd.decorate_floating_window(scene_title, &menu.show_scene)
 		if _scene_2d_pending {
 			_scene_2d_pending = false

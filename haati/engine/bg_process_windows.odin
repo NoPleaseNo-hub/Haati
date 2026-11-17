@@ -111,10 +111,11 @@ _build_env_block_utf16 :: proc(env: []string) -> rawptr {
 // Spawns a hidden consoleless child process on Windows, optionally redirecting
 // both stdout and stderr to `log_file_path` (with `bInheritHandles = TRUE` only when needed).
 bg_process_start_to_file :: proc(
-	working_dir:   string,
-	command:       []string,
-	env:           []string = nil,
-	log_file_path: string   = "",
+	working_dir:           string,
+	command:               []string,
+	env:                   []string = nil,
+	log_file_path:         string   = "",
+	below_normal_priority: bool     = false,
 ) -> (proc_out: BG_Process, ok: bool) {
 	if len(command) == 0 do return {}, false
 
@@ -185,7 +186,11 @@ bg_process_start_to_file :: proc(
 	si_ex.StartupInfo.wShowWindow = u16(win.SW_HIDE)
 
 	pi: win.PROCESS_INFORMATION
+	BELOW_NORMAL_PRIORITY_CLASS :: win.DWORD(0x00004000)
 	creation_flags: win.DWORD = win.CREATE_NO_WINDOW | win.CREATE_UNICODE_ENVIRONMENT
+	if below_normal_priority {
+		creation_flags |= BELOW_NORMAL_PRIORITY_CLASS
+	}
 	env_block := _build_env_block_utf16(env)
 
 	inherit_list: [2]win.HANDLE

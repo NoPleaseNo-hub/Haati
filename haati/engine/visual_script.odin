@@ -25,6 +25,7 @@ import "core:encoding/uuid"
 import "core:fmt"
 import "core:math"
 import "core:math/linalg"
+import "core:mem"
 import "core:os"
 import "core:path/filepath"
 import "core:strconv"
@@ -144,6 +145,7 @@ VG_Array_Op_Mode :: enum u8 {
 	Clear       = 5,
 	Len         = 6,
 	Swap_Remove = 7,
+	Sub_Slice   = 8, // Zero-copy `arr[Start:End]` slice view
 }
 
 VG_BitSet_Op_Mode :: enum u8 {
@@ -154,11 +156,21 @@ VG_BitSet_Op_Mode :: enum u8 {
 	Is_Empty    = 4,
 }
 
+VG_Container_Kind :: enum u8 {
+	Single        = 0,
+	Fixed_Array   = 1,
+	Bounded_Array = 2,
+	Slice         = 3,
+	Dynamic_Array = 4,
+}
+
 VG_Enum_Decl :: struct {
-	name:        string,
-	variants:    [dynamic]string,
-	has_bitset:  bool,
-	bitset_name: string,
+	name:          string,
+	variants:      [dynamic]string,
+	has_bitset:    bool,
+	bitset_name:   string,
+	code_authored: bool `json:"-"`,
+	source_line:   int `json:"-"`,
 }
 
 VG_Struct_Field :: struct {
@@ -179,6 +191,8 @@ VG_Struct_Decl :: struct {
 	name:              string,
 	using_parent_name: string,
 	fields:            [dynamic]VG_Struct_Field,
+	code_authored:     bool `json:"-"`,
+	source_line:       int `json:"-"`,
 }
 
 VG_Pin_Def :: struct {
@@ -186,7 +200,8 @@ VG_Pin_Def :: struct {
 	pin_type:          hot.Hot_Pin_Type,
 	pass_mode:         hot.Hot_Pass_Mode, // `.Copy_Value` (`●`) or `.By_Reference` (`◆ ^T`)
 	is_addressable:    bool,              // For output pins: `true` if output carries a mutable lvalue pointer (`^T`)
-	is_array:          bool,              // Fixed-size `[N]T` or `Bounded_Array` pin
+	is_array:          bool,              // Container pin (`Fixed_Array`, `Bounded_Array`, `Slice`, `Dynamic_Array`)
+	container_kind:    VG_Container_Kind,
 	custom_type_name:  string,            // Enum / BitSet / Struct type name when applicable
 	default_f32:       f32,
 	default_int:       i32,
@@ -206,11 +221,13 @@ VG_Pin_Def :: struct {
 VG_Var_Decl :: struct {
 	name:              string,
 	pin_type:          hot.Hot_Pin_Type,
-	is_array:          bool,   // Fixed `[N]T` or Bounded `[Cap]T` array variable
-	array_count:       int,    // `0` -> legacy `[8]T` when `is_array`; `> 0` -> `[array_count]T`
-	array_is_bounded:  bool,   // `true` -> zero-heap C-ABI `struct { data: [Cap]T, count: i32 }`
-	custom_type_name:  string, // Enum / BitSet / Struct type name
+	is_array:          bool,              // Fixed / Bounded / Slice / Dynamic container flag
+	container_kind:    VG_Container_Kind, // `Single`, `Fixed_Array`, `Bounded_Array`, `Slice` (`[]T`), `Dynamic_Array` (`[dynamic]T`)
+	array_count:       int,               // `0` -> legacy `[8]T` when Fixed/Bounded; `> 0` -> `[array_count]T`
+	array_is_bounded:  bool,              // `true` -> zero-heap C-ABI `struct { data: [Cap]T, count: i32 }`
+	custom_type_name:  string,            // Enum / BitSet / Struct type name
 	default_f32:       f32,
+	default_f32_list:  [dynamic]f32,      // Default element values for Slice / Dynamic / Fixed float arrays
 	default_int:       i32,
 	default_i64:       i64,
 	default_u64:       u64,
@@ -293,11 +310,26 @@ VG_Timer_Entry :: struct {
 	last_tick_epoch: u64,
 }
 
+VG_Raw_Seq_Entry :: struct {
+	data:       rawptr,
+	length:     int,
+	capacity:   int,
+	elem_size:  int,
+	elem_align: int,
+	owns_alloc: bool,
+}
+
+VG_BLOB_CANARY_HEAD :: u64(0xDEAD_4841_4154_0001)
+VG_BLOB_CANARY_TAIL :: u64(0xBEEF_4841_4154_0002)
+VG_BLOB_TAIL_BYTES  :: 16
+
 VG_Runtime_Blackboard :: struct {
 	initialized:             bool,
 	slots:                   [VG_MAX_VARS]hot.Hot_Slot,
 	str_bufs:                [VG_MAX_VARS][128]u8,
 	var_blobs:               map[string][dynamic]u8,
+	var_f32_seqs:            map[string][dynamic]f32,
+	var_seqs:                map[string]VG_Raw_Seq_Entry,
 	node_timers:             map[u32]VG_Timer_Entry,
 	live_pin_values:         map[u64]hot.Hot_Slot,
 	loop_indices:            [8]struct{ node_uid: int, cur_idx: i32, elem_ptr: rawptr, elem_pin_type: hot.Hot_Pin_Type, active: bool },
@@ -759,6 +791,21 @@ vg_apply_instance_overrides :: proc(g: ^Visual_Graph, bb: ^VG_Runtime_Blackboard
 			if ncopy > 0 do copy(bb.str_bufs[vi][:ncopy], vval[:ncopy])
 			bb.slots[vi].val_cstr = cstring(&bb.str_bufs[vi][0])
 		}
+		if g.variables[vi].pin_type == .Float && vg_resolve_container_kind(g.variables[vi]) != .Single {
+			seq := _vg_ensure_f32_seq_bb(g, bb, g.variables[vi].name)
+			if seq != nil {
+				trim_list := strings.trim(strings.trim_space(vval), "[]")
+				context.allocator = runtime.default_allocator()
+				clear(seq)
+				for item in strings.split(trim_list, ",", context.temp_allocator) {
+					ts := strings.trim_space(item)
+					if ts == "" do continue
+					if fv, fok := strconv.parse_f32(ts); fok {
+						append(seq, fv)
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -913,6 +960,7 @@ _bb_slot_value_ptr :: proc(bb: ^VG_Runtime_Blackboard, var_index: int, fallback_
 	case .F64:        return &s.val_f64
 	case .Struct_Val: return &s.val_bytes[0]
 	case .String, .Asset: return &s.val_cstr
+	case .Raw_Ptr:    return &s.val_ptr
 	}
 	return &s.val_f32
 }
@@ -923,25 +971,45 @@ visual_script_get_entity_var_ptr :: proc(tH: Transform_Handle, var_index: int) -
 	return _bb_slot_value_ptr(&st.bb, var_index)
 }
 
+@(private = "file")
+_vg_ensure_canary_blob_bb :: proc(bb: ^VG_Runtime_Blackboard, var_name: string, payload_bytes: int) -> []u8 {
+	if bb == nil || var_name == "" do return nil
+	sz := max(payload_bytes, 1)
+	total := sz + VG_BLOB_TAIL_BYTES
+	prev_alloc := context.allocator
+	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev_alloc
+
+	if bb.var_blobs == nil {
+		bb.var_blobs = make(map[string][dynamic]u8, 4)
+	}
+	buf, exists := bb.var_blobs[var_name]
+	if !exists {
+		buf = make([dynamic]u8, total)
+		(cast(^u64)&buf[sz])^     = VG_BLOB_CANARY_TAIL
+		(cast(^u64)&buf[sz + 8])^ = VG_BLOB_CANARY_HEAD ~ u64(sz)
+		bb.var_blobs[strings.clone(var_name)] = buf
+		return buf[0:sz]
+	}
+	old_sz := len(buf) > VG_BLOB_TAIL_BYTES ? len(buf) - VG_BLOB_TAIL_BYTES : len(buf)
+	if len(buf) < total {
+		if old_sz > 0 && old_sz + VG_BLOB_TAIL_BYTES <= len(buf) {
+			mem.zero(&buf[old_sz], VG_BLOB_TAIL_BYTES)
+		}
+		resize(&buf, total)
+		(cast(^u64)&buf[sz])^     = VG_BLOB_CANARY_TAIL
+		(cast(^u64)&buf[sz + 8])^ = VG_BLOB_CANARY_HEAD ~ u64(sz)
+		bb.var_blobs[var_name] = buf
+		return buf[0:sz]
+	}
+	return buf[0:old_sz]
+}
+
 visual_script_get_entity_var_blob_ptr :: proc(tH: Transform_Handle, var_name: string, byte_size: int) -> rawptr {
 	if var_name == "" do return nil
 	st := _get_or_create_entity_state(tH)
-	sz := max(byte_size, 1)
-	if buf, exists := st.bb.var_blobs[var_name]; exists {
-		if len(buf) < sz {
-			context.allocator = runtime.default_allocator()
-			resize(&buf, sz)
-			st.bb.var_blobs[var_name] = buf
-		}
-		return rawptr(&buf[0])
-	}
-	context.allocator = runtime.default_allocator()
-	if st.bb.var_blobs == nil {
-		st.bb.var_blobs = make(map[string][dynamic]u8, 4)
-	}
-	buf := make([dynamic]u8, sz, runtime.default_allocator())
-	st.bb.var_blobs[strings.clone(var_name, runtime.default_allocator())] = buf
-	return rawptr(&buf[0])
+	payload := _vg_ensure_canary_blob_bb(&st.bb, var_name, byte_size)
+	return len(payload) > 0 ? rawptr(&payload[0]) : nil
 }
 
 visual_script_get_entity_var_ptr_raw :: proc(tH: Transform_Handle, var_name: string, pin_type: hot.Hot_Pin_Type) -> rawptr {
@@ -959,6 +1027,253 @@ visual_script_get_entity_var_ptr_raw :: proc(tH: Transform_Handle, var_name: str
 	blob_key := fmt.tprintf("__raw_%s", var_name)
 	_ = pin_type
 	return visual_script_get_entity_var_blob_ptr(tH, blob_key, 64)
+}
+
+@(private = "file")
+_vg_ensure_f32_seq_bb :: proc(g: ^Visual_Graph, bb: ^VG_Runtime_Blackboard, var_name: string) -> ^[dynamic]f32 {
+	if bb == nil || var_name == "" do return nil
+	context.allocator = runtime.default_allocator()
+	if bb.var_f32_seqs == nil {
+		bb.var_f32_seqs = make(map[string][dynamic]f32, 4)
+	}
+	if var_name in bb.var_f32_seqs {
+		return &bb.var_f32_seqs[var_name]
+	}
+	seq := make([dynamic]f32, 0, 8, runtime.default_allocator())
+	if g != nil {
+		if vi := vg_find_var_index(g, var_name); vi >= 0 && vi < len(g.variables) {
+			v := g.variables[vi]
+			if len(v.default_f32_list) > 0 {
+				resize(&seq, len(v.default_f32_list))
+				copy(seq[:], v.default_f32_list[:])
+			}
+		}
+	}
+	key_c := strings.clone(var_name, runtime.default_allocator())
+	bb.var_f32_seqs[key_c] = seq
+	return &bb.var_f32_seqs[var_name]
+}
+
+visual_script_get_entity_var_f32_seq_ptr :: proc(tH: Transform_Handle, var_name: string) -> (data: ^f32, length: i32, capacity: i32) {
+	if var_name == "" do return nil, 0, 0
+	st := _get_or_create_entity_state(tH)
+	var_g: ^Visual_Graph = nil
+	if w := ctx_world(); w != nil && pool_valid(&w.transforms, Handle(tH)) {
+		if _, r := transform_get_comp(tH, VisualScriptRunner); r != nil && r.graph_path != "" {
+			var_g = _get_or_load_disk_graph(r.graph_path)
+		}
+	}
+	seq := _vg_ensure_f32_seq_bb(var_g, &st.bb, var_name)
+	if seq == nil do return nil, 0, 0
+	raw := (cast(^runtime.Raw_Dynamic_Array)seq)^
+	return (^f32)(raw.data), i32(raw.len), i32(raw.cap)
+}
+
+visual_script_sync_entity_var_f32_seq :: proc(tH: Transform_Handle, var_name: string, data: ^f32, length: i32, capacity: i32) {
+	if var_name == "" do return
+	st := _get_or_create_entity_state(tH)
+	seq := _vg_ensure_f32_seq_bb(nil, &st.bb, var_name)
+	if seq == nil do return
+	n := max(int(length), 0)
+	// `capacity >= 0` signals `[dynamic]f32` allocated directly via `api.host_allocator`; update header without double-freeing!
+	if capacity >= 0 {
+		raw := cast(^runtime.Raw_Dynamic_Array)seq
+		raw.data      = data
+		raw.len       = n
+		raw.cap       = max(int(capacity), n)
+		raw.allocator = runtime.default_allocator()
+		return
+	}
+	// `capacity < 0` signals a `[]f32` slice view (possibly reassigned to a temporary slice in user code).
+	context.allocator = runtime.default_allocator()
+	if data != raw_data(seq^) {
+		resize(seq, n)
+		if n > 0 && data != nil {
+			src_sl := ([^]f32)(data)[:n]
+			copy(seq^[:n], src_sl)
+		}
+	} else {
+		raw := cast(^runtime.Raw_Dynamic_Array)seq
+		raw.len = n
+	}
+}
+
+@(private = "file")
+_vg_raw_seq_reserve :: proc(entry: ^VG_Raw_Seq_Entry, min_cap: int) {
+	if entry == nil || min_cap <= entry.capacity do return
+	elem_sz := max(entry.elem_size, 1)
+	elem_al := max(entry.elem_align, 8)
+	new_cap := max(entry.capacity * 2, min_cap, 8)
+	new_buf, err := mem.alloc(new_cap * elem_sz, elem_al, runtime.default_allocator())
+	if err != nil || new_buf == nil do return
+	if entry.data != nil && entry.length > 0 {
+		mem.copy(new_buf, entry.data, entry.length * elem_sz)
+	}
+	if entry.owns_alloc && entry.data != nil {
+		mem.free(entry.data, runtime.default_allocator())
+	}
+	entry.data       = new_buf
+	entry.capacity   = new_cap
+	entry.owns_alloc = true
+}
+
+@(private = "file")
+_vg_raw_seq_elem_ptr :: #force_inline proc(entry: ^VG_Raw_Seq_Entry, idx: int) -> rawptr {
+	if entry == nil || entry.data == nil || idx < 0 || idx >= entry.length do return nil
+	return rawptr(uintptr(entry.data) + uintptr(idx * max(entry.elem_size, 1)))
+}
+
+@(private = "file")
+_vg_raw_seq_append :: proc(entry: ^VG_Raw_Seq_Entry, src: rawptr) -> bool {
+	if entry == nil do return false
+	elem_sz := max(entry.elem_size, 1)
+	if entry.length + 1 > entry.capacity || !entry.owns_alloc {
+		_vg_raw_seq_reserve(entry, entry.length + 1)
+	}
+	if entry.data == nil || entry.length + 1 > entry.capacity do return false
+	dst := rawptr(uintptr(entry.data) + uintptr(entry.length * elem_sz))
+	if src != nil {
+		mem.copy(dst, src, elem_sz)
+	} else {
+		mem.zero(dst, elem_sz)
+	}
+	entry.length += 1
+	return true
+}
+
+@(private = "file")
+_vg_ensure_seq_bb :: proc(g: ^Visual_Graph, bb: ^VG_Runtime_Blackboard, var_name: string, elem_size, elem_align: int) -> ^VG_Raw_Seq_Entry {
+	if bb == nil || var_name == "" do return nil
+	prev_alloc := context.allocator
+	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev_alloc
+	if bb.var_seqs == nil {
+		bb.var_seqs = make(map[string]VG_Raw_Seq_Entry, 4)
+	}
+	if var_name in bb.var_seqs {
+		ep := &bb.var_seqs[var_name]
+		if elem_size > ep.elem_size do ep.elem_size = elem_size
+		if elem_align > ep.elem_align do ep.elem_align = elem_align
+		return ep
+	}
+	esz := max(elem_size, 1)
+	eal := max(elem_align, 8)
+	init_cap := 8
+	init_len := 0
+	if g != nil {
+		if vi := vg_find_var_index(g, var_name); vi >= 0 && vi < len(g.variables) {
+			v := g.variables[vi]
+			if v.pin_type == .Float && len(v.default_f32_list) > 0 {
+				init_len = len(v.default_f32_list)
+				init_cap = max(init_len, 8)
+			}
+		}
+	}
+	buf, _ := mem.alloc(init_cap * esz, eal, runtime.default_allocator())
+	if g != nil && init_len > 0 && buf != nil {
+		if vi := vg_find_var_index(g, var_name); vi >= 0 && vi < len(g.variables) {
+			v := g.variables[vi]
+			if v.pin_type == .Float && len(v.default_f32_list) >= init_len && esz >= size_of(f32) {
+				mem.copy(buf, raw_data(v.default_f32_list[:]), init_len * size_of(f32))
+			}
+		}
+	}
+	key_c := strings.clone(var_name)
+	bb.var_seqs[key_c] = VG_Raw_Seq_Entry{
+		data       = buf,
+		length     = init_len,
+		capacity   = init_cap,
+		elem_size  = esz,
+		elem_align = eal,
+		owns_alloc = true,
+	}
+	return &bb.var_seqs[var_name]
+}
+
+visual_script_get_entity_var_seq_ptr :: proc(tH: Transform_Handle, var_name: string, elem_size, elem_align: i32) -> (data: rawptr, length: i32, capacity: i32) {
+	if var_name == "" do return nil, 0, 0
+	st := _get_or_create_entity_state(tH)
+	var_g: ^Visual_Graph = nil
+	if w := ctx_world(); w != nil && pool_valid(&w.transforms, Handle(tH)) {
+		if _, r := transform_get_comp(tH, VisualScriptRunner); r != nil && r.graph_path != "" {
+			var_g = _get_or_load_disk_graph(r.graph_path)
+		}
+	}
+	entry := _vg_ensure_seq_bb(var_g, &st.bb, var_name, int(elem_size), int(elem_align))
+	if entry == nil do return nil, 0, 0
+	return entry.data, i32(entry.length), i32(entry.capacity)
+}
+
+visual_script_sync_entity_var_seq :: proc(tH: Transform_Handle, var_name: string, data: rawptr, elem_size, elem_align, length, capacity: i32) {
+	if var_name == "" do return
+	st := _get_or_create_entity_state(tH)
+	esz := max(int(elem_size), 1)
+	eal := max(int(elem_align), 8)
+	entry := _vg_ensure_seq_bb(nil, &st.bb, var_name, esz, eal)
+	if entry == nil do return
+	n := max(int(length), 0)
+	// `capacity >= 0` signals `[dynamic]T` managed via `api.host_allocator`; adopt header in place!
+	if capacity >= 0 {
+		entry.data       = data
+		entry.length     = n
+		entry.capacity   = max(int(capacity), n)
+		entry.elem_size  = esz
+		entry.elem_align = eal
+		entry.owns_alloc = (data != nil)
+		return
+	}
+	// `capacity < 0` signals a `[]T` slice view (possibly reassigned to a temporary slice); clone into owned buffer!
+	if data != entry.data {
+		if n > 0 {
+			_vg_raw_seq_reserve(entry, n)
+			if entry.data != nil && data != nil {
+				mem.copy(entry.data, data, n * esz)
+			}
+		}
+		entry.length = n
+	} else {
+		entry.length = min(n, entry.capacity)
+	}
+}
+
+// Verifies per-entity blackboard heap canaries and sanitizes NaN/Inf Transform fields written by scripts.
+visual_script_verify_and_repair_entity :: proc(
+	tH:        Transform_Handle,
+	pre_pos:   [3]f32,
+	pre_rot:   [4]f32,
+	pre_scale: [3]f32,
+) -> (corrupted_var: string, nan_repaired: bool) {
+	if bb := visual_script_get_entity_bb(tH); bb != nil && bb.var_blobs != nil {
+		for k, &buf in bb.var_blobs {
+			if len(buf) < VG_BLOB_TAIL_BYTES + 1 do continue
+			clean_len := len(buf) - VG_BLOB_TAIL_BYTES
+			tail := (cast(^u64)&buf[clean_len])^
+			tag  := (cast(^u64)&buf[clean_len + 8])^
+			if tail != VG_BLOB_CANARY_TAIL || tag != (VG_BLOB_CANARY_HEAD ~ u64(clean_len)) {
+				// Repair smashed trailing canary + clear poisoned payload so subsequent frames stay memory-safe
+				mem.zero(&buf[0], clean_len)
+				(cast(^u64)&buf[clean_len])^     = VG_BLOB_CANARY_TAIL
+				(cast(^u64)&buf[clean_len + 8])^ = VG_BLOB_CANARY_HEAD ~ u64(clean_len)
+				corrupted_var = strings.clone(k, context.temp_allocator)
+				break
+			}
+		}
+	}
+	if w := ctx_world(); w != nil && pool_valid(&w.transforms, Handle(tH)) {
+		if t := pool_get(&w.transforms, Handle(tH)); t != nil {
+			pos_bad := math.is_nan(t.position.x) || math.is_nan(t.position.y) || math.is_nan(t.position.z) || math.is_inf(t.position.x) || math.is_inf(t.position.y) || math.is_inf(t.position.z)
+			scl_bad := math.is_nan(t.scale.x) || math.is_nan(t.scale.y) || math.is_nan(t.scale.z) || math.is_inf(t.scale.x) || math.is_inf(t.scale.y) || math.is_inf(t.scale.z)
+			rq := t.rotation
+			rot_bad := math.is_nan(rq.x) || math.is_nan(rq.y) || math.is_nan(rq.z) || math.is_nan(rq.w) || math.is_inf(rq.x) || math.is_inf(rq.y) || math.is_inf(rq.z) || math.is_inf(rq.w)
+			if pos_bad || scl_bad || rot_bad {
+				if pos_bad do t.position = pre_pos
+				if scl_bad do t.scale    = pre_scale
+				if rot_bad do t.rotation = pre_rot
+				nan_repaired = true
+			}
+		}
+	}
+	return corrupted_var, nan_repaired
 }
 
 visual_script_timer_step_runtime :: proc(
@@ -1469,6 +1784,18 @@ vg_destroy_blackboard :: proc(bb: ^VG_Runtime_Blackboard) {
 		delete(v)
 	}
 	delete(bb.var_blobs)
+	for k, v in bb.var_f32_seqs {
+		delete(k)
+		delete(v)
+	}
+	delete(bb.var_f32_seqs)
+	for k, entry in bb.var_seqs {
+		delete(k)
+		if entry.owns_alloc && entry.data != nil {
+			mem.free(entry.data, runtime.default_allocator())
+		}
+	}
+	delete(bb.var_seqs)
 	delete(bb.node_timers)
 	delete(bb.live_pin_values)
 	bb^ = {}
@@ -1509,6 +1836,7 @@ visual_script_exiting_play_mode :: proc() {
 }
 
 visual_script_reset_runtime_state :: proc() {
+	hot_cartridge_clear_faults()
 	if !_vs_rt.initialized do return
 	context.allocator = runtime.default_allocator()
 	for b in _vs_rt.action_bindings {
@@ -1766,6 +2094,7 @@ _PIN_ODIN_SCALAR_TYPE := [hot.Hot_Pin_Type]string{
 	.Enum_U8    = "u8",
 	.BitSet_U8  = "u8",
 	.Struct_Val = "rawptr",
+	.Raw_Ptr    = "rawptr",
 }
 
 @(rodata)
@@ -1793,6 +2122,7 @@ _PIN_ODIN_ARRAY_TYPE := [hot.Hot_Pin_Type]string{
 	.Enum_U8    = "[8]u8",
 	.BitSet_U8  = "[8]u8",
 	.Struct_Val = "[8]rawptr",
+	.Raw_Ptr    = "[8]rawptr",
 }
 
 vg_pin_odin_type :: proc(pt: hot.Hot_Pin_Type, is_array: bool = false) -> string {
@@ -1854,6 +2184,7 @@ vg_scalar_type_size :: proc(g: ^Visual_Graph, pt: hot.Hot_Pin_Type, custom_type:
 	case .Entity:     return size_of(hot.Hot_Entity), align_of(hot.Hot_Entity)
 	case .Delegate:   return size_of(hot.Hot_Delegate), align_of(hot.Hot_Delegate)
 	case .String, .Asset: return size_of(cstring), align_of(cstring)
+	case .Raw_Ptr:    return size_of(rawptr), align_of(rawptr)
 	case .Struct_Val:
 		if depth >= 4 || g == nil || custom_type == "" do return 16, 4
 		_, total_sz, total_al := vg_struct_layout(g, custom_type, context.temp_allocator, depth + 1)
@@ -1926,6 +2257,19 @@ vg_var_byte_size :: proc(g: ^Visual_Graph, v: VG_Var_Decl) -> int {
 	return cnt * elem_sz
 }
 
+vg_resolve_container_kind :: #force_inline proc(v: VG_Var_Decl) -> VG_Container_Kind {
+	if v.container_kind != .Single do return v.container_kind
+	if v.is_array {
+		return v.array_is_bounded ? .Bounded_Array : .Fixed_Array
+	}
+	return .Single
+}
+
+vg_pin_container_kind :: #force_inline proc(p: VG_Pin_Def) -> VG_Container_Kind {
+	if p.container_kind != .Single do return p.container_kind
+	return p.is_array ? .Fixed_Array : .Single
+}
+
 vg_var_odin_type_ex :: proc(g: ^Visual_Graph, v: VG_Var_Decl, allocator := context.temp_allocator) -> string {
 	base := vg_pin_odin_type(v.pin_type, false)
 	if v.pin_type == .Enum_U8 && v.custom_type_name != "" {
@@ -1943,17 +2287,25 @@ vg_var_odin_type_ex :: proc(g: ^Visual_Graph, v: VG_Var_Decl, allocator := conte
 	} else if v.pin_type == .Struct_Val && v.custom_type_name != "" {
 		base = v.custom_type_name
 	}
-	if !v.is_array {
+	ck := vg_resolve_container_kind(v)
+	switch ck {
+	case .Single:
 		return strings.clone(base, allocator)
-	}
-	cnt := v.array_count > 0 ? v.array_count : 8
-	if v.array_is_bounded {
+	case .Slice:
+		return fmt.aprintf("[]%s", base, allocator = allocator)
+	case .Dynamic_Array:
+		return fmt.aprintf("[dynamic]%s", base, allocator = allocator)
+	case .Bounded_Array:
+		cnt := v.array_count > 0 ? v.array_count : 8
 		return fmt.aprintf("BP_Bounded_%s_%d", vg_sanitize_bp_token(base, context.temp_allocator), cnt, allocator = allocator)
+	case .Fixed_Array:
+		cnt := v.array_count > 0 ? v.array_count : 8
+		if v.array_count <= 0 && v.pin_type not_in (bit_set[hot.Hot_Pin_Type]{.Enum_U8, .BitSet_U8, .Struct_Val}) {
+			return strings.clone(vg_pin_odin_type(v.pin_type, true), allocator)
+		}
+		return fmt.aprintf("[%d]%s", cnt, base, allocator = allocator)
 	}
-	if v.array_count <= 0 && v.pin_type not_in (bit_set[hot.Hot_Pin_Type]{.Enum_U8, .BitSet_U8, .Struct_Val}) {
-		return strings.clone(vg_pin_odin_type(v.pin_type, true), allocator)
-	}
-	return fmt.aprintf("[%d]%s", cnt, base, allocator = allocator)
+	return strings.clone(base, allocator)
 }
 
 vg_has_tick_event :: proc(g: ^Visual_Graph) -> bool {
@@ -2047,6 +2399,7 @@ vg_destroy_graph :: proc(g: ^Visual_Graph) {
 		delete(v.custom_type_name)
 		delete(v.category)
 		delete(v.tooltip_text)
+		delete(v.default_f32_list)
 	}
 	delete(g.variables)
 	for &n in g.nodes do vg_destroy_node(&n)
@@ -2071,7 +2424,7 @@ _vg_pins_equal :: proc(a, b: []VG_Pin_Def) -> bool {
 	if len(a) != len(b) do return false
 	for i in 0 ..< len(a) {
 		pa, pb := a[i], b[i]
-		if pa.pin_type != pb.pin_type || pa.pass_mode != pb.pass_mode || pa.is_addressable != pb.is_addressable || pa.is_array != pb.is_array {
+		if pa.pin_type != pb.pin_type || pa.pass_mode != pb.pass_mode || pa.is_addressable != pb.is_addressable || pa.is_array != pb.is_array || pa.container_kind != pb.container_kind {
 			return false
 		}
 		if pa.default_f32 != pb.default_f32 || pa.default_int != pb.default_int || pa.default_i64 != pb.default_i64 || pa.default_u64 != pb.default_u64 || pa.default_f64 != pb.default_f64 || pa.default_bool != pb.default_bool {
@@ -2141,6 +2494,12 @@ vg_clone_graph :: proc(src: ^Visual_Graph, allocator := context.allocator) -> Vi
 		cv.custom_type_name = v.custom_type_name != "" ? strings.clone(v.custom_type_name, allocator) : ""
 		cv.category         = v.category != "" ? strings.clone(v.category, allocator) : ""
 		cv.tooltip_text     = v.tooltip_text != "" ? strings.clone(v.tooltip_text, allocator) : ""
+		if len(v.default_f32_list) > 0 {
+			cv.default_f32_list = make([dynamic]f32, len(v.default_f32_list), allocator)
+			copy(cv.default_f32_list[:], v.default_f32_list[:])
+		} else {
+			cv.default_f32_list = nil
+		}
 		dst.variables[vi] = cv
 	}
 	for &n, ni in src.nodes {
@@ -2190,7 +2549,7 @@ vg_graphs_equal :: proc(a, b: ^Visual_Graph) -> bool {
 	}
 	for i in 0 ..< len(a.variables) {
 		va, vb := &a.variables[i], &b.variables[i]
-		if va.pin_type != vb.pin_type || va.is_array != vb.is_array || va.array_count != vb.array_count || va.array_is_bounded != vb.array_is_bounded || va.instance_editable != vb.instance_editable || va.slider_min != vb.slider_min || va.slider_max != vb.slider_max {
+		if va.pin_type != vb.pin_type || va.is_array != vb.is_array || vg_resolve_container_kind(va^) != vg_resolve_container_kind(vb^) || va.array_count != vb.array_count || va.array_is_bounded != vb.array_is_bounded || va.instance_editable != vb.instance_editable || va.slider_min != vb.slider_min || va.slider_max != vb.slider_max {
 			return false
 		}
 		if va.default_f32 != vb.default_f32 || va.default_int != vb.default_int || va.default_i64 != vb.default_i64 || va.default_u64 != vb.default_u64 || va.default_f64 != vb.default_f64 || va.default_bool != vb.default_bool || va.default_vec2 != vb.default_vec2 || va.default_vec3 != vb.default_vec3 || va.default_vec4 != vb.default_vec4 {
@@ -2199,6 +2558,8 @@ vg_graphs_equal :: proc(a, b: ^Visual_Graph) -> bool {
 		if va.name != vb.name || va.default_str != vb.default_str || va.custom_type_name != vb.custom_type_name || va.category != vb.category || va.tooltip_text != vb.tooltip_text {
 			return false
 		}
+		if len(va.default_f32_list) != len(vb.default_f32_list) do return false
+		for li in 0 ..< len(va.default_f32_list) do if va.default_f32_list[li] != vb.default_f32_list[li] do return false
 	}
 	for i in 0 ..< len(a.nodes) {
 		na, nb := &a.nodes[i], &b.nodes[i]
@@ -2252,8 +2613,13 @@ vg_can_connect_pins :: proc(src: VG_Pin_Def, dst: VG_Pin_Def) -> (ok: bool, reas
 		}
 		return false, "Pin data types do not match"
 	}
-	if src.is_array != dst.is_array {
-		return false, "Array pin cannot connect directly to scalar pin"
+	src_ck := vg_pin_container_kind(src)
+	dst_ck := vg_pin_container_kind(dst)
+	if (src_ck != .Single) != (dst_ck != .Single) {
+		return false, "Array/Slice pin cannot connect directly to scalar pin"
+	}
+	if src_ck != dst_ck && dst_ck != .Slice {
+		return false, "Array container kinds do not match (target requires exact array layout)"
 	}
 	if src.custom_type_name != "" && dst.custom_type_name != "" && src.custom_type_name != dst.custom_type_name {
 		return false, "Custom enum/struct types do not match"
@@ -2274,10 +2640,12 @@ _vg_is_scalar_castable :: #force_inline proc(pt: hot.Hot_Pin_Type) -> bool {
 
 vg_are_types_autocastable :: proc(src: VG_Pin_Def, dst: VG_Pin_Def) -> bool {
 	if src.pin_type == dst.pin_type do return false
-	if src.is_array || dst.is_array do return false
+	if src.is_array || dst.is_array || src.container_kind != .Single || dst.container_kind != .Single do return false
 	if dst.pass_mode == .By_Reference do return false
-	if src.pin_type in (bit_set[hot.Hot_Pin_Type]{.Exec, .Delegate, .Bool, .Struct_Val, .BitSet_U8, .String, .Asset, .Entity}) do return false
-	if dst.pin_type in (bit_set[hot.Hot_Pin_Type]{.Exec, .Delegate, .Bool, .Struct_Val, .BitSet_U8, .String, .Asset, .Entity}) do return false
+	if dst.pin_type == .Raw_Ptr && src.is_addressable do return true
+	if src.pin_type == .Raw_Ptr && dst.pin_type not_in (bit_set[hot.Hot_Pin_Type]{.Exec, .Delegate}) do return true
+	if src.pin_type in (bit_set[hot.Hot_Pin_Type]{.Exec, .Delegate, .Bool, .Struct_Val, .BitSet_U8, .String, .Asset, .Entity, .Raw_Ptr}) do return false
+	if dst.pin_type in (bit_set[hot.Hot_Pin_Type]{.Exec, .Delegate, .Bool, .Struct_Val, .BitSet_U8, .String, .Asset, .Entity, .Raw_Ptr}) do return false
 	if _vg_is_scalar_castable(src.pin_type) && _vg_is_scalar_castable(dst.pin_type) do return true
 	// Vector component demotion (Vec4->Vec3/Vec2/Float, Vec3->Vec2/Float, Vec2->Float)
 	if (src.pin_type == .Vec4 && dst.pin_type in (bit_set[hot.Hot_Pin_Type]{.Vec3, .Vec2, .Float})) do return true
@@ -2559,17 +2927,19 @@ vg_add_node :: proc(g: ^Visual_Graph, kind: VG_Node_Kind, pos: [2]f32, custom_na
 			for pi in 5 ..< len(entry.outputs) {
 				ep := entry.outputs[pi]
 				append(&n.inputs, VG_Pin_Def{
-					name        = strings.clone(ep.name),
-					pin_type    = ep.pin_type,
-					is_array    = ep.is_array,
-					default_f32 = ep.default_f32,
-					default_int = ep.default_int,
-					default_i64 = ep.default_i64,
-					default_bool = ep.default_bool,
-					default_vec2 = ep.default_vec2,
-					default_vec3 = ep.default_vec3,
-					default_vec4 = ep.default_vec4,
-					default_str = ep.default_str != "" ? strings.clone(ep.default_str) : "",
+					name             = strings.clone(ep.name),
+					pin_type         = ep.pin_type,
+					is_array         = ep.is_array,
+					container_kind   = ep.container_kind,
+					custom_type_name = ep.custom_type_name != "" ? strings.clone(ep.custom_type_name) : "",
+					default_f32      = ep.default_f32,
+					default_int      = ep.default_int,
+					default_i64      = ep.default_i64,
+					default_bool     = ep.default_bool,
+					default_vec2     = ep.default_vec2,
+					default_vec3     = ep.default_vec3,
+					default_vec4     = ep.default_vec4,
+					default_str      = ep.default_str != "" ? strings.clone(ep.default_str) : "",
 				})
 			}
 		}
@@ -2653,34 +3023,38 @@ vg_add_node :: proc(g: ^Visual_Graph, kind: VG_Node_Kind, pos: [2]f32, custom_na
 		vname := custom_name != "" ? custom_name : (len(g.variables) > 0 ? g.variables[0].name : "phase")
 		vtype := hot.Hot_Pin_Type.Float
 		varr  := false
+		vck   := VG_Container_Kind.Single
 		vct   := ""
 		if vi := vg_find_var_index(g, vname); vi >= 0 {
 			vtype = g.variables[vi].pin_type
 			varr  = g.variables[vi].is_array
+			vck   = vg_resolve_container_kind(g.variables[vi])
 			vct   = g.variables[vi].custom_type_name
 		}
 		n.var_name   = strings.clone(vname)
 		n.var_as_ref = false
 		n.title      = strings.clone(fmt.tprintf("Get %s", vname))
-		append(&n.outputs, VG_Pin_Def{name = strings.clone("Value (Copy)"), pin_type = vtype, is_array = varr, custom_type_name = vct != "" ? strings.clone(vct) : "", pass_mode = .Copy_Value,   is_addressable = false})
-		append(&n.outputs, VG_Pin_Def{name = strings.clone("Ref (^Ptr)"),   pin_type = vtype, is_array = varr, custom_type_name = vct != "" ? strings.clone(vct) : "", pass_mode = .By_Reference, is_addressable = true})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Value (Copy)"), pin_type = vtype, is_array = varr || vck != .Single, container_kind = vck, custom_type_name = vct != "" ? strings.clone(vct) : "", pass_mode = .Copy_Value,   is_addressable = false})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Ref (^Ptr)"),   pin_type = vtype, is_array = varr || vck != .Single, container_kind = vck, custom_type_name = vct != "" ? strings.clone(vct) : "", pass_mode = .By_Reference, is_addressable = true})
 
 	case .Set_Variable:
 		vname := custom_name != "" ? custom_name : (len(g.variables) > 0 ? g.variables[0].name : "phase")
 		vtype := hot.Hot_Pin_Type.Float
 		varr  := false
+		vck   := VG_Container_Kind.Single
 		vct   := ""
 		if vi := vg_find_var_index(g, vname); vi >= 0 {
 			vtype = g.variables[vi].pin_type
 			varr  = g.variables[vi].is_array
+			vck   = vg_resolve_container_kind(g.variables[vi])
 			vct   = g.variables[vi].custom_type_name
 		}
 		n.var_name = strings.clone(vname)
 		n.title    = strings.clone(fmt.tprintf("Set %s", vname))
 		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Exec"),  pin_type = .Exec})
-		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Value"), pin_type = vtype, is_array = varr, custom_type_name = vct != "" ? strings.clone(vct) : "", pass_mode = .Copy_Value})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Value"), pin_type = vtype, is_array = varr || vck != .Single, container_kind = vck, custom_type_name = vct != "" ? strings.clone(vct) : "", pass_mode = .Copy_Value})
 		append(&n.outputs, VG_Pin_Def{name = strings.clone("Exec"),  pin_type = .Exec})
-		append(&n.outputs, VG_Pin_Def{name = strings.clone("Out"),   pin_type = vtype, is_array = varr, custom_type_name = vct != "" ? strings.clone(vct) : "", pass_mode = .Copy_Value})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Out"),   pin_type = vtype, is_array = varr || vck != .Single, container_kind = vck, custom_type_name = vct != "" ? strings.clone(vct) : "", pass_mode = .Copy_Value})
 
 	case .Get_Transform_Pos:
 		n.title = strings.clone("Transform Position")
@@ -3155,6 +3529,12 @@ vg_configure_array_op :: proc(g: ^Visual_Graph, n: ^VG_Node, mode: VG_Array_Op_M
 		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Exec"),  pin_type = .Exec})
 		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Index"), pin_type = .Int, default_int = 0})
 		append(&n.outputs, VG_Pin_Def{name = strings.clone("Exec"),  pin_type = .Exec})
+	case .Sub_Slice:
+		delete(ct2)
+		n.title = strings.clone(fmt.tprintf("Array Sub-Slice: %s", vname != "" ? vname : "arr"))
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("Start"), pin_type = .Int, default_int = 0})
+		append(&n.inputs,  VG_Pin_Def{name = strings.clone("End"),   pin_type = .Int, default_int = 1})
+		append(&n.outputs, VG_Pin_Def{name = strings.clone("Slice"), pin_type = elem_pt, custom_type_name = ct, is_array = true, container_kind = .Slice})
 	}
 }
 
@@ -3552,8 +3932,19 @@ vg_init_default_demo_graph :: proc(g: ^Visual_Graph, graph_name: string = "hover
 // its full visual node/wire layout inside a trailing `/* @BODIN_GRAPH_V1 ... @BODIN_GRAPH_END */`
 // block at the bottom! Legacy `.mhgraph` pure-JSON files remain 100% supported.
 
-BODIN_GRAPH_BEGIN :: "// @BODIN_GRAPH_V1"
-BODIN_GRAPH_END   :: "// @BODIN_GRAPH_END"
+BODIN_GENERATED_BEGIN :: "// @BODIN_GENERATED_BEGIN"
+BODIN_GENERATED_END   :: "// @BODIN_GENERATED_END"
+BODIN_GRAPH_BEGIN     :: "// @BODIN_GRAPH_V1"
+BODIN_GRAPH_END       :: "// @BODIN_GRAPH_END"
+
+// Extracts the user-owned Zone 1 Odin source above `// @BODIN_GENERATED_BEGIN` from a
+// `.bodin` buffer or file on disk so Blueprint bakes never clobber custom user Odin code.
+vg_extract_bodin_user_zone :: proc(raw_bodin: string, allocator := context.temp_allocator) -> (user_zone: string, has_zone: bool) {
+	if gen_i := strings.index(raw_bodin, BODIN_GENERATED_BEGIN); gen_i >= 0 {
+		return strings.clone(strings.trim_right_space(raw_bodin[:gen_i]), allocator), true
+	}
+	return "", false
+}
 
 vg_save_bodin_file :: proc(g: ^Visual_Graph, path: string, odin_source: string) -> bool {
 	json_bytes, err := json.marshal(g^, {pretty = true, use_spaces = true, spaces = 2}, context.temp_allocator)
@@ -3638,6 +4029,13 @@ vg_load_from_file :: proc(g: ^Visual_Graph, path: string) -> bool {
 	ok := json.unmarshal(payload, g) == nil
 	if ok {
 		vg_ensure_default_spaces(g)
+		for &v in g.variables {
+			if v.container_kind == .Single && v.is_array {
+				v.container_kind = v.array_is_bounded ? .Bounded_Array : .Fixed_Array
+			}
+			v.is_array = vg_resolve_container_kind(v) != .Single
+			v.array_is_bounded = v.container_kind == .Bounded_Array
+		}
 		// Sanitize legacy unbaked Unicode prefixes (`"◇ "`, `"▷ "`) from saved `.bodin` / `.mhgraph` pin names
 		// using the exact same `context.allocator` that `json.unmarshal` & `vg_destroy_graph` use!
 		for &nd in g.nodes {
@@ -3730,6 +4128,7 @@ _slot_write_to_ptr :: proc(dst: rawptr, pt: hot.Hot_Pin_Type, val: ^hot.Hot_Slot
 	case .Entity:     (cast(^hot.Hot_Entity)dst)^ = hot.slot_read_entity(val)
 	case .Delegate:   (cast(^hot.Hot_Delegate)dst)^ = hot.slot_read_delegate(val)
 	case .String, .Asset: (cast(^cstring)dst)^    = hot.slot_read_cstr(val)
+	case .Raw_Ptr:    (cast(^rawptr)dst)^         = hot.slot_read_rawptr(val)
 	case .Struct_Val:
 		nbytes := clamp(copy_bytes > 0 ? copy_bytes : int(val.val_byte_len), 0, hot.HOT_MAX_STRUCT_BYTES)
 		if nbytes > 0 {
@@ -3765,6 +4164,7 @@ _slot_read_from_ptr :: proc(src: rawptr, pt: hot.Hot_Pin_Type, by_ref: bool = fa
 	case .Entity:     out.val_ent      = (cast(^hot.Hot_Entity)src)^
 	case .Delegate:   out.val_delegate = (cast(^hot.Hot_Delegate)src)^
 	case .String, .Asset: out.val_cstr = (cast(^cstring)src)^
+	case .Raw_Ptr:    out.val_ptr      = (cast(^rawptr)src)^
 	case .Struct_Val:
 		nbytes := clamp(copy_bytes > 0 ? copy_bytes : hot.HOT_MAX_STRUCT_BYTES, 0, hot.HOT_MAX_STRUCT_BYTES)
 		out.val_byte_len = u8(nbytes)
@@ -3777,6 +4177,17 @@ _slot_read_from_ptr :: proc(src: rawptr, pt: hot.Hot_Pin_Type, by_ref: bool = fa
 
 _cast_hot_slot :: proc(in_s: hot.Hot_Slot, target_pt: hot.Hot_Pin_Type) -> hot.Hot_Slot {
 	s := in_s
+	if target_pt == .Raw_Ptr {
+		ptr := s.pass_mode == .By_Reference && s.ref_ptr != nil && s.pin_type != .Raw_Ptr ? s.ref_ptr : hot.slot_read_rawptr(&s)
+		return {pin_type = .Raw_Ptr, pass_mode = .Copy_Value, val_ptr = ptr}
+	}
+	if s.pin_type == .Raw_Ptr && target_pt != .Raw_Ptr {
+		p := hot.slot_read_rawptr(&s)
+		if pok, _ := hot.validate_raw_ptr(p, 1); pok {
+			return _slot_read_from_ptr(p, target_pt, false, hot.HOT_MAX_STRUCT_BYTES)
+		}
+		return {pin_type = target_pt, pass_mode = .Copy_Value}
+	}
 	out := hot.Hot_Slot{pin_type = target_pt, pass_mode = .Copy_Value}
 	#partial switch target_pt {
 	case .Bool:  out.val_bool = hot.slot_read_bool(&s)
@@ -3821,21 +4232,9 @@ _vg_get_var_blob :: proc(g: ^Visual_Graph, bb: ^VG_Runtime_Blackboard, var_name:
 	if vi < 0 || vi >= len(g.variables) do return {}, nil, false
 	v = g.variables[vi]
 	needed := vg_var_byte_size(g, v)
-	if bb.var_blobs == nil {
-		context.allocator = runtime.default_allocator()
-		bb.var_blobs = make(map[string][dynamic]u8, 4)
-	}
-	b, has := bb.var_blobs[v.name]
-	if !has {
-		context.allocator = runtime.default_allocator()
-		b = make([dynamic]u8, needed, runtime.default_allocator())
-		bb.var_blobs[strings.clone(v.name, runtime.default_allocator())] = b
-	} else if len(b) < needed {
-		context.allocator = runtime.default_allocator()
-		resize(&b, needed)
-		bb.var_blobs[v.name] = b
-	}
-	return v, b[:], true
+	payload := _vg_ensure_canary_blob_bb(bb, v.name, needed)
+	if len(payload) == 0 do return {}, nil, false
+	return v, payload, true
 }
 
 vg_sync_blackboard :: proc(g: ^Visual_Graph, bb: ^VG_Runtime_Blackboard) {
@@ -3868,7 +4267,15 @@ vg_sync_blackboard :: proc(g: ^Visual_Graph, bb: ^VG_Runtime_Blackboard) {
 			val_quat  = v.pin_type == .Quat ? {0, 0, 0, 1} : v.default_vec4,
 			val_cstr  = cstring(&bb.str_bufs[i][0]),
 		}
-		if v.is_array || v.pin_type == .Struct_Val {
+		ck := vg_resolve_container_kind(v)
+		if ck == .Slice || ck == .Dynamic_Array {
+			if v.pin_type == .Float {
+				_ = _vg_ensure_f32_seq_bb(g, bb, v.name)
+			} else {
+				esz, eal := vg_scalar_type_size(g, v.pin_type, v.custom_type_name)
+				_ = _vg_ensure_seq_bb(g, bb, v.name, esz, eal)
+			}
+		} else if ck != .Single || v.pin_type == .Struct_Val {
 			_, _, _ = _vg_get_var_blob(g, bb, v.name)
 		}
 	}
@@ -3994,23 +4401,54 @@ _eval_pure_pin :: proc(
 			vdecl := g.variables[vi]
 			s := bb.slots[vi]
 			var_ptr := _bb_slot_value_ptr(bb, vi, vdecl.pin_type)
-			if vdecl.is_array || vdecl.pin_type == .Struct_Val {
-				_, blob, bok := _vg_get_var_blob(g, bb, vdecl.name)
-				if bok && len(blob) > 0 {
-					var_ptr = rawptr(&blob[0])
-					if vdecl.pin_type == .Struct_Val {
-						nc := min(len(blob), hot.HOT_MAX_STRUCT_BYTES)
-						s.val_byte_len = u8(nc)
-						runtime.mem_copy(&s.val_bytes[0], &blob[0], nc)
+			ck := vg_resolve_container_kind(vdecl)
+			if ck == .Slice || ck == .Dynamic_Array {
+				if vdecl.pin_type == .Float {
+					seq := _vg_ensure_f32_seq_bb(g, bb, vdecl.name)
+					if seq != nil {
+						s.ref_ptr   = rawptr(raw_data(seq^))
+						s.slice_len = i32(len(seq^))
+						s.slice_cap = i32(cap(seq^))
+						var_ptr     = s.ref_ptr
+					}
+				} else {
+					esz, eal := vg_scalar_type_size(g, vdecl.pin_type, vdecl.custom_type_name)
+					seq_e := _vg_ensure_seq_bb(g, bb, vdecl.name, esz, eal)
+					if seq_e != nil {
+						s.ref_ptr   = seq_e.data
+						s.slice_len = i32(seq_e.length)
+						s.slice_cap = i32(seq_e.capacity)
+						var_ptr     = s.ref_ptr
 					}
 				}
-			}
-			if out_pin_idx == 1 {
-				s.pass_mode = .By_Reference
-				s.ref_ptr   = var_ptr
+				s.pass_mode = out_pin_idx == 1 ? .By_Reference : .Copy_Value
 			} else {
-				s.pass_mode = .Copy_Value
-				s.ref_ptr   = nil
+				if vdecl.is_array || vdecl.pin_type == .Struct_Val {
+					_, blob, bok := _vg_get_var_blob(g, bb, vdecl.name)
+					if bok && len(blob) > 0 {
+						var_ptr = rawptr(&blob[0])
+						if vdecl.is_array {
+							cnt := vdecl.array_count > 0 ? vdecl.array_count : 8
+							if vdecl.array_is_bounded {
+								coff := vg_bounded_array_count_offset(g, vdecl)
+								if coff + 4 <= len(blob) do cnt = clamp(int((cast(^i32)&blob[coff])^), 0, cnt)
+							}
+							s.slice_len = i32(cnt)
+						}
+						if vdecl.pin_type == .Struct_Val {
+							nc := min(len(blob), hot.HOT_MAX_STRUCT_BYTES)
+							s.val_byte_len = u8(nc)
+							runtime.mem_copy(&s.val_bytes[0], &blob[0], nc)
+						}
+					}
+				}
+				if out_pin_idx == 1 {
+					s.pass_mode = .By_Reference
+					s.ref_ptr   = var_ptr
+				} else {
+					s.pass_mode = .Copy_Value
+					s.ref_ptr   = ck == .Fixed_Array ? var_ptr : nil
+				}
 			}
 			res = s
 		}
@@ -4096,27 +4534,74 @@ _eval_pure_pin :: proc(
 		}
 
 	case .Array_Op:
-		mode := VG_Array_Op_Mode(clamp(n.sub_op, 0, int(VG_Array_Op_Mode.Swap_Remove)))
-		if mode == .Get_Copy || mode == .Get_Ref || mode == .Len {
-			v, blob, bok := _vg_get_var_blob(g, bb, n.target_var_or_type)
-			if bok && len(blob) > 0 {
-				cnt := v.array_count > 0 ? v.array_count : 8
-				cur_len := cnt
-				if v.array_is_bounded {
-					coff := vg_bounded_array_count_offset(g, v)
-					if coff + 4 <= len(blob) {
-						cur_len = clamp(int((cast(^i32)&blob[coff])^), 0, cnt)
+		mode := VG_Array_Op_Mode(clamp(n.sub_op, 0, int(VG_Array_Op_Mode.Sub_Slice)))
+		if mode == .Get_Copy || mode == .Get_Ref || mode == .Len || mode == .Sub_Slice {
+			vi := vg_find_var_index(g, n.target_var_or_type)
+			if vi >= 0 {
+				vd := g.variables[vi]
+				v_ck := vg_resolve_container_kind(vd)
+				if vd.pin_type == .Float && (v_ck == .Slice || v_ck == .Dynamic_Array) {
+					seq := _vg_ensure_f32_seq_bb(g, bb, n.target_var_or_type)
+					if seq != nil {
+						if mode == .Len {
+							res = {pin_type = .Int, val_int = i32(len(seq^))}
+						} else if mode == .Sub_Slice {
+							s0 := _eval_node_input(g, bb, tH, raw_dt, n, 0, depth + 1)
+							s1 := _eval_node_input(g, bb, tH, raw_dt, n, 1, depth + 1)
+							lo := clamp(int(hot.slot_read_int(&s0)), 0, len(seq^))
+							hi := clamp(int(hot.slot_read_int(&s1)), lo, len(seq^))
+							res = {pin_type = .Float, ref_ptr = (hi > lo) ? rawptr(&seq^[lo]) : nil, slice_len = i32(hi - lo), slice_cap = -1}
+						} else if len(seq^) > 0 {
+							idx_s := _eval_node_input(g, bb, tH, raw_dt, n, 0, depth + 1)
+							idx := clamp(int(hot.slot_read_int(&idx_s)), 0, len(seq^) - 1)
+							if mode == .Get_Ref {
+								res = {pin_type = .Float, pass_mode = .By_Reference, ref_ptr = rawptr(&seq^[idx])}
+							} else {
+								res = {pin_type = .Float, val_f32 = seq^[idx]}
+							}
+						}
 					}
-				}
-				if mode == .Len {
-					res = {pin_type = .Int, val_int = i32(cur_len)}
-				} else {
-					idx_s := _eval_node_input(g, bb, tH, raw_dt, n, 0, depth + 1)
-					idx := int(hot.slot_read_int(&idx_s))
+				} else if v_ck == .Slice || v_ck == .Dynamic_Array {
+					esz, eal := vg_scalar_type_size(g, vd.pin_type, vd.custom_type_name)
+					seq_e := _vg_ensure_seq_bb(g, bb, n.target_var_or_type, esz, eal)
+					if seq_e != nil {
+						if mode == .Len {
+							res = {pin_type = .Int, val_int = i32(seq_e.length)}
+						} else if mode == .Sub_Slice {
+							s0 := _eval_node_input(g, bb, tH, raw_dt, n, 0, depth + 1)
+							s1 := _eval_node_input(g, bb, tH, raw_dt, n, 1, depth + 1)
+							lo := clamp(int(hot.slot_read_int(&s0)), 0, seq_e.length)
+							hi := clamp(int(hot.slot_read_int(&s1)), lo, seq_e.length)
+							res = {pin_type = vd.pin_type, ref_ptr = (hi > lo) ? _vg_raw_seq_elem_ptr(seq_e, lo) : nil, slice_len = i32(hi - lo), slice_cap = -1}
+						} else if seq_e.length > 0 {
+							idx_s := _eval_node_input(g, bb, tH, raw_dt, n, 0, depth + 1)
+							idx := clamp(int(hot.slot_read_int(&idx_s)), 0, seq_e.length - 1)
+							eptr := _vg_raw_seq_elem_ptr(seq_e, idx)
+							res = _slot_read_from_ptr(eptr, vd.pin_type, mode == .Get_Ref, seq_e.elem_size)
+						}
+					}
+				} else if v, blob, bok := _vg_get_var_blob(g, bb, n.target_var_or_type); bok && len(blob) > 0 {
+					cnt := v.array_count > 0 ? v.array_count : 8
+					cur_len := cnt
+					if v.array_is_bounded {
+						coff := vg_bounded_array_count_offset(g, v)
+						if coff + 4 <= len(blob) {
+							cur_len = clamp(int((cast(^i32)&blob[coff])^), 0, cnt)
+						}
+					}
 					elem_sz, _ := vg_scalar_type_size(g, v.pin_type, v.custom_type_name)
 					elem_sz = max(elem_sz, 1)
-					if cur_len > 0 {
-						idx = clamp(idx, 0, cur_len - 1)
+					if mode == .Len {
+						res = {pin_type = .Int, val_int = i32(cur_len)}
+					} else if mode == .Sub_Slice {
+						s0 := _eval_node_input(g, bb, tH, raw_dt, n, 0, depth + 1)
+						s1 := _eval_node_input(g, bb, tH, raw_dt, n, 1, depth + 1)
+						lo := clamp(int(hot.slot_read_int(&s0)), 0, cur_len)
+						hi := clamp(int(hot.slot_read_int(&s1)), lo, cur_len)
+						res = {pin_type = v.pin_type, ref_ptr = (hi > lo) ? rawptr(&blob[lo * elem_sz]) : nil, slice_len = i32(hi - lo), slice_cap = -1}
+					} else if cur_len > 0 {
+						idx_s := _eval_node_input(g, bb, tH, raw_dt, n, 0, depth + 1)
+						idx := clamp(int(hot.slot_read_int(&idx_s)), 0, cur_len - 1)
 						eptr := rawptr(&blob[idx * elem_sz])
 						res = _slot_read_from_ptr(eptr, v.pin_type, mode == .Get_Ref, elem_sz)
 					}
@@ -4285,7 +4770,7 @@ _eval_node_input :: proc(
 	for wire in g.wires {
 		if wire.to_uid == dst_node.uid && wire.to_pin == in_pin_idx {
 			val := _eval_pure_pin(g, bb, tH, raw_dt, wire.from_uid, wire.from_pin, depth)
-			if pdef.pass_mode == .Copy_Value && val.pass_mode == .By_Reference && val.ref_ptr != nil {
+			if vg_pin_container_kind(pdef) == .Single && pdef.pass_mode == .Copy_Value && val.pass_mode == .By_Reference && val.ref_ptr != nil {
 				val = _slot_read_from_ptr(val.ref_ptr, val.pin_type, false, int(val.val_byte_len))
 			}
 			return val
@@ -4402,7 +4887,21 @@ _eval_exec_chain_from_uid :: proc(g: ^Visual_Graph, bb: ^VG_Runtime_Blackboard, 
 				if vi >= 0 && vi < VG_MAX_VARS {
 					in_val := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
 					vdecl := g.variables[vi]
-					if vdecl.is_array || vdecl.pin_type == .Struct_Val {
+					v_ck := vg_resolve_container_kind(vdecl)
+					if v_ck == .Slice || v_ck == .Dynamic_Array {
+						if vdecl.pin_type == .Float {
+							seq := _vg_ensure_f32_seq_bb(g, bb, vdecl.name)
+							if seq != nil && in_val.slice_len >= 0 {
+								visual_script_sync_entity_var_f32_seq(tH, vdecl.name, (^f32)(in_val.ref_ptr), in_val.slice_len, -1)
+							}
+						} else {
+							esz, eal := vg_scalar_type_size(g, vdecl.pin_type, vdecl.custom_type_name)
+							_ = _vg_ensure_seq_bb(g, bb, vdecl.name, esz, eal)
+							if in_val.slice_len >= 0 {
+								visual_script_sync_entity_var_seq(tH, vdecl.name, in_val.ref_ptr, i32(esz), i32(eal), in_val.slice_len, -1)
+							}
+						}
+					} else if vdecl.is_array || vdecl.pin_type == .Struct_Val {
 						_, blob, bok := _vg_get_var_blob(g, bb, vdecl.name)
 						if bok && len(blob) > 0 {
 							if vdecl.pin_type == .Struct_Val {
@@ -4497,9 +4996,96 @@ _eval_exec_chain_from_uid :: proc(g: ^Visual_Graph, bb: ^VG_Runtime_Blackboard, 
 				}
 
 			case .Array_Op:
-				mode := VG_Array_Op_Mode(clamp(n.sub_op, 0, int(VG_Array_Op_Mode.Swap_Remove)))
-				v, blob, bok := _vg_get_var_blob(g, bb, n.target_var_or_type)
-				if bok && len(blob) > 0 {
+				mode := VG_Array_Op_Mode(clamp(n.sub_op, 0, int(VG_Array_Op_Mode.Sub_Slice)))
+				vi := vg_find_var_index(g, n.target_var_or_type)
+				v_ck := (vi >= 0) ? vg_resolve_container_kind(g.variables[vi]) : .Single
+				if vi >= 0 && g.variables[vi].pin_type == .Float && (v_ck == .Slice || v_ck == .Dynamic_Array) {
+					seq := _vg_ensure_f32_seq_bb(g, bb, n.target_var_or_type)
+					if seq != nil {
+						switch mode {
+						case .Set_Elem:
+							idx_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
+							val_s := _eval_node_input(g, bb, tH, raw_dt, n, 2, 0)
+							idx := int(hot.slot_read_int(&idx_s))
+							if idx >= 0 && idx < len(seq^) {
+								seq^[idx] = hot.slot_read_f32(&val_s)
+							}
+						case .Append:
+							val_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
+							context.allocator = runtime.default_allocator()
+							append(seq, hot.slot_read_f32(&val_s))
+							_bb_set_live_pin(bb, cur_uid, 1, {pin_type = .Bool, val_bool = true})
+						case .Pop:
+							if len(seq^) > 0 {
+								val := seq^[len(seq^) - 1]
+								resize(seq, len(seq^) - 1)
+								_bb_set_live_pin(bb, cur_uid, 1, {pin_type = .Float, val_f32 = val})
+								_bb_set_live_pin(bb, cur_uid, 2, {pin_type = .Bool, val_bool = true})
+							} else {
+								_bb_set_live_pin(bb, cur_uid, 1, {pin_type = .Float})
+								_bb_set_live_pin(bb, cur_uid, 2, {pin_type = .Bool, val_bool = false})
+							}
+						case .Clear:
+							clear(seq)
+						case .Swap_Remove:
+							idx_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
+							idx := int(hot.slot_read_int(&idx_s))
+							if idx >= 0 && idx < len(seq^) {
+								unordered_remove(seq, idx)
+							}
+						case .Get_Copy, .Get_Ref, .Len, .Sub_Slice:
+						}
+					}
+				} else if vi >= 0 && (v_ck == .Slice || v_ck == .Dynamic_Array) {
+					vd := g.variables[vi]
+					esz, eal := vg_scalar_type_size(g, vd.pin_type, vd.custom_type_name)
+					seq_e := _vg_ensure_seq_bb(g, bb, n.target_var_or_type, esz, eal)
+					if seq_e != nil {
+						switch mode {
+						case .Set_Elem:
+							idx_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
+							val_s := _eval_node_input(g, bb, tH, raw_dt, n, 2, 0)
+							idx   := int(hot.slot_read_int(&idx_s))
+							if eptr := _vg_raw_seq_elem_ptr(seq_e, idx); eptr != nil {
+								_slot_write_to_ptr(eptr, vd.pin_type, &val_s, seq_e.elem_size)
+							}
+						case .Append:
+							val_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
+							tmp_el: [hot.HOT_MAX_STRUCT_BYTES]u8
+							_slot_write_to_ptr(&tmp_el[0], vd.pin_type, &val_s, min(seq_e.elem_size, hot.HOT_MAX_STRUCT_BYTES))
+							ok_app := _vg_raw_seq_append(seq_e, &tmp_el[0])
+							_bb_set_live_pin(bb, cur_uid, 1, {pin_type = .Bool, val_bool = ok_app})
+						case .Pop:
+							if seq_e.length > 0 {
+								seq_e.length -= 1
+								eptr := rawptr(uintptr(seq_e.data) + uintptr(seq_e.length * max(seq_e.elem_size, 1)))
+								out_v := _slot_read_from_ptr(eptr, vd.pin_type, false, seq_e.elem_size)
+								_bb_set_live_pin(bb, cur_uid, 1, out_v)
+								_bb_set_live_pin(bb, cur_uid, 2, {pin_type = .Bool, val_bool = true})
+							} else {
+								_bb_set_live_pin(bb, cur_uid, 1, {pin_type = vd.pin_type})
+								_bb_set_live_pin(bb, cur_uid, 2, {pin_type = .Bool, val_bool = false})
+							}
+						case .Clear:
+							seq_e.length = 0
+						case .Swap_Remove:
+							idx_s := _eval_node_input(g, bb, tH, raw_dt, n, 1, 0)
+							idx   := int(hot.slot_read_int(&idx_s))
+							if idx >= 0 && idx < seq_e.length {
+								last := seq_e.length - 1
+								if idx != last {
+									dst_p := _vg_raw_seq_elem_ptr(seq_e, idx)
+									src_p := _vg_raw_seq_elem_ptr(seq_e, last)
+									if dst_p != nil && src_p != nil {
+										mem.copy(dst_p, src_p, max(seq_e.elem_size, 1))
+									}
+								}
+								seq_e.length -= 1
+							}
+						case .Get_Copy, .Get_Ref, .Len, .Sub_Slice:
+						}
+					}
+				} else if v, blob, bok := _vg_get_var_blob(g, bb, n.target_var_or_type); bok && len(blob) > 0 {
 					cap_len := v.array_count > 0 ? v.array_count : 8
 					elem_sz, _ := vg_scalar_type_size(g, v.pin_type, v.custom_type_name)
 					elem_sz = max(elem_sz, 1)
@@ -4552,7 +5138,7 @@ _eval_exec_chain_from_uid :: proc(g: ^Visual_Graph, bb: ^VG_Runtime_Blackboard, 
 							}
 							(cast(^i32)&blob[coff])^ = i32(last)
 						}
-					case .Get_Copy, .Get_Ref, .Len:
+					case .Get_Copy, .Get_Ref, .Len, .Sub_Slice:
 					}
 				}
 
@@ -4608,8 +5194,71 @@ _eval_exec_chain_from_uid :: proc(g: ^Visual_Graph, bb: ^VG_Runtime_Blackboard, 
 						}
 					}
 				case .For_In_Value, .For_In_Ref:
-					v, blob, bok := _vg_get_var_blob(g, bb, n.target_var_or_type)
-					if bok && len(blob) > 0 {
+					vi_for := vg_find_var_index(g, n.target_var_or_type)
+					for_ck := (vi_for >= 0) ? vg_resolve_container_kind(g.variables[vi_for]) : .Single
+					if vi_for >= 0 && g.variables[vi_for].pin_type == .Float && (for_ck == .Slice || for_ck == .Dynamic_Array) {
+						seq := _vg_ensure_f32_seq_bb(g, bb, n.target_var_or_type)
+						if seq != nil && len(seq^) > 0 {
+							if loop_slot >= 0 do bb.loop_indices[loop_slot].elem_pin_type = .Float
+							cnt := len(seq^)
+							idx := n.loop_reverse ? (cnt - 1) : 0
+							step := n.loop_reverse ? -1 : 1
+							for (n.loop_reverse ? (idx >= 0) : (idx < cnt)) {
+								iters += 1
+								if iters > VG_MAX_LOOP_ITERATIONS {
+									visual_script_report_loop_fuse(tH, u32(cur_uid))
+									break
+								}
+								if loop_slot >= 0 {
+									bb.loop_indices[loop_slot].cur_idx  = i32(idx)
+									bb.loop_indices[loop_slot].elem_ptr = rawptr(&seq^[idx])
+								}
+								if body_uid != 0 {
+									bb.loop_continue_requested = false
+									_eval_exec_chain_from_uid(g, bb, tH, raw_dt, body_uid, call_depth + 1)
+									if bb.loop_break_requested {
+										bb.loop_break_requested = false
+										break
+									}
+									bb.loop_continue_requested = false
+								}
+								cnt = len(seq^)
+								idx += step
+							}
+						}
+					} else if vi_for >= 0 && (for_ck == .Slice || for_ck == .Dynamic_Array) {
+						vd := g.variables[vi_for]
+						esz, eal := vg_scalar_type_size(g, vd.pin_type, vd.custom_type_name)
+						seq_e := _vg_ensure_seq_bb(g, bb, n.target_var_or_type, esz, eal)
+						if seq_e != nil && seq_e.length > 0 {
+							if loop_slot >= 0 do bb.loop_indices[loop_slot].elem_pin_type = vd.pin_type
+							cnt := seq_e.length
+							idx := n.loop_reverse ? (cnt - 1) : 0
+							step := n.loop_reverse ? -1 : 1
+							for (n.loop_reverse ? (idx >= 0) : (idx < cnt)) {
+								iters += 1
+								if iters > VG_MAX_LOOP_ITERATIONS {
+									visual_script_report_loop_fuse(tH, u32(cur_uid))
+									break
+								}
+								if loop_slot >= 0 {
+									bb.loop_indices[loop_slot].cur_idx  = i32(idx)
+									bb.loop_indices[loop_slot].elem_ptr = _vg_raw_seq_elem_ptr(seq_e, idx)
+								}
+								if body_uid != 0 {
+									bb.loop_continue_requested = false
+									_eval_exec_chain_from_uid(g, bb, tH, raw_dt, body_uid, call_depth + 1)
+									if bb.loop_break_requested {
+										bb.loop_break_requested = false
+										break
+									}
+									bb.loop_continue_requested = false
+								}
+								cnt = seq_e.length
+								idx += step
+							}
+						}
+					} else if v, blob, bok := _vg_get_var_blob(g, bb, n.target_var_or_type); bok && len(blob) > 0 {
 						cap_len := v.array_count > 0 ? v.array_count : 8
 						cnt := cap_len
 						if v.array_is_bounded {

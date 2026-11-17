@@ -94,6 +94,57 @@ ghost_icon_button :: proc(
 	return
 }
 
+// Composite Roboto + Phosphor font handle populated at startup by `editor_fonts_init`.
+phosphor_font: ^im.Font
+
+// Pushes the Phosphor Regular composite font so `icons.ICON_PH_*` glyphs render cleanly.
+// Always pair with `pop_phosphor_font()`.
+push_phosphor_font :: proc(size: f32 = 0) {
+	if phosphor_font != nil {
+		px := size > 0 ? size : im.GetStyle().FontSizeBase
+		im.PushFontFloat(phosphor_font, px)
+	}
+}
+
+// Pops the Phosphor Regular composite font pushed by `push_phosphor_font`.
+pop_phosphor_font :: proc() {
+	if phosphor_font != nil {
+		im.PopFont()
+	}
+}
+
+// Square button rendering an `icons.ICON_PH_*` Phosphor icon glyph.
+phosphor_icon_button :: proc(
+	glyph: cstring,
+	id: cstring,
+	tooltip: cstring = "",
+	active := false,
+	size: f32 = 0,
+	active_color := im.Vec4{},
+	loc := #caller_location,
+) -> (clicked: bool) {
+	push_phosphor_font()
+	clicked = icon_button(glyph, id, tooltip, active, size, active_color, loc)
+	pop_phosphor_font()
+	return
+}
+
+// Transparent-at-rest square button rendering an `icons.ICON_PH_*` Phosphor icon glyph.
+phosphor_ghost_icon_button :: proc(
+	glyph: cstring,
+	id: cstring,
+	tooltip: cstring = "",
+	active := false,
+	size: f32 = 0,
+	active_color := im.Vec4{},
+	loc := #caller_location,
+) -> (clicked: bool) {
+	push_phosphor_font()
+	clicked = ghost_icon_button(glyph, id, tooltip, active, size, active_color, loc)
+	pop_phosphor_font()
+	return
+}
+
 // Clickable asset/object slot button paired with an optional inline picker trigger.
 object_field_button :: proc(
 	id: cstring,

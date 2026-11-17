@@ -36,6 +36,22 @@ Hot_Proc_Entry :: struct {
 	active_fn:   hot.Hot_Proc_Fn,
 	hot_gen:     int, // 0 = static binary proc, >= 1 = hot-swapped cartridge generation
 	source_file: string,
+	faulted:     bool,
+}
+
+Hot_Sandbox_Fault_Report :: struct {
+	has_fault: bool,
+	proc_name: string,
+	reason:    string,
+	file:      string,
+	line:      i32,
+	entity:    Transform_Handle,
+	code:      u32,
+}
+
+Sandbox_File_Override :: struct {
+	rel_hot_name: string, // Filename inside `hot_scripts/` (e.g. `my_script_mhgraph_generated.odin`)
+	content:      string,
 }
 
 @(private = "file")
@@ -53,6 +69,9 @@ _Hot_Registry :: struct {
 	last_swap_ms:        f32,
 	last_message:        string,
 	last_stderr:         string,
+	last_fault:          Hot_Sandbox_Fault_Report,
+	sandbox_active_mode: bool,
+	quarantined:         bool, // Armed after Watchdog crash recovery until explicit user Re-Arm or F7
 
 	// Single-flight async `mh hot` compiler child process (hidden on Windows via `CREATE_NO_WINDOW`)
 	build_pending:       bool,
@@ -474,6 +493,45 @@ _cb_csg_stamp_brush :: proc "c" (world_pos: [3]f32, radius: f32, impulse: f32, c
 	return visual_script_csg_stamp_runtime(world_pos, radius, impulse, cut_mat_str != nil ? string(cut_mat_str) : "")
 }
 
+@(private = "file")
+_cb_report_sandbox_fault :: proc "c" (msg, file, proc_name: cstring, line: i32) {
+	crash_journal.sandbox_record_assertion_fault(msg, file, proc_name, line)
+}
+
+@(private = "file")
+_cb_var_f32_seq_ptr :: proc "c" (self: hot.Hot_Entity, var_name: cstring, out_len: ^i32, out_cap: ^i32) -> ^f32 {
+	context = _hot_restore_ctx()
+	name := var_name != nil ? string(var_name) : ""
+	p, l, c := visual_script_get_entity_var_f32_seq_ptr(hot_entity_to_transform(self), name)
+	if out_len != nil do out_len^ = l
+	if out_cap != nil do out_cap^ = c
+	return p
+}
+
+@(private = "file")
+_cb_var_f32_seq_sync :: proc "c" (self: hot.Hot_Entity, var_name: cstring, data: ^f32, length: i32, capacity: i32) {
+	context = _hot_restore_ctx()
+	name := var_name != nil ? string(var_name) : ""
+	visual_script_sync_entity_var_f32_seq(hot_entity_to_transform(self), name, data, length, capacity)
+}
+
+@(private = "file")
+_cb_var_seq_ptr :: proc "c" (self: hot.Hot_Entity, var_name: cstring, elem_size, elem_align: i32, out_len, out_cap: ^i32) -> rawptr {
+	context = _hot_restore_ctx()
+	name := var_name != nil ? string(var_name) : ""
+	p, l, c := visual_script_get_entity_var_seq_ptr(hot_entity_to_transform(self), name, elem_size, elem_align)
+	if out_len != nil do out_len^ = l
+	if out_cap != nil do out_cap^ = c
+	return p
+}
+
+@(private = "file")
+_cb_var_seq_sync :: proc "c" (self: hot.Hot_Entity, var_name: cstring, data: rawptr, elem_size, elem_align, length, capacity: i32) {
+	context = _hot_restore_ctx()
+	name := var_name != nil ? string(var_name) : ""
+	visual_script_sync_entity_var_seq(hot_entity_to_transform(self), name, data, elem_size, elem_align, length, capacity)
+}
+
 // Best-effort sweep of stale `hot_cartridge_<N>.*` files from previous crashed/closed runs.
 // Leaves `hot_cartridge_latest.*` untouched and ignores locked DLLs in active sessions.
 @(private = "file")
@@ -570,6 +628,13 @@ _ensure_hot_init :: proc() {
 		anim_set_ik_target        = _cb_anim_set_ik_target,
 		csg_stamp_brush           = _cb_csg_stamp_brush,
 		get_unscaled_dt           = _cb_get_unscaled_dt,
+		host_allocator            = runtime.default_allocator(),
+		host_temp_allocator       = context.temp_allocator,
+		report_sandbox_fault      = _cb_report_sandbox_fault,
+		var_f32_seq_ptr           = _cb_var_f32_seq_ptr,
+		var_f32_seq_sync          = _cb_var_f32_seq_sync,
+		var_seq_ptr               = _cb_var_seq_ptr,
+		var_seq_sync              = _cb_var_seq_sync,
 	}
 	if !_hot_reg.sig_defaults_seeded {
 		_hot_reg.sig_defaults_seeded = true
@@ -756,22 +821,141 @@ hot_proc_slot_index :: proc(name: string, reserve_if_missing: bool = true) -> i3
 	return i32(idx)
 }
 
-// Direct O(1) (`~1.5 ns`) invocation by immortal `slot_idx` — survives `F7` DLL hot-swaps!
-hot_proc_invoke_slot :: proc(slot_idx: i32, self_tH: Transform_Handle, dt: f32, frame: ^hot.Hot_Call_Frame) -> bool {
-	_ensure_hot_init()
-	if slot_idx < 0 || int(slot_idx) >= len(_hot_reg.entries) do return false
-	fn := _hot_reg.entries[slot_idx].active_fn
-	if fn == nil do return false
+@(private = "file")
+_Hot_Call_Thunk :: struct {
+	fn:    hot.Hot_Proc_Fn,
+	api:   ^hot.Engine_Hot_API,
+	self:  hot.Hot_Entity,
+	dt:    f32,
+	frame: ^hot.Hot_Call_Frame,
+}
+
+@(private = "file")
+_hot_call_thunk_proc :: proc "c" (arg: rawptr) {
+	t := (^_Hot_Call_Thunk)(arg)
+	t.fn(t.api, t.self, t.dt, t.frame)
+}
+
+@(private = "file")
+_invoke_entry_sandboxed :: proc(idx: int, self_tH: Transform_Handle, dt: f32, frame: ^hot.Hot_Call_Frame) -> bool {
+	if _hot_reg.quarantined do return false
+	if idx < 0 || idx >= len(_hot_reg.entries) do return false
+	entry := &_hot_reg.entries[idx]
+	if entry.faulted || entry.active_fn == nil do return false
 
 	prev_ctx := _hot_active_user_ctx
 	_hot_active_user_ctx = context.user_ptr
-	_hot_api_table.host_world = ctx_world()
+	_hot_api_table.host_world          = ctx_world()
+	_hot_api_table.host_allocator      = runtime.default_allocator()
+	_hot_api_table.host_temp_allocator = context.temp_allocator
 	defer _hot_active_user_ctx = prev_ctx
+
+	// Snapshot finite Transform state before invoking native script so NaN/Inf explosions repair cleanly.
+	pre_pos   := [3]f32{}
+	pre_rot   := QUAT_IDENTITY
+	pre_scale := [3]f32{1, 1, 1}
+	if w := ctx_world(); w != nil && pool_valid(&w.transforms, Handle(self_tH)) {
+		if t := pool_get(&w.transforms, Handle(self_tH)); t != nil {
+			pre_pos   = t.position
+			pre_rot   = t.rotation
+			pre_scale = t.scale
+		}
+	}
 
 	local_frame: hot.Hot_Call_Frame
 	f_ptr := frame != nil ? frame : &local_frame
-	fn(&_hot_api_table, transform_to_hot_entity(self_tH), dt, f_ptr)
+	thunk := _Hot_Call_Thunk{
+		fn    = entry.active_fn,
+		api   = &_hot_api_table,
+		self  = transform_to_hot_entity(self_tH),
+		dt    = dt,
+		frame = f_ptr,
+	}
+	fault, ok := crash_journal.sandbox_exec(_hot_call_thunk_proc, &thunk)
+	if !ok {
+		entry.faulted = true
+		reason := crash_journal.sandbox_fault_reason(&fault)
+		ffile  := crash_journal.sandbox_fault_file(&fault)
+		fproc  := crash_journal.sandbox_fault_proc(&fault)
+		if reason == "" do reason = "Unhandled runtime exception inside hot cartridge"
+		if ffile == ""  do ffile  = entry.source_file
+
+		context.allocator = runtime.default_allocator()
+		_free_last_sandbox_fault()
+		_hot_reg.last_fault = Hot_Sandbox_Fault_Report{
+			has_fault = true,
+			proc_name = strings.clone(fproc != "" ? fproc : entry.name),
+			reason    = strings.clone(reason),
+			file      = strings.clone(ffile),
+			line      = fault.line,
+			entity    = self_tH,
+			code      = fault.code,
+		}
+		log.error(fmt.tprintf("[Sandbox] Caught runtime crash in '%s' (%s:%d): %s — procedure disarmed safely without crashing editor",
+			entry.name, ffile, fault.line, reason))
+		return false
+	}
+
+	// Post-call runtime integrity scrubber: verify heap canaries and sanitize NaN/Inf Transforms.
+	corrupted_var, nan_repaired := visual_script_verify_and_repair_entity(self_tH, pre_pos, pre_rot, pre_scale)
+	if nan_repaired {
+		log.warning(fmt.tprintf("[Watchdog Scrubber] Repaired NaN/Inf Transform written by '%s' before Physics/GPU corruption", entry.name))
+	}
+	if corrupted_var != "" {
+		entry.faulted = true
+		context.allocator = runtime.default_allocator()
+		_free_last_sandbox_fault()
+		msg := fmt.tprintf("Heap buffer overflow detected (canary smashed on variable '%s') — buffer repaired & procedure disarmed", corrupted_var)
+		_hot_reg.last_fault = Hot_Sandbox_Fault_Report{
+			has_fault = true,
+			proc_name = strings.clone(entry.name),
+			reason    = strings.clone(msg),
+			file      = strings.clone(entry.source_file),
+			line      = 1,
+			entity    = self_tH,
+			code      = 0xC0000374,
+		}
+		log.error(fmt.tprintf("[Sandbox Scrubber] %s", msg))
+		return false
+	}
 	return true
+}
+
+hot_cartridge_set_quarantined :: proc(q: bool) {
+	_ensure_hot_init()
+	_hot_reg.quarantined = q
+}
+
+hot_cartridge_is_quarantined :: proc() -> bool {
+	return _hot_reg.quarantined
+}
+
+@(private = "file")
+_free_last_sandbox_fault :: proc() {
+	if _hot_reg.last_fault.proc_name != "" do delete(_hot_reg.last_fault.proc_name)
+	if _hot_reg.last_fault.reason    != "" do delete(_hot_reg.last_fault.reason)
+	if _hot_reg.last_fault.file      != "" do delete(_hot_reg.last_fault.file)
+	_hot_reg.last_fault = {}
+}
+
+hot_cartridge_clear_faults :: proc() {
+	if !_hot_reg.initialized do return
+	context.allocator = runtime.default_allocator()
+	for &e in _hot_reg.entries {
+		e.faulted = false
+	}
+	_hot_reg.quarantined = false
+	_free_last_sandbox_fault()
+}
+
+hot_cartridge_last_sandbox_fault :: proc() -> Hot_Sandbox_Fault_Report {
+	return _hot_reg.last_fault
+}
+
+// Direct O(1) (`~1.5 ns`) invocation by immortal `slot_idx` — survives `F7` DLL hot-swaps!
+hot_proc_invoke_slot :: proc(slot_idx: i32, self_tH: Transform_Handle, dt: f32, frame: ^hot.Hot_Call_Frame) -> bool {
+	_ensure_hot_init()
+	return _invoke_entry_sandboxed(int(slot_idx), self_tH, dt, frame)
 }
 
 // Invokes a registered `@(hot_proc)` or transpiled `.mhgraph` procedure.
@@ -779,18 +963,7 @@ hot_proc_invoke :: proc(name: string, self_tH: Transform_Handle, dt: f32, frame:
 	_ensure_hot_init()
 	idx, ok := _hot_reg.by_name[name]
 	if !ok do return false
-	fn := _hot_reg.entries[idx].active_fn
-	if fn == nil do return false
-
-	prev_ctx := _hot_active_user_ctx
-	_hot_active_user_ctx = context.user_ptr
-	_hot_api_table.host_world = ctx_world()
-	defer _hot_active_user_ctx = prev_ctx
-
-	local_frame: hot.Hot_Call_Frame
-	f_ptr := frame != nil ? frame : &local_frame
-	fn(&_hot_api_table, transform_to_hot_entity(self_tH), dt, f_ptr)
-	return true
+	return _invoke_entry_sandboxed(idx, self_tH, dt, frame)
 }
 
 // Loads a compiled `hot_cartridge_<N>.dll` and atomically swaps every exported
@@ -839,6 +1012,7 @@ hot_cartridge_load_dll :: proc(dll_path: string) -> (swapped_count: int, ok: boo
 			if idx, exists := _hot_reg.by_name[s_name]; exists {
 				_hot_reg.entries[idx].active_fn = fn_ptr
 				_hot_reg.entries[idx].hot_gen   = gen
+				_hot_reg.entries[idx].faulted   = false
 			} else {
 				cname := strings.clone(s_name)
 				nidx  := len(_hot_reg.entries)
@@ -855,6 +1029,8 @@ hot_cartridge_load_dll :: proc(dll_path: string) -> (swapped_count: int, ok: boo
 	}
 
 	crash_journal.refresh_symbols()
+	_hot_reg.quarantined = false
+	_free_last_sandbox_fault()
 	return swapped_count, true
 }
 
@@ -914,6 +1090,7 @@ hot_cartridge_shutdown :: proc() {
 	if _hot_reg.last_stderr != "" do delete(_hot_reg.last_stderr)
 	if _hot_reg.build_target_dll != "" do delete(_hot_reg.build_target_dll)
 	if _hot_reg.build_err_file != "" do delete(_hot_reg.build_err_file)
+	_free_last_sandbox_fault()
 	_hot_reg = {}
 }
 
@@ -984,6 +1161,10 @@ hot_cartridge_trigger_async_build :: proc(full_regen: bool = false) -> bool {
 		)
 		if proj_dir != "" {
 			append(&cmd, fmt.tprintf("-collection:project=%s", proj_dir))
+			slug := active_project_slug(context.temp_allocator)
+			if slug != "" && slug != "project" && slug != "haati" && slug != "moonhug" && slug != "void_odin" {
+				append(&cmd, fmt.tprintf("-collection:%s=%s", slug, proj_dir))
+			}
 		}
 		append(&cmd, fmt.tprintf("-out:%s", dll_rel))
 	}
@@ -1003,7 +1184,160 @@ hot_cartridge_trigger_async_build :: proc(full_regen: bool = false) -> bool {
 	_hot_reg.build_target_dll = strings.clone(dll_abs)
 	_hot_reg.build_err_file   = strings.clone(err_abs)
 	_hot_reg.build_started_at = time.tick_now()
+	_hot_reg.sandbox_active_mode = false
 	_set_hot_status(.Compiling, fmt.tprintf("Compiling hot_cartridge_%d...", next_gen), "")
+	return true
+}
+
+// Builds `hot_cartridge_<N>.dll` inside `builds/sandbox_cartridge/` by mirroring `haati/hot_scripts`
+// and overlaying unsaved RAM edits without modifying project files on disk.
+hot_cartridge_trigger_sandbox_build :: proc(overrides: []Sandbox_File_Override) -> bool {
+	_ensure_hot_init()
+	if _hot_reg.build_pending do return false
+
+	repo_root := resolve_repo_root(context.temp_allocator)
+	odin_exe  := resolve_odin_binary(context.temp_allocator)
+	next_gen  := _hot_reg.generation + 1
+	dll_ext   :: ".dll" when ODIN_OS == .Windows else (".dylib" when ODIN_OS == .Darwin else ".so")
+
+	builds_dir, _      := filepath.join({repo_root, "builds"}, context.temp_allocator)
+	sb_root, _         := filepath.join({builds_dir, "sandbox_cartridge"}, context.temp_allocator)
+	sb_hot_dir, _      := filepath.join({sb_root, "hot_scripts"}, context.temp_allocator)
+	sb_src_dir, _      := filepath.join({sb_root, "src"}, context.temp_allocator)
+	_ = os.make_directory_all(sb_hot_dir)
+	_ = os.make_directory_all(sb_src_dir)
+
+	// Clear old sandbox hot_scripts files before seeding mirror.
+	if dh, derr := os.open(sb_hot_dir); derr == nil {
+		if old_entries, rerr := os.read_dir(dh, -1, context.temp_allocator); rerr == nil {
+			for oe in old_entries {
+				if oe.type == .Directory do continue
+				if fp, jerr := filepath.join({sb_hot_dir, oe.name}, context.temp_allocator); jerr == nil {
+					_ = os.remove(fp)
+				}
+			}
+		}
+		os.close(dh)
+	}
+
+	// Copy committed `haati/hot_scripts/*.odin` files first.
+	orig_hot_dir, _ := filepath.join({repo_root, "haati", "hot_scripts"}, context.temp_allocator)
+	if dh, derr := os.open(orig_hot_dir); derr == nil {
+		if cur_entries, rerr := os.read_dir(dh, -1, context.temp_allocator); rerr == nil {
+			for ce in cur_entries {
+				if ce.type == .Directory || !strings.has_suffix(ce.name, ".odin") do continue
+				src_f, _ := filepath.join({orig_hot_dir, ce.name}, context.temp_allocator)
+				dst_f, _ := filepath.join({sb_hot_dir, ce.name}, context.temp_allocator)
+				if raw, rerr2 := os.read_entire_file(src_f, context.temp_allocator); rerr2 == nil {
+					_ = os.write_entire_file(dst_f, raw)
+				}
+			}
+		}
+		os.close(dh)
+	}
+
+	// Apply in-RAM sandbox overrides (unsaved script buffers / Zone 1+2 .bodin outputs).
+	for ov in overrides {
+		if ov.rel_hot_name == "" do continue
+		dst_f, _ := filepath.join({sb_hot_dir, filepath.base(ov.rel_hot_name)}, context.temp_allocator)
+		_ = os.write_entire_file(dst_f, transmute([]u8)ov.content)
+	}
+
+	// Collect all `@(hot_proc)` procedure symbols from `sb_hot_dir/*.odin`.
+	hot_syms := make([dynamic]string, 0, 16, context.temp_allocator)
+	seen_syms := make(map[string]bool, 16, context.temp_allocator)
+	if dh, derr := os.open(sb_hot_dir); derr == nil {
+		if sb_entries, rerr := os.read_dir(dh, -1, context.temp_allocator); rerr == nil {
+			for se in sb_entries {
+				if se.type == .Directory || !strings.has_suffix(se.name, ".odin") do continue
+				fp, _ := filepath.join({sb_hot_dir, se.name}, context.temp_allocator)
+				raw, rerr2 := os.read_entire_file(fp, context.temp_allocator)
+				if rerr2 != nil do continue
+				saw_attr := false
+				for ln in strings.split_lines(string(raw), context.temp_allocator) {
+					tl := strings.trim_space(strings.trim_suffix(ln, "\r"))
+					if strings.contains(tl, "@(hot_proc)") {
+						saw_attr = true
+						if rest_i := strings.index(tl, ":: proc"); rest_i > 0 {
+							toks := strings.fields(tl[:rest_i], context.temp_allocator)
+							if len(toks) > 0 {
+								sym := toks[len(toks) - 1]
+								if !(sym in seen_syms) {
+									seen_syms[sym] = true
+									append(&hot_syms, sym)
+								}
+							}
+							saw_attr = false
+						}
+						continue
+					}
+					if saw_attr {
+						if tl == "" || strings.has_prefix(tl, "//") do continue
+						if rest_i := strings.index(tl, "::"); rest_i > 0 {
+							sym := strings.trim_space(tl[:rest_i])
+							if !(sym in seen_syms) {
+								seen_syms[sym] = true
+								append(&hot_syms, sym)
+							}
+						}
+						saw_attr = false
+					}
+				}
+			}
+		}
+		os.close(dh)
+	}
+
+	sb_src_b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&sb_src_b, "package hot_cartridge_sandbox_dll\n\n")
+	strings.write_string(&sb_src_b, "import hot \"haati:engine/hot_api\"\n")
+	strings.write_string(&sb_src_b, "import hot_scripts \"../hot_scripts\"\n\n")
+	strings.write_string(&sb_src_b, "_Entry :: struct {\n\tname: cstring,\n\tfn:   hot.Hot_Proc_Fn,\n}\n\n")
+	strings.write_string(&sb_src_b, "@(rodata)\n_ENTRIES := [?]_Entry{\n")
+	for sym in hot_syms {
+		fmt.sbprintf(&sb_src_b, "\t{{%q, hot_scripts.%s}},\n", sym, sym)
+	}
+	strings.write_string(&sb_src_b, "}\n\n")
+	fmt.sbprintf(&sb_src_b, "@(export)\nmh_hot_cartridge_schema_hash :: proc \"c\" () -> u64 {{\n\treturn 0x%x\n}}\n\n", hot_cartridge_boot_schema_hash())
+	strings.write_string(&sb_src_b, "@(export)\nmh_hot_cartridge_query :: proc \"c\" (index: i32, out_name: ^cstring, out_fn: ^hot.Hot_Proc_Fn) -> bool {\n\tif index < 0 || int(index) >= len(_ENTRIES) do return false\n\tif out_name != nil do out_name^ = _ENTRIES[index].name\n\tif out_fn   != nil do out_fn^   = _ENTRIES[index].fn\n\treturn true\n}\n")
+
+	cart_src_path, _ := filepath.join({sb_src_dir, "cartridge_generated.odin"}, context.temp_allocator)
+	if os.write_entire_file(cart_src_path, transmute([]u8)strings.to_string(sb_src_b)) != nil {
+		return false
+	}
+
+	dll_rel := fmt.tprintf("builds/hot_cartridge_%d%s", next_gen, dll_ext)
+	dll_abs, _ := filepath.join({repo_root, dll_rel}, context.temp_allocator)
+	err_abs, _ := filepath.join({repo_root, fmt.tprintf("builds/hot_cartridge_%d.err", next_gen)}, context.temp_allocator)
+
+	cmd := make([dynamic]string, context.temp_allocator)
+	append(&cmd, odin_exe, "build", "builds/sandbox_cartridge/src", "-build-mode:dll", "-collection:haati=haati", "-collection:moonhug=haati", "-ignore-unknown-attributes")
+	if proj_dir := active_project_root(); proj_dir != "" {
+		append(&cmd, fmt.tprintf("-collection:project=%s", proj_dir))
+		slug := active_project_slug(context.temp_allocator)
+		if slug != "" && slug != "project" && slug != "haati" && slug != "moonhug" && slug != "void_odin" {
+			append(&cmd, fmt.tprintf("-collection:%s=%s", slug, proj_dir))
+		}
+	}
+	append(&cmd, fmt.tprintf("-out:%s", dll_rel))
+
+	proc_handle, started := bg_process_start_to_file(repo_root, cmd[:], nil, err_abs)
+	if !started {
+		_set_hot_status(.Compile_Failed, "Failed to start sandbox Odin compiler", "")
+		return false
+	}
+
+	context.allocator = runtime.default_allocator()
+	_hot_reg.build_pending       = true
+	_hot_reg.build_proc          = proc_handle
+	_hot_reg.build_target_gen    = next_gen
+	_hot_reg.sandbox_active_mode = true
+	if _hot_reg.build_target_dll != "" do delete(_hot_reg.build_target_dll)
+	if _hot_reg.build_err_file   != "" do delete(_hot_reg.build_err_file)
+	_hot_reg.build_target_dll = strings.clone(dll_abs)
+	_hot_reg.build_err_file   = strings.clone(err_abs)
+	_hot_reg.build_started_at = time.tick_now()
+	_set_hot_status(.Compiling, fmt.tprintf("Sandbox compiling hot_cartridge_%d (RAM heap)...", next_gen), "")
 	return true
 }
 

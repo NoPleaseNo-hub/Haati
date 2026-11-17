@@ -33,6 +33,7 @@ import cs "haati:editor/code_studio"
 import vs "haati:editor/visual_script"
 
 main :: proc() {
+    if watchdog_check_guardian_cli() do return
     _run_editor_session()
     relaunch_execute_pending_direct_switch()
 }
@@ -95,7 +96,12 @@ _run_editor_session :: proc() {
         }
     }
 
-    if has_saved_settings && win_x != NO_SAVED_WINDOW_POS && win_y != NO_SAVED_WINDOW_POS && window_rect_visible_on_any_display(win_x, win_y, win_w, win_h) {
+    if engine.is_project_hub_startup() {
+        dx, dy, dw, dh := gfx.display_usable_bounds()
+        hw := clamp(i32(860), 640, max(dw - 80, 640))
+        hh := clamp(i32(540), 420, max(dh - 80, 420))
+        gfx.set_window_geometry(dx + (dw - hw) / 2, dy + (dh - hh) / 2, hw, hh)
+    } else if has_saved_settings && win_x != NO_SAVED_WINDOW_POS && win_y != NO_SAVED_WINDOW_POS && window_rect_visible_on_any_display(win_x, win_y, win_w, win_h) {
         gfx.set_window_geometry(win_x, win_y, win_w, win_h)
     } else if has_saved_settings {
         dx, dy, dw, dh := gfx.display_usable_bounds()
@@ -160,6 +166,7 @@ _run_editor_session :: proc() {
     // From here reports draw pumped frames — startup shows dark-themed progress
     // instead of a white/black flash (progress_overlay.odin).
     progress_overlay_install()
+    defer widgets.splash_logo_shutdown()
     gfx.show_window()
 
     // Init user context and world
@@ -236,7 +243,10 @@ _run_editor_session :: proc() {
     defer mcp_bridge_shutdown()
     defer relaunch_shm_cleanup()
     defer overwatch_recorder_shutdown()
+    watchdog_init()
+    defer watchdog_shutdown()
     studio_windows_init()
+    menu.window_icon_lookup = wnd.icon_by_plain_title
     progress_overlay_uninstall()
     if auto_rebuild_on_boot {
         relaunch_request_project(engine.active_project_root())
@@ -248,6 +258,7 @@ _run_editor_session :: proc() {
         relaunch_tick()
         studio_windows_frame_tick()
         overwatch_recorder_tick(gfx.delta_time())
+        watchdog_tick(frames_presented, gfx.delta_time())
         // Startup scenes load here, one per frame, once the dock layout has
         // settled (imgui sizes docked windows over the first few frames) —
         // the user sees the full layout, then scenes appear, instead of a
@@ -287,6 +298,7 @@ _run_editor_session :: proc() {
         win_flags := sdl.GetWindowFlags(gfx.window())
         has_secondary_lifeline := editor_defaults.keep_secondary_alive_min && (viewport_any_secondary_window() || wnd.any_popped_or_outside())
         if (.MINIMIZED in win_flags || .HIDDEN in win_flags) && !sim_is_active() && !has_secondary_lifeline {
+            mcp_bridge_tick()
             sdl.Delay(50)
             free_all(context.temp_allocator)
             continue
@@ -440,6 +452,8 @@ _run_editor_session :: proc() {
             // Confirmations and other modal questions (widgets/dialog.odin).
             widgets.dialog_draw()
             widgets.code_jump_popup_draw()
+            watchdog_draw_recovery_banner()
+            relaunch_draw_error_banner()
             draw_status_bar()
             draw_pending_scene_overlay()
             engine.overwatch_phase_end(.Plugin_Windows)
@@ -458,10 +472,16 @@ _run_editor_session :: proc() {
         // copy passes (PrepareDrawData) must come BEFORE the swapchain render
         // pass, and its draw happens inside it (pass_end callback).
         engine.overwatch_phase_begin(.Swapchain_Present, "swapchain_present")
+        t_pres_0 := sdl.GetTicksNS()
         im.Render()
         @(static) _last_main_present_ns: u64 = 0
         skip_for_mixed_hz := false
-        if viewport_any_secondary_window() && !gfx.is_main_mailbox_active() {
+        if viewport_active_dragged_os_viewport() != nil {
+            now_ns := sdl.GetTicksNS()
+            if _last_main_present_ns != 0 && now_ns - _last_main_present_ns < 40_000_000 {
+                skip_for_mixed_hz = true
+            }
+        } else if viewport_any_secondary_window() && !gfx.is_main_mailbox_active() {
             main_hz := viewport_main_refresh_hz()
             target_hz := viewport_target_refresh_hz()
             if target_hz > main_hz + 5.0 {
@@ -482,10 +502,13 @@ _run_editor_session :: proc() {
                 im_sdlgpu.RenderDrawData(im.GetDrawData(), cmd, rp)
             })
         }
+        t_pres_acq := sdl.GetTicksNS()
         // Services pending "editor" screenshot (returns capture_failed cleanly if !swapped).
         mcp_bridge_capture_frame()
         gfx.frame_end()
+        t_pres_sub := sdl.GetTicksNS()
         imgui_present_platform_windows()
+        t_pres_plat := sdl.GetTicksNS()
         if (!swapped || viewport_any_secondary_window()) && !gfx.swapchain_waited_this_frame {
             cur_flags := sdl.GetWindowFlags(gfx.window())
             any_focused := viewport_any_editor_window_has_focus()
@@ -502,13 +525,24 @@ _run_editor_session :: proc() {
                 }
             }
         }
+        t_pres_end := sdl.GetTicksNS()
+        if t_pres_end > t_pres_0 + 16_700_000 {
+            acq_ms   := f32(f64(t_pres_acq  - t_pres_0)    / 1_000_000.0)
+            sub_ms   := f32(f64(t_pres_sub  - t_pres_acq)  / 1_000_000.0)
+            plat_ms  := f32(f64(t_pres_plat - t_pres_sub)  / 1_000_000.0)
+            pace_ms  := f32(f64(t_pres_end  - t_pres_plat) / 1_000_000.0)
+            total_ms := f32(f64(t_pres_end  - t_pres_0)    / 1_000_000.0)
+            engine.overwatch_record_event(.Frame_Spike, "PresentSplit",
+                fmt.tprintf("AcqDraw:%.1fms Submit:%.1fms PlatWin:%.1fms Pace:%.1fms", acq_ms, sub_ms, plat_ms, pace_ms),
+                total_ms)
+        }
         engine.overwatch_phase_end(.Swapchain_Present)
         engine.overwatch_frame_end(gfx.delta_time(), sim_is_active())
         progress_overlay_frame_scope(false)
         frames_presented += 1
 
         @(static) _settings_autosave_sec: f32 = 0
-        if input.focused() && !engine.is_project_hub_startup() && !auto_rebuild_on_boot {
+        if input.focused() && !engine.is_project_hub_startup() && !auto_rebuild_on_boot && !im.IsMouseDown(.Left) && !im.IsMouseDown(.Right) {
             _settings_autosave_sec += gfx.delta_time()
             if _settings_autosave_sec >= 4.0 {
                 _settings_autosave_sec = 0.0

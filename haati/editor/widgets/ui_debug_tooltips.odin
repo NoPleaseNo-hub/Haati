@@ -25,6 +25,7 @@ import "core:fmt"
 import "core:strconv"
 import "core:strings"
 import im "haati:external/odin-imgui"
+import "haati:editor/icons"
 import thm "haati:editor/theme"
 import core "haati:engine/core"
 
@@ -238,6 +239,46 @@ tooltip_delayed :: proc(text: cstring, delay_sec: f32 = -1.0, flags: im.HoveredF
 	}
 }
 
+// Immediate tooltip with an attached red `UNSAFE:` hazard callout block explaining exact crash/corruption failure modes.
+tooltip_unsafe :: proc(text: cstring, unsafe_warning: cstring, flags: im.HoveredFlags = {}, loc := #caller_location) {
+	impl_file     := _next_impl_file
+	impl_line     := _next_impl_line
+	impl_label    := _next_impl_label
+	settings_proc := _next_settings_proc
+	_next_impl_file     = ""
+	_next_impl_line     = 0
+	_next_impl_label    = ""
+	_next_settings_proc = nil
+
+	if !im.IsItemHovered(flags) do return
+	_tooltip_show(text, loc, impl_file, impl_line, impl_label, settings_proc != nil, unsafe_warning)
+	if im.IsMouseClicked(.Right) {
+		_capture_code_jump(text, loc, impl_file, impl_line, impl_label, settings_proc)
+	}
+}
+
+// Idle-delayed tooltip with an attached red `UNSAFE:` hazard callout block.
+tooltip_unsafe_delayed :: proc(text: cstring, unsafe_warning: cstring, delay_sec: f32 = -1.0, flags: im.HoveredFlags = {}, loc := #caller_location) {
+	impl_file     := _next_impl_file
+	impl_line     := _next_impl_line
+	impl_label    := _next_impl_label
+	settings_proc := _next_settings_proc
+	_next_impl_file     = ""
+	_next_impl_line     = 0
+	_next_impl_label    = ""
+	_next_settings_proc = nil
+
+	if !im.IsItemHovered(flags) do return
+	if im.IsMouseClicked(.Right) {
+		_capture_code_jump(text, loc, impl_file, impl_line, impl_label, settings_proc)
+	}
+	item_key := u64(im.GetItemID())
+	if item_key == 0 do item_key = u64(uintptr(rawptr(text))) ~ u64(loc.line)
+	if _check_idle_hover_ready(item_key, delay_sec) {
+		_tooltip_show(text, loc, impl_file, impl_line, impl_label, settings_proc != nil, unsafe_warning)
+	}
+}
+
 // Idle-delayed tooltip for custom DrawList items (e.g. Graph Studio node cards & pins).
 tooltip_unchecked_delayed :: proc(hover_key: u64, text: cstring, delay_sec: f32 = -1.0, loc := #caller_location) {
 	impl_file     := _next_impl_file
@@ -251,6 +292,22 @@ tooltip_unchecked_delayed :: proc(hover_key: u64, text: cstring, delay_sec: f32 
 
 	if _check_idle_hover_ready(hover_key ~ 0x9e3779b97f4a7c15, delay_sec) {
 		_tooltip_show(text, loc, impl_file, impl_line, impl_label, settings_proc != nil)
+	}
+}
+
+// Idle-delayed custom DrawList tooltip with an attached red `UNSAFE:` hazard callout block.
+tooltip_unchecked_unsafe_delayed :: proc(hover_key: u64, text: cstring, unsafe_warning: cstring, delay_sec: f32 = -1.0, loc := #caller_location) {
+	impl_file     := _next_impl_file
+	impl_line     := _next_impl_line
+	impl_label    := _next_impl_label
+	settings_proc := _next_settings_proc
+	_next_impl_file     = ""
+	_next_impl_line     = 0
+	_next_impl_label    = ""
+	_next_settings_proc = nil
+
+	if _check_idle_hover_ready(hover_key ~ 0x9e3779b97f4a7c15, delay_sec) {
+		_tooltip_show(text, loc, impl_file, impl_line, impl_label, settings_proc != nil, unsafe_warning)
 	}
 }
 
@@ -397,25 +454,36 @@ code_jump_popup_draw :: proc() {
 }
 
 @(private = "file")
-_tooltip_show :: proc(text: cstring, loc: runtime.Source_Code_Location, impl_file: string = "", impl_line: int = 0, impl_label: string = "", has_settings: bool = false) {
+_tooltip_show :: proc(text: cstring, loc: runtime.Source_Code_Location, impl_file: string = "", impl_line: int = 0, impl_label: string = "", has_settings: bool = false, unsafe_warning: cstring = nil) {
 	// Never spawn or update floating tooltip OS swapchains during active left-mouse drags (window/dock/splitter drag)!
 	if im.IsMouseDown(.Left) do return
-	has_text := text != nil && text != ""
+	has_text   := text != nil && text != ""
+	has_unsafe := unsafe_warning != nil && unsafe_warning != ""
 	pin_tooltip_to_current_viewport()
-	if !ui_debug_tooltips && !has_settings {
+	if !ui_debug_tooltips && !has_settings && !has_unsafe {
 		if has_text do im.SetTooltipUnformatted(text)
 		return
 	}
 	if !im.BeginTooltip() do return
 	defer im.EndTooltip()
+	im.PushTextWrapPos(im.GetFontSize() * 34.0)
+	defer im.PopTextWrapPos()
 	if has_text {
 		im.TextUnformatted(text)
 	}
+	if has_unsafe {
+		if has_text do im.Separator()
+		im.PushStyleColorImVec4(.Text, im.Vec4{1.0, 0.34, 0.34, 1.0})
+		im.TextUnformatted(fmt.ctprintf("%s UNSAFE: ", icons.ICON_MD_WARNING))
+		im.TextUnformatted(unsafe_warning)
+		im.PopStyleColor()
+	}
+	if !ui_debug_tooltips && !has_settings do return
 	if has_settings && !ui_debug_tooltips {
 		_dim("(Right-Click to adjust tool settings & inspect script)")
 		return
 	}
-	if has_text {
+	if has_text || has_unsafe {
 		im.Separator()
 	}
 	if len(impl_file) > 0 {

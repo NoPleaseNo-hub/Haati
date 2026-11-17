@@ -25,7 +25,7 @@ _LAUNCHER_CFG_JSON :: struct {
 	last_project_path: string,
 }
 
-@(private = "file")
+@(private = "package")
 _remove_dir_link_os :: proc(link_path: string) -> bool {
 	when ODIN_OS == .Windows {
 		win_link, _ := strings.replace_all(link_path, "/", "\\", context.temp_allocator)

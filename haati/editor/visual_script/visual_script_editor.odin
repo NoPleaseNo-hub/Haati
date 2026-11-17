@@ -22,9 +22,12 @@ package visual_script
 
 import "base:runtime"
 import "core:fmt"
+import "core:mem"
+import "core:odin/ast"
 import "core:os"
 import "core:path/filepath"
 import "core:slice"
+import "core:strconv"
 import "core:strings"
 import cs "haati:editor/code_studio"
 import "haati:editor/icons"
@@ -261,9 +264,11 @@ _VS_Editor_State :: struct {
 	new_var_buf:            [64]byte,
 	new_var_type:           i32,
 	new_var_is_array:       bool,
+	new_var_container:      engine.VG_Container_Kind,
 	new_pin_buf:            [48]byte,
 	new_pin_type:           i32,
 	new_pin_is_ref:         bool,
+	new_pin_is_slice:       bool,
 	new_proc_param_buf:     [64]byte,
 	new_proc_param_type:    i32,
 	proc_rename_buf:        [64]byte,
@@ -295,6 +300,12 @@ _VS_Editor_State :: struct {
 	redo_stack:             [dynamic]VS_Undo_Entry,
 	last_undo_redo_frame:   i32,
 	drag_undo_armed:        bool,
+
+	// Stage 3: Unified Structs & Fields Target + RAM-Only Sandbox + `::` Scratchpad
+	active_struct_target:   string, // `""` = Self State (Component), else POD struct name
+	ram_zone1_override:     string, // Unsaved Zone-1 edits held in RAM until Bake / F7
+	scratchpad:             cs.Scratchpad_Surface,
+	scratchpad_seeded_for:  string,
 }
 
 @(private)
@@ -796,12 +807,433 @@ _sync_bodin_disk_to_hot_cartridge :: proc() {
 		} else if b_leg := strings.index(raw, "/* @BODIN_GRAPH_V1"); b_leg >= 0 {
 			code_part = raw[:b_leg]
 		}
+		flat := _strip_bodin_marker_lines(code_part, context.temp_allocator)
 		clean_name := sanitize_odin_ident(_vs.graph.name != "" ? _vs.graph.name : "custom_graph", context.temp_allocator)
 		rel_odin   := fmt.tprintf("haati/hot_scripts/%s_mhgraph_generated.odin", clean_name)
 		abs_odin, _ := filepath.join({repo_root, rel_odin}, context.temp_allocator)
-		_ = os.write_entire_file(abs_odin, transmute([]u8)strings.trim_space(code_part))
+		_ = os.write_entire_file(abs_odin, transmute([]u8)strings.trim_space(flat))
 		engine.hot_cartridge_trigger_async_build(true)
 	}
+}
+
+@(private = "file")
+_strip_bodin_marker_lines :: proc(src: string, allocator := context.temp_allocator) -> string {
+	sb := strings.builder_make(0, len(src), allocator)
+	for raw_ln in strings.split_lines(src, context.temp_allocator) {
+		ln := strings.trim_suffix(raw_ln, "\r")
+		trimmed := strings.trim_space(ln)
+		if trimmed == engine.BODIN_GENERATED_BEGIN || trimmed == engine.BODIN_GENERATED_END {
+			continue
+		}
+		strings.write_string(&sb, ln)
+		strings.write_byte(&sb, '\n')
+	}
+	return strings.trim_right_space(strings.to_string(sb))
+}
+
+@(private = "file")
+_ast_node_slice :: #force_inline proc(src: string, node: ^ast.Node) -> string {
+	if node == nil do return ""
+	s := node.pos.offset
+	e := node.end.offset
+	if s < 0 || e < s || e > len(src) do return ""
+	return strings.trim_space(src[s:e])
+}
+
+@(private = "file")
+_map_odin_type_str_to_pin :: proc(raw_t: string, g: ^engine.Visual_Graph) -> (pt: hot.Hot_Pin_Type, custom: string, ok: bool) {
+	t := strings.trim_space(raw_t)
+	if t == "" do return .Float, "", false
+	if idx := strings.last_index_byte(t, '.'); idx >= 0 && strings.has_prefix(t, "hot.") {
+		if t == "hot.Hot_Entity" do return .Entity, "", true
+	}
+	switch t {
+	case "f32":                     return .Float, "", true
+	case "f64":                     return .F64, "", true
+	case "i32", "int":              return .Int, "", true
+	case "i64":                     return .Int64, "", true
+	case "u8", "byte":              return .U8, "", true
+	case "i8":                      return .I8, "", true
+	case "u16":                     return .U16, "", true
+	case "i16":                     return .I16, "", true
+	case "u32":                     return .U32, "", true
+	case "u64":                     return .U64, "", true
+	case "bool":                    return .Bool, "", true
+	case "string", "cstring":       return .String, "", true
+	case "rawptr":                  return .Raw_Ptr, "", true
+	case "[2]f32":                  return .Vec2, "", true
+	case "[3]f32":                  return .Vec3, "", true
+	case "[4]f32":                  return .Vec4, "", true
+	case "Hot_Entity", "Transform_Handle":
+		return .Entity, "", true
+	}
+	if g != nil {
+		for ed in g.enums {
+			if ed.name == t do return .Enum_U8, ed.name, true
+			if ed.has_bitset && ed.bitset_name == t do return .BitSet_U8, ed.name, true
+		}
+		for sd in g.structs {
+			if sd.name == t do return .Struct_Val, sd.name, true
+		}
+	}
+	return .Float, "", false
+}
+
+// Returns an explicit red `UNSAFE:` warning for low-level Odin features (rawptr, slices, by-ref pointers)
+// explaining exactly how improper usage can corrupt heap memory or crash the engine.
+bp_unsafe_tooltip_warning :: proc(
+	pt:        hot.Hot_Pin_Type,
+	ck:        engine.VG_Container_Kind,
+	by_ref:    bool,
+	node_kind: engine.VG_Node_Kind = .Event_Init,
+	sub_op:    int = 0,
+) -> cstring {
+	if pt == .Raw_Ptr {
+		return "Untyped 64-bit memory address (`rawptr`). Dereferencing nil (< 0x10000) or unmapped addresses faults immediately; casting to a larger struct or writing after pool/array relocation overwrites adjacent heap headers (0xC0000374) and can bypass sandbox checks to crash Haati."
+	}
+	if ck == .Slice {
+		return "Non-owning `{data, len}` slice view (`[]T`). Holding a slice across `append()` reallocation, saving a sub-slice into a stack local `[N]T`, or indexing past `len` after freeing backing storage yields a dangling pointer to reused RAM."
+	}
+	if by_ref || (node_kind == .Array_Op && engine.VG_Array_Op_Mode(sub_op) == .Get_Ref) {
+		return "Direct mutable address (`^T`) into caller/blackboard memory. Storing this pointer past entity destruction or dynamic-array reallocation dereferences invalidated memory."
+	}
+	if node_kind == .Array_Op && engine.VG_Array_Op_Mode(sub_op) == .Sub_Slice {
+		return "Returns a non-owning sub-slice into the backing array. Reallocating or clearing that array before reading the slice leaves a dangling view."
+	}
+	return nil
+}
+
+// Parses all Zone-1 Odin enums, bit_sets, and ALL structs from `user_zone` into `g` as
+// non-serialized `code_authored` metadata so multiple Zone-1 structs work seamlessly in graphs!
+sync_bodin_user_ast_into_graph :: proc(g: ^engine.Visual_Graph, user_zone: string) {
+	if g == nil do return
+	prev_alloc := context.allocator
+	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev_alloc
+
+	// Remove previous `code_authored` entries cleanly
+	for ei := len(g.enums) - 1; ei >= 0; ei -= 1 {
+		if !g.enums[ei].code_authored do continue
+		ed := g.enums[ei]
+		if ed.name != "" do delete(ed.name)
+		if ed.bitset_name != "" do delete(ed.bitset_name)
+		for v in ed.variants do delete(v)
+		delete(ed.variants)
+		ordered_remove(&g.enums, ei)
+	}
+	for si := len(g.structs) - 1; si >= 0; si -= 1 {
+		if !g.structs[si].code_authored do continue
+		sd := g.structs[si]
+		if sd.name != "" do delete(sd.name)
+		if sd.using_parent_name != "" do delete(sd.using_parent_name)
+		for f in sd.fields {
+			if f.name != "" do delete(f.name)
+			if f.custom_type != "" do delete(f.custom_type)
+		}
+		delete(sd.fields)
+		ordered_remove(&g.structs, si)
+	}
+
+	if strings.trim_space(user_zone) == "" do return
+
+	arena: mem.Dynamic_Arena
+	mem.dynamic_arena_init(&arena)
+	defer mem.dynamic_arena_destroy(&arena)
+
+	f, _, _ := cs.parse_odin_in_arena(user_zone, "bodin_zone1.odin", false, &arena)
+	if len(f.decls) == 0 do return
+
+	// Pass 1: Enums & Struct name stubs (so sibling/self field types resolve regardless of order)
+	_Parsed_Zone1_Struct :: struct {
+		name: string,
+		line: int,
+		st:   ^ast.Struct_Type,
+	}
+	struct_decls := make([dynamic]_Parsed_Zone1_Struct, 0, 8, context.temp_allocator)
+
+	for decl in f.decls {
+		vd, is_vd := decl.derived.(^ast.Value_Decl)
+		if !is_vd || vd.is_mutable || len(vd.names) == 0 || len(vd.values) == 0 do continue
+		id, is_id := vd.names[0].derived_expr.(^ast.Ident)
+		if !is_id || id.name == "" do continue
+
+		#partial switch v in vd.values[0].derived_expr {
+		case ^ast.Enum_Type:
+			already := false
+			for &ex in g.enums do if ex.name == id.name { already = true; break }
+			if already do continue
+			ed := engine.VG_Enum_Decl{
+				name          = strings.clone(id.name),
+				code_authored = true,
+				source_line   = vd.pos.line,
+			}
+			for ev in v.fields {
+				ev_txt := _ast_node_slice(user_zone, ev)
+				if eq := strings.index_byte(ev_txt, '='); eq > 0 {
+					ev_txt = strings.trim_space(ev_txt[:eq])
+				}
+				if ev_txt != "" {
+					append(&ed.variants, strings.clone(ev_txt))
+				}
+			}
+			append(&g.enums, ed)
+
+		case ^ast.Bit_Set_Type:
+			elem_nm := _ast_node_slice(user_zone, v.elem)
+			for &ed in g.enums {
+				if ed.name == elem_nm && !ed.has_bitset {
+					ed.has_bitset = true
+					if ed.bitset_name != "" do delete(ed.bitset_name)
+					ed.bitset_name = strings.clone(id.name)
+				}
+			}
+
+		case ^ast.Struct_Type:
+			already := false
+			for &sx in g.structs do if sx.name == id.name { already = true; break }
+			if !already {
+				append(&g.structs, engine.VG_Struct_Decl{
+					name          = strings.clone(id.name),
+					code_authored = true,
+					source_line   = vd.pos.line,
+				})
+				append(&struct_decls, _Parsed_Zone1_Struct{name = id.name, line = vd.pos.line, st = v})
+			}
+		}
+	}
+
+	// Pass 2: Populate fields onto each newly discovered Zone-1 struct!
+	for entry in struct_decls {
+		if entry.st == nil || entry.st.fields == nil do continue
+		target_sd: ^engine.VG_Struct_Decl = nil
+		for &sd in g.structs {
+			if sd.code_authored && sd.name == entry.name {
+				target_sd = &sd
+				break
+			}
+		}
+		if target_sd == nil do continue
+
+		for fld in entry.st.fields.list {
+			if fld.type == nil do continue
+			ft_txt := _ast_node_slice(user_zone, fld.type)
+			if .Using in fld.flags {
+				if target_sd.using_parent_name == "" && ft_txt != "" && ft_txt != entry.name {
+					target_sd.using_parent_name = strings.clone(ft_txt)
+				}
+				continue
+			}
+			pt, custom, mapped := _map_odin_type_str_to_pin(ft_txt, g)
+			if !mapped do continue
+			for fn in fld.names {
+				fid, fok := fn.derived_expr.(^ast.Ident)
+				if !fok || fid.name == "" || fid.name == "_" do continue
+				append(&target_sd.fields, engine.VG_Struct_Field{
+					name        = strings.clone(fid.name),
+					pin_type    = pt,
+					custom_type = custom != "" ? strings.clone(custom) : "",
+				})
+			}
+		}
+	}
+}
+
+@(private = "file")
+_strip_node_body_boilerplate :: proc(sliced_body: string, n: ^engine.VG_Node, g: ^engine.Visual_Graph, allocator := context.temp_allocator) -> string {
+	lines := strings.split_lines(sliced_body, context.temp_allocator)
+	out := make([dynamic]string, 0, len(lines), context.temp_allocator)
+
+	for ln, li in lines {
+		cr := strings.trim_suffix(ln, "\r")
+		tr := strings.trim_space(cr)
+		if li < 8 {
+			if tr == "using math" || tr == "using linalg" || tr == "_ = api; _ = self; _ = bp; _ = dt" {
+				continue
+			}
+			is_pin_supp := false
+			if strings.has_prefix(tr, "_ = ") {
+				pname_sup := strings.trim_space(tr[4:])
+				for p in n.inputs {
+					if p.pin_type != .Exec && sanitize_odin_ident(p.name, context.temp_allocator) == pname_sup {
+						is_pin_supp = true
+						break
+					}
+				}
+			}
+			if is_pin_supp do continue
+		}
+		append(&out, cr)
+	}
+	// Trim single synthetic trailing `return` inserted by transpiler if original node body didn't end with one
+	if len(out) > 0 && strings.trim_space(out[len(out) - 1]) == "return" && !strings.has_suffix(strings.trim_right_space(n.odin_body), "return") {
+		pop(&out)
+	}
+	_ = g
+	return strings.trim_right_space(strings.join(out[:], "\n", allocator))
+}
+
+@(private)
+_sync_bodin_file_edits_and_hot_swap :: proc(abs_bodin: string, trigger_hotswap: bool) {
+	if abs_bodin == "" do return
+	raw_txt := ""
+	if open_s, is_open := cs.get_open_tab_text(abs_bodin, context.temp_allocator); is_open {
+		raw_txt = open_s
+	} else if data, err := os.read_entire_file(abs_bodin, context.temp_allocator); err == nil {
+		raw_txt = string(data)
+	}
+	if raw_txt == "" do return
+
+	norm_in, _ := strings.replace_all(abs_bodin, "\\", "/", context.temp_allocator)
+	cur_abs, _ := strings.replace_all(_vs_resolve_graph_path(_vs.graph_rel_path, context.temp_allocator), "\\", "/", context.temp_allocator)
+	is_active_graph := strings.equal_fold(norm_in, cur_abs)
+
+	tg: ^engine.Visual_Graph
+	tmp_g: engine.Visual_Graph
+	use_tmp := false
+	if is_active_graph {
+		tg = &_vs.graph
+	} else {
+		if !engine.vg_load_from_file(&tmp_g, abs_bodin) {
+			return
+		}
+		tg = &tmp_g
+		use_tmp = true
+	}
+	defer if use_tmp do engine.vg_destroy_graph(&tmp_g)
+
+	clean_name := sanitize_odin_ident(tg.name != "" ? tg.name : "custom_graph", context.temp_allocator)
+	{
+		prev_alloc := context.allocator
+		context.allocator = runtime.default_allocator()
+		defer context.allocator = prev_alloc
+		for &nd in tg.nodes {
+			if nd.kind != .Odin_Function_Node do continue
+			proc_nm := fmt.tprintf("_node_%s_%d_body", clean_name, nd.uid)
+			if sliced, sok := cs.slice_odin_procedure(raw_txt, proc_nm, context.temp_allocator); sok {
+				stripped := _strip_node_body_boilerplate(sliced.body_text, &nd, tg, context.temp_allocator)
+				if stripped != strings.trim_right_space(nd.odin_body) {
+					if nd.odin_body != "" do delete(nd.odin_body)
+					nd.odin_body = strings.clone(stripped)
+				}
+			}
+		}
+	}
+
+	if _, _, baked_ok := bake_graph_to_odin_file(tg, is_active_graph ? _vs.graph_rel_path : abs_bodin); baked_ok {
+		if is_active_graph {
+			_vs.preview_bb.initialized = false
+			_vs.dirty_unbaked = false
+			_sync_ide_blueprint_context()
+		}
+		cs.reload_file_tab_from_disk(abs_bodin)
+		if trigger_hotswap {
+			engine.hot_cartridge_trigger_async_build(true)
+		}
+	}
+}
+
+@(private)
+_on_bodin_saved_or_hotswapped :: proc(abs_path: string, trigger_hotswap: bool) {
+	_sync_bodin_file_edits_and_hot_swap(abs_path, trigger_hotswap)
+}
+
+@(private)
+_on_bodin_sandbox_hotswap :: proc(abs_path: string, ram_src: string) -> bool {
+	if ram_src == "" do return false
+	norm_in, _ := strings.replace_all(abs_path, "\\", "/", context.temp_allocator)
+	cur_abs, _ := strings.replace_all(_vs_resolve_graph_path(_vs.graph_rel_path, context.temp_allocator), "\\", "/", context.temp_allocator)
+
+	tg: ^engine.Visual_Graph
+	tmp_g: engine.Visual_Graph
+	use_tmp := false
+	if strings.equal_fold(norm_in, cur_abs) {
+		tmp_g = engine.vg_clone_graph(&_vs.graph)
+		tg = &tmp_g
+		use_tmp = true
+	} else if engine.vg_load_from_file(&tmp_g, abs_path) {
+		tg = &tmp_g
+		use_tmp = true
+	} else {
+		return false
+	}
+	defer if use_tmp do engine.vg_destroy_graph(&tmp_g)
+
+	clean_name := sanitize_odin_ident(tg.name != "" ? tg.name : "custom_graph", context.temp_allocator)
+	{
+		prev_alloc := context.allocator
+		context.allocator = runtime.default_allocator()
+		for &nd in tg.nodes {
+			if nd.kind != .Odin_Function_Node do continue
+			proc_nm := fmt.tprintf("_node_%s_%d_body", clean_name, nd.uid)
+			if sliced, sok := cs.slice_odin_procedure(ram_src, proc_nm, context.temp_allocator); sok {
+				stripped := _strip_node_body_boilerplate(sliced.body_text, &nd, tg, context.temp_allocator)
+				if nd.odin_body != "" do delete(nd.odin_body)
+				nd.odin_body = strings.clone(stripped)
+			}
+		}
+		context.allocator = prev_alloc
+	}
+
+	z1, has_z1 := engine.vg_extract_bodin_user_zone(ram_src, context.temp_allocator)
+	if !has_z1 || strings.trim_space(z1) == "" {
+		z1 = default_bodin_zone1_header(clean_name, context.temp_allocator)
+	}
+	sync_bodin_user_ast_into_graph(tg, z1)
+	flat_odin, _ := assemble_bodin_odin_sections(tg, z1, false, context.temp_allocator)
+	rel_hot := fmt.tprintf("%s_mhgraph_generated.odin", clean_name)
+	return engine.hot_cartridge_trigger_sandbox_build({engine.Sandbox_File_Override{
+		rel_hot_name = rel_hot,
+		content      = flat_odin,
+	}})
+}
+
+@(private)
+_ensure_bodin_backed_without_clobbering :: proc() -> string {
+	abs_p := _vs_resolve_graph_path(_vs.graph_rel_path, context.temp_allocator)
+	need_bake := _vs.dirty_unbaked || !os.exists(abs_p)
+	if !need_bake {
+		if raw, err := os.read_entire_file(abs_p, context.temp_allocator); err == nil {
+			if !strings.contains(string(raw), engine.BODIN_GENERATED_BEGIN) {
+				need_bake = true
+			}
+		}
+	}
+	if need_bake {
+		if gen_abs, _, ok := bake_graph_to_odin_file(&_vs.graph, _vs.graph_rel_path); ok {
+			context.allocator = runtime.default_allocator()
+			if _vs.last_baked_odin != "" do delete(_vs.last_baked_odin)
+			_vs.last_baked_odin = strings.clone(gen_abs)
+			_vs.dirty_unbaked   = false
+			_sync_ide_blueprint_context()
+		}
+	}
+	return abs_p
+}
+
+@(private)
+_jump_to_bodin_line :: proc(line: int) {
+	abs_p := _ensure_bodin_backed_without_clobbering()
+	_vs.view_mode = .Full_Odin_Script
+	if abs_p != "" {
+		cs.open_file_in_studio(abs_p, max(line, 1))
+	}
+}
+
+@(private)
+_find_bodin_proc_line :: proc(proc_name: string) -> int {
+	if proc_name == "" do return 0
+	abs_p := _vs_resolve_graph_path(_vs.graph_rel_path, context.temp_allocator)
+	src := ""
+	if open_s, is_open := cs.get_open_tab_text(abs_p, context.temp_allocator); is_open {
+		src = open_s
+	} else if data, err := os.read_entire_file(abs_p, context.temp_allocator); err == nil {
+		src = string(data)
+	}
+	if src == "" do return 0
+	for sym in cs.extract_odin_outline_symbols(src, context.temp_allocator) {
+		if sym.name == proc_name do return sym.line
+	}
+	return 0
 }
 
 // Syncs Blueprint Variables, Custom Procedures, and `using` namespaces into `code_studio` Autocomplete!
@@ -915,6 +1347,8 @@ ensure_visual_script_init :: proc() {
 	engine.visual_script_live_editor_hook   = _live_editor_hook
 	engine.visual_script_live_callback_hook = _live_callback_hook
 	cs.set_scoped_using_hooks(_on_scoped_using_toggle, _on_scoped_using_query)
+	cs.register_bodin_save_hook(_on_bodin_saved_or_hotswapped)
+	cs.register_bodin_sandbox_hook(_on_bodin_sandbox_hotswap)
 	_rescan_blueprint_assets()
 	_sync_ide_blueprint_context()
 }
@@ -929,8 +1363,12 @@ shutdown_visual_script_studio :: proc() {
 	delete(_vs.redo_stack)
 	engine.vg_destroy_graph(&_vs.graph)
 	delete(_vs.preview_bb.last_exec_path)
-	if _vs.graph_rel_path  != "" do delete(_vs.graph_rel_path)
-	if _vs.last_baked_odin != "" do delete(_vs.last_baked_odin)
+	if _vs.graph_rel_path        != "" do delete(_vs.graph_rel_path)
+	if _vs.last_baked_odin       != "" do delete(_vs.last_baked_odin)
+	if _vs.active_struct_target  != "" do delete(_vs.active_struct_target)
+	if _vs.ram_zone1_override    != "" do delete(_vs.ram_zone1_override)
+	if _vs.scratchpad_seeded_for != "" do delete(_vs.scratchpad_seeded_for)
+	cs.scratchpad_destroy(&_vs.scratchpad)
 	for s in _vs.discovered_graphs do delete(s)
 	delete(_vs.discovered_graphs)
 	_vs = {}
@@ -947,7 +1385,10 @@ open_blueprint_in_studio :: proc(graph_rel_path: string) -> bool {
 	if os.exists(abs_p) {
 		context.allocator = runtime.default_allocator()
 		if engine.vg_load_from_file(&_vs.graph, abs_p) {
-			if _vs.graph_rel_path != "" do delete(_vs.graph_rel_path)
+			if _vs.graph_rel_path        != "" do delete(_vs.graph_rel_path)
+			if _vs.ram_zone1_override    != "" { delete(_vs.ram_zone1_override); _vs.ram_zone1_override = "" }
+			if _vs.active_struct_target  != "" { delete(_vs.active_struct_target); _vs.active_struct_target = "" }
+			if _vs.scratchpad_seeded_for != "" { delete(_vs.scratchpad_seeded_for); _vs.scratchpad_seeded_for = "" }
 			_vs.graph_rel_path         = strings.clone(graph_rel_path)
 			_vs.preview_bb.initialized = false
 			_vs.dirty_unbaked          = false
@@ -963,6 +1404,11 @@ open_blueprint_in_studio :: proc(graph_rel_path: string) -> bool {
 			nc.canvas_clear_selection(&_vs.canvas)
 			if len(_vs.graph.nodes) > 0 do nc.canvas_set_selected(&_vs.canvas, 0, true)
 			vs_clear_undo()
+			if raw_b, rerr := os.read_entire_file(abs_p, context.temp_allocator); rerr == nil {
+				if z1, has_z1 := engine.vg_extract_bodin_user_zone(string(raw_b), context.temp_allocator); has_z1 {
+					sync_bodin_user_ast_into_graph(&_vs.graph, z1)
+				}
+			}
 			_sync_ide_blueprint_context()
 		}
 	}
@@ -973,13 +1419,34 @@ open_blueprint_in_studio :: proc(graph_rel_path: string) -> bool {
 // Creates a fresh Event-Driven Blueprint `.bodin` (single-file Odin + `@BODIN_GRAPH_V1` layout,
 // with `Event_Init` -> `Bind_Input_Action` -> `On_Action` ready to wire!), syncs its hot cartridge
 // module, triggers hot-swap, and returns `(rel_path, compiled_proc_name, ok)`!
-create_new_blueprint_asset :: proc(blueprint_name: string) -> (rel_path: string, proc_name: string, ok: bool) {
+create_new_blueprint_asset :: proc(blueprint_name: string, target_dir: string = "") -> (rel_path: string, proc_name: string, ok: bool) {
 	ensure_visual_script_init()
-	clean := sanitize_odin_ident(strings.trim_space(blueprint_name), context.temp_allocator)
+	raw_name := strings.trim_space(blueprint_name)
+	if strings.has_suffix(strings.to_lower(raw_name, context.temp_allocator), ".bodin") {
+		raw_name = raw_name[:len(raw_name) - 6]
+	}
+	clean := sanitize_odin_ident(raw_name, context.temp_allocator)
 	if clean == "" do return "", "", false
 
 	target_dom := _vs.active_domain == .Material_Shader ? engine.VG_Graph_Domain.Gameplay_Ability : _vs.active_domain
 	rel := fmt.tprintf("assets/scripts/%s.bodin", clean)
+	if dir_t := strings.trim_space(target_dir); dir_t != "" {
+		clean_dir, _ := filepath.clean(dir_t, context.temp_allocator)
+		norm_dir, _ := strings.replace_all(clean_dir, "\\", "/", context.temp_allocator)
+		norm_dir = strings.trim_right(norm_dir, "/")
+		joined := norm_dir == "." || norm_dir == "" ? fmt.tprintf("%s.bodin", clean) : fmt.tprintf("%s/%s.bodin", norm_dir, clean)
+
+		rel = joined
+		for root_cand in ([2]string{engine.active_project_root(), engine.resolve_repo_root(context.temp_allocator)}) {
+			if root_cand == "" do continue
+			r_norm, _ := strings.replace_all(root_cand, "\\", "/", context.temp_allocator)
+			r_norm = strings.trim_right(r_norm, "/")
+			if len(joined) > len(r_norm) + 1 && strings.equal_fold(joined[:len(r_norm)], r_norm) && joined[len(r_norm)] == '/' {
+				rel = joined[len(r_norm) + 1:]
+				break
+			}
+		}
+	}
 	{
 		context.allocator = runtime.default_allocator()
 		engine.vg_destroy_graph(&_vs.graph)
@@ -1052,9 +1519,110 @@ create_new_blueprint_asset :: proc(blueprint_name: string) -> (rel_path: string,
 	return rel, main_proc, true
 }
 
+// Exports a hybrid `.bodin` Blueprint script into a standalone `.odin` source file next to it,
+// stripping embedded `@BODIN_GRAPH_V1` serialization comments (or transpiling graph JSON if empty).
+export_bodin_to_standalone_odin :: proc(bodin_path: string, allocator := context.temp_allocator) -> (out_odin_path: string, ok: bool) {
+	trimmed := strings.trim_space(bodin_path)
+	if trimmed == "" do return "", false
+
+	resolved := _vs_resolve_graph_path(trimmed, context.temp_allocator)
+	if !os.exists(resolved) && os.exists(trimmed) {
+		resolved = trimmed
+	}
+	raw_bytes, rerr := os.read_entire_file(resolved, context.temp_allocator)
+	if rerr != nil do return "", false
+
+	raw := string(raw_bytes)
+	odin_src := ""
+	if b_idx := strings.index(raw, engine.BODIN_GRAPH_BEGIN); b_idx >= 0 {
+		odin_src = _strip_bodin_marker_lines(raw[:b_idx], context.temp_allocator)
+	} else if c_idx := strings.index(raw, "/* @BODIN_GRAPH_V1"); c_idx >= 0 {
+		odin_src = _strip_bodin_marker_lines(raw[:c_idx], context.temp_allocator)
+	} else {
+		odin_src = _strip_bodin_marker_lines(raw, context.temp_allocator)
+	}
+
+	// If file had only placeholder header or raw graph JSON, synthesize full Odin source via transpiler.
+	if odin_src == "" || strings.has_prefix(strings.trim_left_space(odin_src), "{") ||
+	   strings.contains(odin_src, "Bake with F7 to populate native procedures") {
+		tmp_g: engine.Visual_Graph
+		if engine.vg_load_from_file(&tmp_g, resolved) {
+			defer engine.vg_destroy_graph(&tmp_g)
+			gen_code, _ := transpile_graph_to_odin(&tmp_g, context.temp_allocator)
+			if strings.trim_space(gen_code) != "" {
+				odin_src = strings.trim_right_space(gen_code)
+			}
+		}
+	}
+	if strings.trim_space(odin_src) == "" do return "", false
+
+	norm_res, _ := strings.replace_all(resolved, "\\", "/", context.temp_allocator)
+	out_p := norm_res
+	if strings.has_suffix(strings.to_lower(norm_res, context.temp_allocator), ".bodin") {
+		out_p = fmt.tprintf("%s.odin", norm_res[:len(norm_res) - 6])
+	} else {
+		out_p = fmt.tprintf("%s.odin", norm_res)
+	}
+
+	out_dir: string
+	{
+		context.allocator = context.temp_allocator
+		out_dir = filepath.dir(out_p)
+	}
+	if out_dir != "" && out_dir != "." {
+		_ = os.make_directory_all(out_dir)
+	}
+	final_src := fmt.tprintf("%s\n", odin_src)
+	if os.write_entire_file(out_p, transmute([]u8)final_src) != nil {
+		return "", false
+	}
+	return strings.clone(out_p, allocator), true
+}
+
 @(private)
 _pin_color :: proc(p: engine.VG_Pin_Def) -> im.Vec4 {
 	return thm.studio_pin_color(p.pin_type, p.pass_mode == .By_Reference || p.is_addressable)
+}
+
+@(private)
+vg_node_kind_icon :: proc(k: engine.VG_Node_Kind) -> cstring {
+	switch k {
+	case .Event_Init, .Event_Tick, .Event_Destroy, .Event_On_Trigger:
+		return icons.ICON_MD_BOLT
+	case .Custom_Proc_Entry, .Delegate_Bind, .Delegate_Unbind, .Delegate_Broadcast:
+		return icons.ICON_MD_MEDIATION
+	case .Call_Hot_Proc, .Call_Blueprint_Proc, .Math_Float, .Vec3_Scale_Add, .BitSet_Op:
+		return icons.ICON_MD_FUNCTIONS
+	case .Odin_Function_Node:
+		return icons.ICON_MD_CODE
+	case .Get_Variable, .Set_Variable, .Make_Struct, .Break_Struct, .Get_Transform_Pos, .Set_Transform_Pos:
+		return icons.ICON_MD_DATA_OBJECT
+	case .Array_Op:
+		return icons.ICON_MD_STACKS
+	case .Branch_If, .Switch_Value, .Or_Branch:
+		return icons.ICON_MD_CALL_SPLIT
+	case .Sequence, .For_Loop, .Break_Loop, .Continue_Loop, .Defer_Exec, .Delay_Timer, .Cooldown_Gate, .Auto_Cast, .Reroute_Knot:
+		return icons.ICON_MD_SCHEMA
+	case .Bind_Input_Action, .Bind_Input_Vector, .Bind_Debug_Key:
+		return icons.ICON_MD_GAMEPAD
+	case .Unbind_Input_Action, .Unbind_Input_Vector, .Unbind_Debug_Key, .Unbind_All_Inputs:
+		return icons.ICON_MD_LINK_OFF
+	case .Anim_Clip_Eval, .Anim_Blend_Layered, .Anim_Spring_Damper, .Anim_IK_Target:
+		return icons.ICON_MD_DIRECTIONS_RUN
+	case .VFX_Emitter_Spawn, .VFX_GPU_Curl_Force, .VFX_Color_Size_Life:
+		return icons.ICON_MD_AUTO_AWESOME
+	case .Audio_Random_Container, .Audio_Modulate_Pitch_Vol, .Audio_Bus_Send, .Audio_Play_Spatial_3D:
+		return icons.ICON_MD_SPEAKER
+	case .AI_Find_Path_Move, .AI_Check_Arrival:
+		return icons.ICON_MD_ROUTE
+	case .Physics_Raycast, .Physics_Overlap_Sphere, .Physics_Add_Impulse:
+		return icons.ICON_MD_RADAR
+	case .Spawn_Prefab, .Destroy_Entity, .Set_Time_Scale:
+		return icons.ICON_MD_ROCKET_LAUNCH
+	case .CSG_Brush_Stamp:
+		return icons.ICON_MD_JOIN_FULL
+	}
+	return icons.ICON_MD_SCHEMA
 }
 
 @(private)
@@ -1357,6 +1925,553 @@ _on_scoped_node_commit :: proc(node_uid: int, updated_body: string, trigger_hot_
 	}
 }
 
+@(private = "file")
+_vs_clone_pin_def :: proc(p: engine.VG_Pin_Def, allocator := context.allocator) -> engine.VG_Pin_Def {
+	out := p
+	out.name              = p.name              != "" ? strings.clone(p.name, allocator)              : ""
+	out.custom_type_name  = p.custom_type_name  != "" ? strings.clone(p.custom_type_name, allocator)  : ""
+	out.default_str       = p.default_str       != "" ? strings.clone(p.default_str, allocator)       : ""
+	out.split_parent_name = p.split_parent_name != "" ? strings.clone(p.split_parent_name, allocator) : ""
+	out.split_field_name  = p.split_field_name  != "" ? strings.clone(p.split_field_name, allocator)  : ""
+	return out
+}
+
+@(private = "file")
+_vs_destroy_pin_list :: proc(list: ^[dynamic]engine.VG_Pin_Def) {
+	if list == nil do return
+	for &p in list^ {
+		if p.name              != "" do delete(p.name)
+		if p.custom_type_name  != "" do delete(p.custom_type_name)
+		if p.default_str       != "" do delete(p.default_str)
+		if p.split_parent_name != "" do delete(p.split_parent_name)
+		if p.split_field_name  != "" do delete(p.split_field_name)
+	}
+	delete(list^)
+}
+
+@(private = "file")
+_copy_pin_defaults :: proc(src: engine.VG_Pin_Def, dst: ^engine.VG_Pin_Def, allocator := context.allocator) {
+	if dst == nil do return
+	dst.default_f32  = src.default_f32
+	dst.default_int  = src.default_int
+	dst.default_i64  = src.default_i64
+	dst.default_u64  = src.default_u64
+	dst.default_f64  = src.default_f64
+	dst.default_bool = src.default_bool
+	dst.default_vec2 = src.default_vec2
+	dst.default_vec3 = src.default_vec3
+	dst.default_vec4 = src.default_vec4
+	if src.default_str != "" {
+		if dst.default_str != "" do delete(dst.default_str, allocator)
+		dst.default_str = strings.clone(src.default_str, allocator)
+	}
+}
+
+@(private = "file")
+_map_parsed_param_to_pin :: proc(
+	p:         cs.Parsed_Proc_Param,
+	g:         ^engine.Visual_Graph,
+	idx:       int,
+	is_result: bool,
+	allocator  := context.allocator,
+) -> engine.VG_Pin_Def {
+	raw_t := strings.trim_space(p.type_expr)
+	ck := engine.VG_Container_Kind.Single
+	elem_t := raw_t
+	if strings.has_prefix(raw_t, "[]") {
+		ck = .Slice
+		elem_t = strings.trim_space(raw_t[2:])
+	} else if strings.has_prefix(raw_t, "[dynamic]") {
+		ck = .Dynamic_Array
+		elem_t = strings.trim_space(raw_t[9:])
+	}
+
+	pt, custom, mapped := _map_odin_type_str_to_pin(elem_t, g)
+	if !mapped {
+		if strings.contains(raw_t, "rawptr") || (p.is_ref && elem_t == "") {
+			pt = .Raw_Ptr
+		} else {
+			pt = .Float
+		}
+	}
+
+	p_nm := sanitize_odin_ident(p.name, context.temp_allocator)
+	if p_nm == "" {
+		p_nm = fmt.tprintf(is_result ? "out_%d" : "arg_%d", idx)
+	}
+
+	return engine.VG_Pin_Def{
+		name             = strings.clone(p_nm, allocator),
+		pin_type         = pt,
+		pass_mode        = p.is_ref ? .By_Reference : .Copy_Value,
+		is_addressable   = is_result && p.is_ref,
+		is_array         = ck != .Single,
+		container_kind   = ck,
+		custom_type_name = custom != "" ? strings.clone(custom, allocator) : "",
+	}
+}
+
+// Formats an `Odin_Function_Node` as a complete editable Odin procedure declaration (no locked banner).
+format_node_as_full_odin_proc :: proc(
+	n:         ^engine.VG_Node,
+	g:         ^engine.Visual_Graph,
+	allocator := context.temp_allocator,
+) -> string {
+	if n == nil do return ""
+	sig := build_scoped_node_signature(n, g, context.temp_allocator)
+	sb := strings.builder_make(0, len(sig) + len(n.odin_body) + 32, allocator)
+	strings.write_string(&sb, sig)
+	strings.write_string(&sb, " {\n")
+	body_tr := strings.trim_right(n.odin_body, "\r\n")
+	if len(body_tr) > 0 {
+		for raw_ln in strings.split_lines(body_tr, context.temp_allocator) {
+			ln := strings.trim_suffix(raw_ln, "\r")
+			if len(strings.trim_space(ln)) > 0 {
+				strings.write_byte(&sb, '\t')
+				strings.write_string(&sb, ln)
+			}
+			strings.write_byte(&sb, '\n')
+		}
+	} else {
+		strings.write_string(&sb, "\t// Write Odin code here\n")
+	}
+	strings.write_byte(&sb, '}')
+	return strings.to_string(sb)
+}
+
+// Parses a full Odin procedure declaration back into an `Odin_Function_Node`, updating name, body, pins,
+// and applying 3-tier smart wire remapping (1: exact name+type, 2: same data slot+type, 3: sever incompatible).
+apply_full_odin_proc_to_node :: proc(
+	g:         ^engine.Visual_Graph,
+	n:         ^engine.VG_Node,
+	full_decl: string,
+) -> (ok: bool, err_msg: string) {
+	if g == nil || n == nil do return false, "Invalid graph or node."
+	proc_name, params, results, body_inner, parsed_ok := cs.parse_odin_proc_decl_header(full_decl, context.temp_allocator)
+	if !parsed_ok {
+		return false, "Invalid Odin procedure declaration syntax."
+	}
+
+	new_inputs  := make([dynamic]engine.VG_Pin_Def, 0, len(params) + 1)
+	new_outputs := make([dynamic]engine.VG_Pin_Def, 0, len(results) + 1)
+
+	has_in_exec  := len(n.inputs)  > 0 && n.inputs[0].pin_type  == .Exec
+	has_out_exec := len(n.outputs) > 0 && n.outputs[0].pin_type == .Exec
+	if has_in_exec {
+		append(&new_inputs, _vs_clone_pin_def(n.inputs[0]))
+	}
+	if has_out_exec {
+		append(&new_outputs, _vs_clone_pin_def(n.outputs[0]))
+	}
+
+	user_pi := 0
+	for pr in params {
+		switch pr.name {
+		case "api", "self", "bp", "_bp", "dt":
+			continue
+		}
+		append(&new_inputs, _map_parsed_param_to_pin(pr, g, user_pi, false))
+		user_pi += 1
+	}
+	for rs, ri in results {
+		append(&new_outputs, _map_parsed_param_to_pin(rs, g, ri, true))
+	}
+
+	// Build 3-tier pin remapping tables (old pin index -> new pin index, or -1 to sever).
+	in_remap  := make([]int, len(n.inputs),  context.temp_allocator)
+	out_remap := make([]int, len(n.outputs), context.temp_allocator)
+	for i in 0 ..< len(in_remap)  do in_remap[i]  = -1
+	for i in 0 ..< len(out_remap) do out_remap[i] = -1
+
+	used_new_in  := make([]bool, len(new_inputs),  context.temp_allocator)
+	used_new_out := make([]bool, len(new_outputs), context.temp_allocator)
+
+	in_data_start  := has_in_exec  ? 1 : 0
+	out_data_start := has_out_exec ? 1 : 0
+	if has_in_exec  { in_remap[0]  = 0; used_new_in[0]  = true }
+	if has_out_exec { out_remap[0] = 0; used_new_out[0] = true }
+
+	// Tier 1: Exact name + compatible type
+	for oi := in_data_start; oi < len(n.inputs); oi += 1 {
+		op := n.inputs[oi]
+		for ni := in_data_start; ni < len(new_inputs); ni += 1 {
+			if used_new_in[ni] do continue
+			np := new_inputs[ni]
+			if op.name == np.name && op.pin_type == np.pin_type && op.is_array == np.is_array {
+				in_remap[oi] = ni
+				used_new_in[ni] = true
+				_copy_pin_defaults(op, &new_inputs[ni])
+				break
+			}
+		}
+	}
+	for oi := out_data_start; oi < len(n.outputs); oi += 1 {
+		op := n.outputs[oi]
+		for ni := out_data_start; ni < len(new_outputs); ni += 1 {
+			if used_new_out[ni] do continue
+			np := new_outputs[ni]
+			if op.name == np.name && op.pin_type == np.pin_type && op.is_array == np.is_array {
+				out_remap[oi] = ni
+				used_new_out[ni] = true
+				break
+			}
+		}
+	}
+
+	// Tier 2: Same relative data slot + identical type (handles parameter/return renames without dropping wires!)
+	for oi := in_data_start; oi < len(n.inputs); oi += 1 {
+		if in_remap[oi] >= 0 do continue
+		op := n.inputs[oi]
+		cand_ni := in_data_start + (oi - in_data_start)
+		if cand_ni < len(new_inputs) && !used_new_in[cand_ni] {
+			np := new_inputs[cand_ni]
+			if op.pin_type == np.pin_type && op.is_array == np.is_array {
+				in_remap[oi] = cand_ni
+				used_new_in[cand_ni] = true
+				_copy_pin_defaults(op, &new_inputs[cand_ni])
+			}
+		}
+	}
+	for oi := out_data_start; oi < len(n.outputs); oi += 1 {
+		if out_remap[oi] >= 0 do continue
+		op := n.outputs[oi]
+		cand_ni := out_data_start + (oi - out_data_start)
+		if cand_ni < len(new_outputs) && !used_new_out[cand_ni] {
+			np := new_outputs[cand_ni]
+			if op.pin_type == np.pin_type && op.is_array == np.is_array {
+				out_remap[oi] = cand_ni
+				used_new_out[cand_ni] = true
+			}
+		}
+	}
+
+	// Tier 3: Apply wire remap & sever removed/incompatible wires
+	for wi := len(g.wires) - 1; wi >= 0; wi -= 1 {
+		if g.wires[wi].to_uid == n.uid {
+			tp := g.wires[wi].to_pin
+			mapped := (tp >= 0 && tp < len(in_remap)) ? in_remap[tp] : -1
+			if mapped < 0 {
+				ordered_remove(&g.wires, wi)
+				continue
+			}
+			g.wires[wi].to_pin = mapped
+		}
+		if g.wires[wi].from_uid == n.uid {
+			fp := g.wires[wi].from_pin
+			mapped := (fp >= 0 && fp < len(out_remap)) ? out_remap[fp] : -1
+			if mapped < 0 {
+				ordered_remove(&g.wires, wi)
+				continue
+			}
+			g.wires[wi].from_pin = mapped
+		}
+	}
+
+	_vs_destroy_pin_list(&n.inputs)
+	_vs_destroy_pin_list(&n.outputs)
+	n.inputs  = new_inputs
+	n.outputs = new_outputs
+
+	if proc_name != "" {
+		if n.title != "" do delete(n.title)
+		n.title = strings.clone(proc_name)
+	}
+	trimmed_body := strings.trim_right(body_inner, "\r\n")
+	if trimmed_body == "// Write Odin code here" do trimmed_body = ""
+	if n.odin_body != "" do delete(n.odin_body)
+	n.odin_body = strings.clone(trimmed_body)
+	return true, ""
+}
+
+@(private)
+_on_scoped_full_node_commit :: proc(node_uid: int, full_decl: string, trigger_hot_swap: bool, _user_ptr: rawptr) -> (ok: bool, err_msg: string) {
+	if n := engine.vg_find_node(&_vs.graph, node_uid); n != nil {
+		vs_push_undo()
+		ok, err_msg = apply_full_odin_proc_to_node(&_vs.graph, n, full_decl)
+		if !ok do return false, err_msg
+		_vs.dirty_unbaked = true
+		_sync_ide_blueprint_context()
+	}
+	if trigger_hot_swap || _vs.auto_bake_on_save {
+		_bake_and_hot_swap_current_graph()
+	}
+	return true, ""
+}
+
+@(private)
+_on_scoped_dock_to_split :: proc(user_ptr: rawptr) {
+	_ = user_ptr
+	_vs.view_mode = .Split_Graph_And_Fn
+}
+
+@(private)
+_current_bodin_zone1_in_ram :: proc(allocator := context.temp_allocator) -> string {
+	if _vs.ram_zone1_override != "" {
+		return strings.clone(_vs.ram_zone1_override, allocator)
+	}
+	abs_g := _vs_resolve_graph_path(_vs.graph_rel_path, context.temp_allocator)
+	src := ""
+	if open_s, is_open := cs.get_open_tab_text(abs_g, context.temp_allocator); is_open {
+		src = open_s
+	} else if abs_g != "" && os.exists(abs_g) {
+		if raw, err := os.read_entire_file(abs_g, context.temp_allocator); err == nil {
+			src = string(raw)
+		}
+	}
+	if z1, has_z1 := engine.vg_extract_bodin_user_zone(src, allocator); has_z1 && strings.trim_space(z1) != "" {
+		return z1
+	}
+	clean_name := sanitize_odin_ident(_vs.graph.name != "" ? _vs.graph.name : "custom_graph", context.temp_allocator)
+	return default_bodin_zone1_header(clean_name, allocator)
+}
+
+@(private)
+_replace_bodin_zone1_ram :: proc(updated_z1: string) {
+	prev_alloc := context.allocator
+	context.allocator = runtime.default_allocator()
+	if _vs.ram_zone1_override != "" do delete(_vs.ram_zone1_override)
+	_vs.ram_zone1_override = strings.clone(updated_z1)
+	context.allocator = prev_alloc
+
+	sync_bodin_user_ast_into_graph(&_vs.graph, _vs.ram_zone1_override)
+	_vs.dirty_unbaked = true
+	_sync_ide_blueprint_context()
+
+	abs_g := _vs_resolve_graph_path(_vs.graph_rel_path, context.temp_allocator)
+	if abs_g != "" {
+		if _, is_open := cs.get_open_tab_text(abs_g, context.temp_allocator); is_open {
+			full_preview, _ := assemble_bodin_odin_sections(&_vs.graph, _vs.ram_zone1_override, true, context.temp_allocator)
+			cs.upsert_open_tab_ram_text(abs_g, full_preview)
+		}
+	}
+}
+
+@(private)
+_stage_snippet_to_zone1_ram :: proc(snippet: string) {
+	z1 := _current_bodin_zone1_in_ram(context.temp_allocator)
+	updated_z1 := strings.concatenate({strings.trim_right_space(z1), "\n\n", strings.trim_space(snippet), "\n"}, context.temp_allocator)
+	_replace_bodin_zone1_ram(updated_z1)
+}
+
+@(private)
+_add_field_to_active_struct_in_ram :: proc(field_nm: string, raw_type_expr: string, default_expr: string = "") -> bool {
+	clean_nm := sanitize_odin_ident(strings.trim_space(field_nm), context.temp_allocator)
+	if clean_nm == "" do return false
+
+	raw_t := strings.trim_space(raw_type_expr)
+	if raw_t == "" do raw_t = "f32"
+	ck := engine.VG_Container_Kind.Single
+	elem_t := raw_t
+	if strings.has_prefix(raw_t, "[]") {
+		ck = .Slice
+		elem_t = strings.trim_space(raw_t[2:])
+	} else if strings.has_prefix(raw_t, "[dynamic]") {
+		ck = .Dynamic_Array
+		elem_t = strings.trim_space(raw_t[9:])
+	}
+	pt, custom, _ := _map_odin_type_str_to_pin(elem_t, &_vs.graph)
+
+	if _vs.active_struct_target != "" {
+		for &st in _vs.graph.structs {
+			if st.name != _vs.active_struct_target do continue
+			for &ef in st.fields {
+				if ef.name == clean_nm do return false
+			}
+			if st.code_authored {
+				z1 := _current_bodin_zone1_in_ram(context.temp_allocator)
+				arena: mem.Dynamic_Arena
+				mem.dynamic_arena_init(&arena)
+				defer mem.dynamic_arena_destroy(&arena)
+				f, _, used_z1 := cs.parse_odin_in_arena(z1, "zone1_struct_add.odin", false, &arena)
+				for decl in f.decls {
+					vd, is_vd := decl.derived.(^ast.Value_Decl)
+					if !is_vd || len(vd.names) == 0 || len(vd.values) == 0 do continue
+					if id, is_id := vd.names[0].derived_expr.(^ast.Ident); is_id && id.name == st.name {
+						if st_ast, is_st := vd.values[0].derived_expr.(^ast.Struct_Type); is_st && st_ast.fields != nil {
+							close_off := clamp(st_ast.end.offset - 1, 0, len(used_z1))
+							if close_off > 0 {
+								ins := fmt.tprintf("\t%s: %s,\n", clean_nm, raw_t)
+								upd_z1 := strings.concatenate({used_z1[:close_off], ins, used_z1[close_off:]}, context.temp_allocator)
+								_replace_bodin_zone1_ram(upd_z1)
+								return true
+							}
+						}
+					}
+				}
+				return false
+			}
+			vs_push_undo()
+			prev_alloc := context.allocator
+			context.allocator = runtime.default_allocator()
+			defer context.allocator = prev_alloc
+			append(&st.fields, engine.VG_Struct_Field{
+				name        = strings.clone(clean_nm),
+				pin_type    = pt,
+				custom_type = custom != "" ? strings.clone(custom) : "",
+			})
+			for &gn in _vs.graph.nodes {
+				if (gn.kind == .Make_Struct || gn.kind == .Break_Struct) && gn.target_var_or_type == st.name {
+					engine.vg_sync_struct_node_pins(&_vs.graph, &gn, st.name)
+				}
+			}
+			_vs.dirty_unbaked = true
+			_sync_ide_blueprint_context()
+			return true
+		}
+	}
+
+	if engine.vg_find_var_index(&_vs.graph, clean_nm) >= 0 do return false
+	vs_push_undo()
+	prev_alloc := context.allocator
+	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev_alloc
+	vd := engine.VG_Var_Decl{
+		name              = strings.clone(clean_nm),
+		pin_type          = pt,
+		is_array          = ck != .Single,
+		container_kind    = ck,
+		array_is_bounded  = ck == .Bounded_Array,
+		custom_type_name  = custom != "" ? strings.clone(custom) : "",
+		instance_editable = true,
+		category          = strings.clone("Default"),
+		slider_min        = 0.0,
+		slider_max        = 10.0,
+	}
+	tr_def := strings.trim_space(default_expr)
+	if tr_def != "" {
+		if pt == .Bool {
+			vd.default_bool = (tr_def == "true")
+		} else if pt == .Float {
+			if val, vok := strconv.parse_f32(tr_def); vok do vd.default_f32 = val
+		} else if pt == .F64 {
+			if val, vok := strconv.parse_f64(tr_def); vok do vd.default_f64 = val
+		} else if pt == .Int || pt == .I8 || pt == .I16 {
+			if val, vok := strconv.parse_int(tr_def); vok do vd.default_int = i32(val)
+		} else if pt == .String || pt == .Asset {
+			vd.default_str = strings.clone(strings.trim(tr_def, "\"`"))
+		}
+	}
+	append(&_vs.graph.variables, vd)
+	_vs.selected_var_idx       = len(_vs.graph.variables) - 1
+	_vs.selected_node_uid      = 0
+	_vs.preview_bb.initialized = false
+	_vs.dirty_unbaked          = true
+	_sync_ide_blueprint_context()
+	return true
+}
+
+@(private)
+_revert_ram_sandbox_from_disk :: proc() {
+	prev_alloc := context.allocator
+	context.allocator = runtime.default_allocator()
+	if _vs.ram_zone1_override != "" {
+		delete(_vs.ram_zone1_override)
+		_vs.ram_zone1_override = ""
+	}
+	context.allocator = prev_alloc
+	abs_g := _vs_resolve_graph_path(_vs.graph_rel_path, context.temp_allocator)
+	if abs_g != "" && os.exists(abs_g) {
+		open_blueprint_in_studio(_vs.graph_rel_path)
+		cs.reload_file_tab_from_disk(abs_g)
+	}
+	_vs.dirty_unbaked = false
+}
+
+@(private)
+_clone_readonly_proc_to_bodin_cb :: proc(full_decl: string, user_ptr: rawptr) {
+	_ = user_ptr
+	nm, _, _, _, ok := cs.parse_odin_proc_decl_header(full_decl, context.temp_allocator)
+	cloned := full_decl
+	if ok && nm != "" {
+		custom_nm := fmt.tprintf("%s_custom", nm)
+		if !strings.contains(full_decl, "@(bp_node)") && !strings.contains(full_decl, "@(hot_proc)") {
+			cloned = strings.concatenate({"@(bp_node)\n", full_decl}, context.temp_allocator)
+		}
+		cloned, _ = strings.replace(cloned, fmt.tprintf("%s ::", nm), fmt.tprintf("%s ::", custom_nm), 1, context.temp_allocator)
+	}
+	_stage_snippet_to_zone1_ram(cloned)
+	_jump_to_bodin_line(1)
+}
+
+@(private)
+_clone_builtin_snippet_as_odin_node_cb :: proc(full_decl: string, user_ptr: rawptr) {
+	_ = user_ptr
+	spawn_p := _canvas_view_spawn_pos(0.45)
+	if _vs.selected_node_uid > 0 {
+		if sel_n := engine.vg_find_node(&_vs.graph, _vs.selected_node_uid); sel_n != nil {
+			spawn_p = {sel_n.pos.x + 280.0, sel_n.pos.y + 40.0}
+		}
+	}
+	new_uid := _spawn_graph_node(.Odin_Function_Node, spawn_p, "Custom_Odin_Node")
+	if nn := engine.vg_find_node(&_vs.graph, new_uid); nn != nil {
+		_, _ = apply_full_odin_proc_to_node(&_vs.graph, nn, full_decl)
+		_vs.dirty_unbaked = true
+		_sync_ide_blueprint_context()
+		_open_odin_node_in_popup_ide(nn)
+	}
+}
+
+format_builtin_node_readonly_odin :: proc(
+	n:         ^engine.VG_Node,
+	g:         ^engine.Visual_Graph,
+	allocator := context.temp_allocator,
+) -> string {
+	if n == nil do return ""
+	sb := strings.builder_make(0, 256, allocator)
+	clean_nm := sanitize_odin_ident(n.title != "" ? n.title : "builtin_node", context.temp_allocator)
+	fmt.sbprintf(&sb, "// Built-in Visual Node (Read-Only Preview): %s\n", n.title)
+	strings.write_string(&sb, "// Copy as text or click [Clone as Editable Proc in .bodin] to convert into an editable Odin BP_Node.\n")
+	fmt.sbprintf(&sb, "custom_%s :: proc(api: ^hot.Engine_Hot_API, self: hot.Hot_Entity, dt: f32", clean_nm)
+	for inp in n.inputs {
+		if inp.pin_type == .Exec || inp.pin_type == .Delegate || inp.split_parent_name != "" do continue
+		fmt.sbprintf(&sb, ", %s: %s", sanitize_odin_ident(inp.name, context.temp_allocator), _pin_odin_type_in_graph(g, inp, context.temp_allocator))
+	}
+	strings.write_byte(&sb, ')')
+	has_out := false
+	for outp in n.outputs {
+		if outp.pin_type != .Exec && outp.pin_type != .Delegate && outp.split_parent_name == "" {
+			has_out = true
+			break
+		}
+	}
+	if has_out {
+		strings.write_string(&sb, " -> (")
+		first := true
+		for outp in n.outputs {
+			if outp.pin_type == .Exec || outp.pin_type == .Delegate || outp.split_parent_name != "" do continue
+			if !first do strings.write_string(&sb, ", ")
+			first = false
+			fmt.sbprintf(&sb, "%s: %s", sanitize_odin_ident(outp.name, context.temp_allocator), _pin_odin_type_in_graph(g, outp, context.temp_allocator))
+		}
+		strings.write_byte(&sb, ')')
+	}
+	strings.write_string(&sb, " {\n")
+	#partial switch n.kind {
+	case .Branch_If:
+		strings.write_string(&sb, "\tif condition {\n\t\t// Execute True branch\n\t} else {\n\t\t// Execute False branch\n\t}\n")
+	case .Math_Float:
+		fmt.sbprintf(&sb, "\t// Math_Float Op: %v\n", n.math_op)
+		strings.write_string(&sb, "\tresult = a + b\n")
+	case .Get_Transform_Pos:
+		strings.write_string(&sb, "\tif pos := hot.pos_ref(api, self); pos != nil {\n\t\tpos_val = pos^\n\t}\n")
+	case .Set_Transform_Pos:
+		strings.write_string(&sb, "\tif pos := hot.pos_ref(api, self); pos != nil {\n\t\tpos^ = target_pos\n\t}\n")
+	case .For_Loop:
+		strings.write_string(&sb, "\tfor i in first_idx ..= last_idx {\n\t\t// Loop body\n\t}\n")
+	case:
+		doc := _kind_builtin_doc(n.kind)
+		if doc != "" {
+			fmt.sbprintf(&sb, "\t// %s\n", doc)
+		}
+		fmt.sbprintf(&sb, "\t// Visual graph node kind: %v\n", n.kind)
+	}
+	if has_out {
+		strings.write_string(&sb, "\treturn\n")
+	}
+	strings.write_byte(&sb, '}')
+	return strings.to_string(sb)
+}
+
 collect_node_scoped_pin_badges :: proc(
 	g: ^engine.Visual_Graph,
 	n: ^engine.VG_Node,
@@ -1388,8 +2503,21 @@ collect_node_scoped_pin_badges :: proc(
 _open_odin_node_in_popup_ide :: proc(n: ^engine.VG_Node) {
 	_sync_ide_blueprint_context()
 	badges := collect_node_scoped_pin_badges(&_vs.graph, n, context.temp_allocator)
+	full_decl := format_node_as_full_odin_proc(n, &_vs.graph, context.temp_allocator)
 	sig := build_scoped_node_signature(n, &_vs.graph, context.temp_allocator)
-	cs.open_scoped_node_popup(n.uid, n.title, sig, badges, n.odin_body, _on_scoped_node_commit, nil)
+	cs.open_scoped_node_popup(
+		n.uid,
+		n.title,
+		sig,
+		badges,
+		full_decl,
+		_on_scoped_node_commit,
+		nil,
+		is_full_decl = true,
+		full_commit_cb = _on_scoped_full_node_commit,
+		dock_split_cb = _on_scoped_dock_to_split,
+		dock_user_ptr = nil,
+	)
 }
 
 @(private)
@@ -1479,63 +2607,23 @@ _delete_selected_graph_nodes :: proc() -> int {
 }
 
 // =============================================================================
-// Top Domain Filter Bar + Asset / Hot-Swap Toolbar
+// Unified Single Top Toolbar + RAM Sandbox Status Pill + Navigate / Usages
 // =============================================================================
 
-@(private)
-_draw_unified_domain_switcher_bar :: proc() {
-	p  := thm.palette()
-	st := thm.studio_tokens()
-	im.TextDisabled("Studio Mode:")
-	im.SameLine(0, 6)
-
-	bp_tint := st.domain_blueprint
-	im.PushStyleColorImVec4(.Button,        thm.with_alpha(bp_tint, 0.38))
-	im.PushStyleColorImVec4(.ButtonHovered, thm.with_alpha(bp_tint, 0.48))
-	im.PushStyleColorImVec4(.ButtonActive,  thm.with_alpha(bp_tint, 0.58))
-	im.PushStyleColorImVec4(.Text,          st.pill_active_text)
-	if im.Button(fmt.ctprintf("%s Blueprint Graph (.bodin)", icons.ICON_MD_ACCOUNT_TREE)) {
-		if _vs.graph.domain != .Material_Shader {
-			_vs.active_domain = _vs.graph.domain
-		} else {
-			_vs.active_domain = .Gameplay_Ability
+@(private = "file")
+_count_proc_usages_in_graph_and_code :: proc(proc_name: string) -> int {
+	if proc_name == "" do return 0
+	total := 0
+	for gn in _vs.graph.nodes {
+		if (gn.kind == .Call_Hot_Proc || gn.kind == .Call_Blueprint_Proc || gn.kind == .Bind_Input_Action || gn.kind == .Bind_Debug_Key || gn.kind == .Delegate_Bind) && gn.hot_proc_target == proc_name {
+			total += 1
 		}
 	}
-	im.PopStyleColor(4)
-	widgets.tooltip("Native Data-Oriented Odin Blueprint Studio (.bodin) — Events, Flow, Input, Delegates, Anim, VFX, and Audio")
-
-	// Right-side Undo/Redo + Persistent Global Wire Style Dropdown + Editor Defaults shortcut
-	right_group_w := f32(286.0)
-	if im.GetContentRegionAvail().x > right_group_w {
-		im.SameLine(im.GetCursorPosX() + im.GetContentRegionAvail().x - right_group_w)
-	} else {
-		im.NewLine()
+	z1 := _current_bodin_zone1_in_ram(context.temp_allocator)
+	if strings.contains(z1, proc_name) {
+		total += len(cs.find_odin_proc_call_sites(z1, "zone1.odin", proc_name, context.temp_allocator))
 	}
-
-	im.BeginDisabled(!vs_can_undo())
-	if im.Button(fmt.ctprintf("%s Undo", icons.ICON_MD_UNDO)) {
-		vs_undo()
-	}
-	im.EndDisabled()
-	widgets.tooltip("Undo (Ctrl+Z)")
-	im.SameLine(0, 4)
-
-	im.BeginDisabled(!vs_can_redo())
-	if im.Button(fmt.ctprintf("%s Redo", icons.ICON_MD_REDO)) {
-		vs_redo()
-	}
-	im.EndDisabled()
-	widgets.tooltip("Redo (Ctrl+Shift+Z / Ctrl+Y)")
-	im.SameLine(0, 6)
-
-	nc.draw_wire_style_combo("##ug_global_wire_style", 118.0)
-	_vs.canvas.wire_style = nc.global_wire_style
-	im.SameLine(0, 6)
-	if im.Button(fmt.ctprintf("%s##ug_defs", icons.ICON_MD_SETTINGS)) {
-		wnd.open_settings_tab("Code & Script IDE")
-	}
-	widgets.tooltip("Open Settings -> Code & Script IDE (Wire routing style, problem check delay, external IDE & per-pane zooms)")
-	_ = p
+	return total
 }
 
 @(private)
@@ -1629,7 +2717,7 @@ _collect_palette_items :: proc(allocator := context.temp_allocator) -> [dynamic]
 			arg        = v.name,
 			compat_pin = -1,
 		})
-		if v.is_array {
+		if engine.vg_resolve_container_kind(v) != .Single {
 			append(&items, _Palette_Item{
 				ns         = .Variable,
 				label      = fmt.tprintf("Array Op `%s` (Get / Append / Len)", v.name),
@@ -1656,7 +2744,11 @@ _draw_palette_item_menu :: proc(item: _Palette_Item, spawn_pos: [2]f32, show_bad
 		im.TextColored(accent, "[%s]", fmt.ctprintf("%s", badge))
 		im.SameLine(0, 6)
 	}
-	clicked := im.MenuItem(fmt.ctprintf("%s##pal_%d_%s_%s_%v", item.label, int(item.kind), item.arg, badge, auto_wire_pin_drop))
+	has_lead_icon := len(item.label) > 0 && item.label[0] >= 0x80
+	disp_lbl := has_lead_icon \
+		? fmt.ctprintf("%s##pal_%d_%s_%s_%v", item.label, int(item.kind), item.arg, badge, auto_wire_pin_drop) \
+		: fmt.ctprintf("%s %s##pal_%d_%s_%s_%v", vg_node_kind_icon(item.kind), item.label, int(item.kind), item.arg, badge, auto_wire_pin_drop)
+	clicked := im.MenuItem(disp_lbl)
 	if item.doc_override != "" {
 		widgets.tooltip_delayed(fmt.ctprintf("@(bp_node) %s\n\n%s", item.hot_name, item.doc_override))
 	} else if item.is_hot {
@@ -1780,10 +2872,23 @@ _draw_namespace_node_palette :: proc(spawn_pos: [2]f32, q: string) -> (spawned: 
 
 @(private)
 _enter_full_odin_script_mode :: proc() {
-	if _, _, ok := bake_graph_to_odin_file(&_vs.graph, _vs.graph_rel_path); ok {
-		cs.reload_file_tab_from_disk(_vs.graph_rel_path)
-	}
+	_ = _ensure_bodin_backed_without_clobbering()
 	_vs.view_mode = .Full_Odin_Script
+}
+
+@(private)
+_sync_open_bodin_ast_to_graph_on_return :: proc() {
+	abs_p := _vs_resolve_graph_path(_vs.graph_rel_path, context.temp_allocator)
+	src := ""
+	if open_s, is_open := cs.get_open_tab_text(abs_p, context.temp_allocator); is_open {
+		src = open_s
+	} else if raw, err := os.read_entire_file(abs_p, context.temp_allocator); err == nil {
+		src = string(raw)
+	}
+	if z1, has_z1 := engine.vg_extract_bodin_user_zone(src, context.temp_allocator); has_z1 {
+		sync_bodin_user_ast_into_graph(&_vs.graph, z1)
+		_sync_ide_blueprint_context()
+	}
 }
 
 @(private)
@@ -1864,6 +2969,9 @@ _draw_blueprint_top_toolbar :: proc() {
 				if ms.m == .Full_Odin_Script {
 					_enter_full_odin_script_mode()
 				} else {
+					if _vs.view_mode == .Full_Odin_Script {
+						_sync_open_bodin_ast_to_graph_on_return()
+					}
 					_vs.view_mode = ms.m
 				}
 			}
@@ -1875,6 +2983,7 @@ _draw_blueprint_top_toolbar :: proc() {
 	io := im.GetIO()
 	if _vs.window_focused && !io.WantTextInput && !im.IsAnyItemActive() && im.IsKeyPressed(.F12, false) {
 		if _vs.view_mode == .Full_Odin_Script {
+			_sync_open_bodin_ast_to_graph_on_return()
 			_vs.view_mode = .Blueprint_Graph
 		} else {
 			_enter_full_odin_script_mode()
@@ -1983,15 +3092,9 @@ _draw_blueprint_top_toolbar :: proc() {
 
 	_toolbar_wrap(82.0)
 	if im.Button(fmt.ctprintf("%s .bodin", icons.ICON_MD_DESCRIPTION)) {
-		if gen_abs, _, ok := bake_graph_to_odin_file(&_vs.graph, _vs.graph_rel_path); ok {
-			context.allocator = runtime.default_allocator()
-			if _vs.last_baked_odin != "" do delete(_vs.last_baked_odin)
-			_vs.last_baked_odin = strings.clone(gen_abs)
-		}
-		target_open := _vs.last_baked_odin
-		if strings.has_suffix(_vs.graph_rel_path, ".bodin") {
-			bodin_abs := _vs_resolve_graph_path(_vs.graph_rel_path, context.temp_allocator)
-			if os.exists(bodin_abs) do target_open = bodin_abs
+		target_open := _ensure_bodin_backed_without_clobbering()
+		if target_open == "" || !os.exists(target_open) {
+			target_open = _vs.last_baked_odin
 		}
 		if target_open != "" {
 			cs.open_file_in_studio(target_open)
@@ -1999,6 +3102,100 @@ _draw_blueprint_top_toolbar :: proc() {
 		}
 	}
 	widgets.tooltip("Open this unified `.bodin` file (native Odin source on top + `@BODIN_GRAPH_V1` layout block below) in Odin Micro-Studio!")
+
+	// 5B. Unified Undo / Redo + Wire Style + Settings (merged single toolbar!)
+	_toolbar_wrap(68.0)
+	im.BeginDisabled(!vs_can_undo())
+	if im.Button(fmt.ctprintf("%s##bp_tb_undo", icons.ICON_MD_UNDO)) {
+		vs_undo()
+	}
+	im.EndDisabled()
+	widgets.tooltip("Undo (Ctrl+Z)")
+
+	_toolbar_wrap(40.0)
+	im.BeginDisabled(!vs_can_redo())
+	if im.Button(fmt.ctprintf("%s##bp_tb_redo", icons.ICON_MD_REDO)) {
+		vs_redo()
+	}
+	im.EndDisabled()
+	widgets.tooltip("Redo (Ctrl+Shift+Z / Ctrl+Y)")
+
+	_toolbar_wrap(124.0)
+	nc.draw_wire_style_combo("##ug_global_wire_style", 116.0)
+	_vs.canvas.wire_style = nc.global_wire_style
+
+	_toolbar_wrap(38.0)
+	if im.Button(fmt.ctprintf("%s##ug_defs", icons.ICON_MD_SETTINGS)) {
+		wnd.open_settings_tab("Code & Script IDE")
+	}
+	widgets.tooltip("Open Settings -> Code & Script IDE (Wire routing, diagnostics delay, external IDE & zooms)")
+
+	// 5C. `[Navigate / Usages ▾]` Quick Jump across Graph Nodes <-> .bodin Odin Source
+	_toolbar_wrap(142.0)
+	if im.Button(fmt.ctprintf("%s Navigate / Usages v", icons.ICON_MD_ROUTE)) {
+		im.OpenPopup("##bp_nav_usages_popup")
+	}
+	widgets.tooltip("Jump cleanly between Blueprint graph nodes, Custom Procedures, and Zone 1 Odin definitions with live caller counts")
+	if im.BeginPopup("##bp_nav_usages_popup") {
+		im.TextColored(p.accent, "%s", fmt.ctprintf("%s Blueprint <-> Odin Navigator", icons.ICON_MD_ROUTE))
+		im.Separator()
+		widgets.popup_header(icons.ICON_MD_ACCOUNT_TREE, "Graph Odin Nodes & Procedures", p.accent)
+		any_g := false
+		for &gn in _vs.graph.nodes {
+			if gn.kind == .Odin_Function_Node {
+				any_g = true
+				u_cnt := _count_proc_usages_in_graph_and_code(gn.title)
+				if im.MenuItem(fmt.ctprintf("%s %s [Node #%d] (%d usages)##nav_nd_%d", icons.ICON_MD_CODE, gn.title, gn.uid, u_cnt, gn.uid)) {
+					_vs.view_mode = .Blueprint_Graph
+					_focus_canvas_on_node(&gn)
+				}
+			} else if gn.kind == .Custom_Proc_Entry && gn.hot_proc_target != "" {
+				any_g = true
+				u_cnt := _count_proc_usages_in_graph_and_code(gn.hot_proc_target)
+				if im.MenuItem(fmt.ctprintf("%s %s [SubGraph] (%d callers)##nav_sg_%d", icons.ICON_MD_DIAMOND, gn.hot_proc_target, u_cnt, gn.uid)) {
+					_vs.view_mode = .Blueprint_Graph
+					_navigate_to_subgraph(gn.hot_proc_target)
+				}
+			}
+		}
+		if !any_g {
+			im.TextDisabled("  (No custom Odin nodes or procedures yet)")
+		}
+		im.Separator()
+		widgets.popup_header(icons.ICON_MD_DESCRIPTION, "Zone 1 Odin Declarations (.bodin)", p.status_info)
+		z1 := _current_bodin_zone1_in_ram(context.temp_allocator)
+		syms := cs.extract_odin_outline_symbols(z1, context.temp_allocator)
+		if len(syms) == 0 {
+			im.TextDisabled("  (No declarations in Zone 1)")
+		} else {
+			for sy, si in syms {
+				u_cnt := _count_proc_usages_in_graph_and_code(sy.name)
+				if im.MenuItem(fmt.ctprintf("%s %s (Ln %d — %d refs)##nav_z1_%d", icons.ICON_MD_CODE, sy.name, sy.line, u_cnt, si)) {
+					_jump_to_bodin_line(sy.line)
+				}
+			}
+		}
+		im.EndPopup()
+	}
+
+	// 5D. RAM Sandbox Status Pill (`Unsaved` + `Revert` vs `Disk Synced`)
+	_toolbar_wrap(210.0)
+	ram_dirty := _vs.dirty_unbaked || _vs.ram_zone1_override != ""
+	if ram_dirty {
+		im.PushStyleColorImVec4(.Button, thm.with_alpha(p.status_warning, 0.24))
+		im.PushStyleColorImVec4(.Text, p.status_warning)
+		_ = im.SmallButton(fmt.ctprintf("%s RAM Sandbox: Unsaved##bp_ram_st", icons.ICON_MD_MEMORY))
+		im.PopStyleColor(2)
+		widgets.tooltip("All edits (graphs, :: scratchpad, Zone 1 structs/procs) live in RAM only until Bake & Hot-Swap (F7)")
+		im.SameLine(0, 4)
+		if im.SmallButton("Revert##bp_ram_rev") {
+			_revert_ram_sandbox_from_disk()
+		}
+		widgets.tooltip("Discard unsaved RAM sandbox edits and reload from .bodin on disk")
+	} else {
+		im.TextColored(p.status_success, "%s", fmt.ctprintf("%s Disk Synced", icons.ICON_MD_CHECK))
+		widgets.tooltip("RAM Blueprint state matches `.bodin` on disk")
+	}
 
 	// 6. Runtime Cost & Hot-Swap Telemetry Badge
 	_toolbar_wrap(210.0)

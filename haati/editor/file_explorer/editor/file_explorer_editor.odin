@@ -26,6 +26,8 @@ import file_exp "haati:editor/file_explorer"
 import editor_visuals "haati:editor/editor_visuals"
 import cad_csg "haati:packages/cad_csg"
 import audio "haati:packages/audio"
+import cs "haati:editor/code_studio"
+import menu "haati:editor/menu"
 import widgets "haati:editor/widgets"
 import vs "haati:editor/visual_script"
 
@@ -412,6 +414,24 @@ _set_list_scale :: proc(scale: f32) {
 }
 
 @(private = "file")
+_current_tree_scale :: proc() -> f32 {
+	sc := file_exp.clamp_tree_scale(file_exp.settings.tree_scale)
+	file_exp.settings.tree_scale = sc
+	return sc
+}
+
+@(private = "file")
+_set_tree_scale :: proc(scale: f32) {
+	file_exp.settings.tree_scale = file_exp.clamp_tree_scale(scale)
+}
+
+@(private = "file")
+_step_tree_zoom :: proc(wheel_delta: f32) {
+	if wheel_delta == 0 do return
+	_set_tree_scale(file_exp.step_tree_scale(_current_tree_scale(), wheel_delta))
+}
+
+@(private = "file")
 _explorer_step_zoom :: proc(notches: f32) {
 	if notches == 0 do return
 	if _is_grid_mode() {
@@ -433,7 +453,7 @@ _explorer_reset_zoom :: proc() {
 @(private = "file")
 _any_explorer_modal_open :: proc() -> bool {
 	return _show_delete_modal || _show_rename_modal || _show_new_folder ||
-	       _show_new_scene    || _show_new_script   || _show_color_picker
+	       _show_new_scene    || _show_new_script   || _show_new_bodin  || _show_color_picker
 }
 
 // Category Filter Chips (Unreal Engine Content Browser Style)
@@ -569,6 +589,9 @@ _item_matches_category_filter :: proc(item: file_exp.File_Item, filter: Explorer
 @(private = "file") _new_script_buf:          [128]u8
 @(private = "file") _new_script_template:     int = 0
 
+@(private = "file") _show_new_bodin:          bool = false
+@(private = "file") _new_bodin_buf:           [128]u8
+
 @(private = "file") _show_delete_modal:       bool = false
 @(private = "file") _delete_target_path_buf:  [512]u8
 @(private = "file") _delete_target_path_len:  int = 0
@@ -587,7 +610,7 @@ owns_keyboard_shortcuts :: proc() -> bool {
 	return _explorer_window_hovered || _explorer_window_focused ||
 	       _mat_ed_window_hovered   || _mat_ed_window_focused   ||
 	       _show_delete_modal || _show_rename_modal || _show_new_folder ||
-	       _show_new_scene    || _show_new_script   || _show_color_picker
+	       _show_new_scene    || _show_new_script   || _show_new_bodin  || _show_color_picker
 }
 
 @(private = "file") _show_rename_modal:       bool = false
@@ -1229,6 +1252,8 @@ _draw_color_palette_menu :: proc(dir_path: string) {
 
 @(private = "file")
 _draw_folder_dropdown_menu :: proc(dir_path: string, label: string) {
+	im.PushFontFloat(nil, im.GetStyle().FontSizeBase)
+	defer im.PopFont()
 	im.TextColoredUnformatted({0.3, 0.75, 1.0, 1.0}, fmt.ctprintf("%s  %s", icons.ICON_MD_FOLDER, label))
 	im.Separator()
 
@@ -1283,6 +1308,13 @@ _draw_folder_dropdown_menu :: proc(dir_path: string, label: string) {
 		mem.copy(&_new_script_buf[0], raw_data(copy_str), len(copy_str))
 		_new_script_template = 0
 		_show_new_script = true
+	}
+	if im.MenuItem(fmt.ctprintf("%s  New Blueprint Script (.bodin)...", icons.ICON_MD_ACCOUNT_TREE)) {
+		_navigate_to(dir_path)
+		mem.zero(&_new_bodin_buf, len(_new_bodin_buf))
+		copy_str := "new_blueprint.bodin"
+		mem.copy(&_new_bodin_buf[0], raw_data(copy_str), len(copy_str))
+		_show_new_bodin = true
 	}
 	if im.MenuItem(fmt.ctprintf("%s  New Material (.mat)", icons.ICON_MD_PALETTE)) {
 		_navigate_to(dir_path)
@@ -1445,6 +1477,46 @@ _draw_modals :: proc() {
 		im.SameLine(0, 15)
 		if im.Button(fmt.ctprintf("%s  Cancel", icons.ICON_MD_CLOSE), {110, 30}) {
 			_show_new_script = false
+			im.CloseCurrentPopup()
+		}
+		im.EndPopup()
+	}
+
+	// 3b. New Blueprint Script Modal (.bodin)
+	if _show_new_bodin {
+		im.OpenPopup("Create New Blueprint Script", {})
+	}
+	im.SetNextWindowPos(center, .Appearing, im.Vec2{0.5, 0.5})
+	if im.BeginPopupModal("Create New Blueprint Script", &_show_new_bodin, {.AlwaysAutoResize}) {
+		im.TextColoredUnformatted({0.35, 0.7, 1.0, 1.0}, fmt.ctprintf("%s  Create New Blueprint Script (.bodin)", icons.ICON_MD_ACCOUNT_TREE))
+		im.Separator()
+		im.Spacing()
+
+		im.Text("Blueprint Script Name:")
+		if im.IsWindowAppearing() do im.SetKeyboardFocusHere()
+		im.SetNextItemWidth(320)
+		enter_pressed := im.InputText("##NewBodinName", cstring(raw_data(_new_bodin_buf[:])), len(_new_bodin_buf), {.EnterReturnsTrue})
+
+		im.Spacing()
+		im.Separator()
+		im.Spacing()
+
+		if im.Button(fmt.ctprintf("%s  Create Blueprint", icons.ICON_MD_CHECK), {155, 30}) || enter_pressed {
+			name := strings.string_from_null_terminated_ptr(raw_data(_new_bodin_buf[:]), len(_new_bodin_buf))
+			if len(strings.trim_space(name)) > 0 {
+				rel_bp, _, ok := vs.create_new_blueprint_asset(name, _get_current_dir())
+				if ok {
+					_needs_refresh = true
+					engine.asset_db_request_refresh()
+					vs.open_blueprint_in_studio(rel_bp)
+				}
+			}
+			_show_new_bodin = false
+			im.CloseCurrentPopup()
+		}
+		im.SameLine(0, 15)
+		if im.Button(fmt.ctprintf("%s  Cancel", icons.ICON_MD_CLOSE), {110, 30}) {
+			_show_new_bodin = false
 			im.CloseCurrentPopup()
 		}
 		im.EndPopup()
@@ -1856,7 +1928,7 @@ _draw_toolbar :: proc() {
 	}
 	im.PopStyleColor(2)
 
-	// 3. Right-Aligned Workspace Actions: [+ Add / Create], [Preview], [Open in OS], [Dock]
+	// 3. Right-Aligned Workspace Actions: [+ Add / Create], [Preview], [Open in OS]
 	p := thm.palette()
 	st := im.GetStyle()
 	btn_sz := im.GetFrameHeight()
@@ -1864,7 +1936,7 @@ _draw_toolbar :: proc() {
 	prev_btn_lbl := fmt.ctprintf("%s Preview", icons.ICON_MD_VISIBILITY)
 	add_btn_w := im.CalcTextSize(add_btn_lbl).x + st.FramePadding.x * 2.0
 	prev_btn_w := im.CalcTextSize(prev_btn_lbl).x + st.FramePadding.x * 2.0
-	right_row1_w := add_btn_w + 6.0 + prev_btn_w + 6.0 + btn_sz + 6.0 + btn_sz
+	right_row1_w := add_btn_w + 6.0 + prev_btn_w + 6.0 + btn_sz
 
 	im.SameLine(0, 12)
 	avail_x := im.GetContentRegionAvail().x
@@ -1905,8 +1977,18 @@ _draw_toolbar :: proc() {
 			_new_script_template = 0
 			_show_new_script = true
 		}
+		if im.MenuItem(fmt.ctprintf("%s  New Blueprint Script (.bodin)...", icons.ICON_MD_ACCOUNT_TREE)) {
+			mem.zero(&_new_bodin_buf, len(_new_bodin_buf))
+			copy_str := "new_blueprint.bodin"
+			mem.copy(&_new_bodin_buf[0], raw_data(copy_str), len(copy_str))
+			_show_new_bodin = true
+		}
 		if im.MenuItem(fmt.ctprintf("%s  New Material (.mat)", icons.ICON_MD_PALETTE)) {
 			_create_new_material_in_dir(_get_current_dir())
+		}
+		if im.BeginMenu(fmt.ctprintf("%s  More Asset Types", icons.ICON_MD_ADD_CIRCLE_OUTLINE)) {
+			menu.draw_menu_sections({menu.section("Assets/Create", -14, menu.ORDER_DEFAULT)})
+			im.EndMenu()
 		}
 		im.Separator()
 		if im.MenuItem(fmt.ctprintf("%s  Open in Windows Explorer", icons.ICON_MD_FOLDER_OPEN)) {
@@ -1934,14 +2016,6 @@ _draw_toolbar :: proc() {
 	im.SameLine(0, 6)
 	if widgets.icon_button(icons.ICON_MD_FOLDER_OPEN, "##ExplorerOpenOS", "Show Current Folder in Windows Explorer", size = btn_sz) {
 		file_exp.reveal_in_os(_get_current_dir())
-	}
-
-	// Dock Toggle button (Float out / Dock back in)
-	im.SameLine(0, 6)
-	is_docked := im.IsWindowDocked()
-	dock_icon: cstring = is_docked ? icons.ICON_MD_OPEN_IN_NEW : icons.ICON_MD_DOCK
-	if widgets.icon_button(dock_icon, "##ExplorerDockToggle", is_docked ? "Dock Out as Floating Window" : "Dock Window Back into Workspace", size = btn_sz) {
-		wnd.toggle_window_dock("void_file_explorer")
 	}
 
 	// Row 2: Search + Scope + Sort (Left)  |  View Mode + Zoom Bar (Right)
@@ -2098,6 +2172,13 @@ _draw_toolbar :: proc() {
 @(private = "file")
 _draw_left_pane :: proc() {
 	p := thm.palette()
+	base_font_px := im.GetStyle().FontSizeBase
+	tree_sc := _current_tree_scale()
+	im.PushFontFloat(nil, base_font_px * tree_sc)
+	defer im.PopFont()
+	im.PushStyleVar(.IndentSpacing, 18.0 * tree_sc)
+	defer im.PopStyleVar()
+
 	// ── 1. QUICK ACCESS HEADER & ITEMS ──
 	im.TextColored(p.text_muted, "Quick Access")
 	im.Separator()
@@ -2105,7 +2186,7 @@ _draw_left_pane :: proc() {
 	current_dir := _get_current_dir()
 	bookmarks := file_exp.get_bookmarks()
 	avail_w := im.GetContentRegionAvail().x
-	btn_w: f32 = 22.0
+	btn_w: f32 = 22.0 * tree_sc
 
 	for bm, idx in bookmarks {
 		im.PushIDInt(i32(idx))
@@ -2162,6 +2243,15 @@ _draw_left_pane :: proc() {
 
 	// ── 2. FOLDER DIRECTORY TREE ──
 	im.TextColored(p.text_muted, "Project Directory")
+	if tree_sc != file_exp.TREE_SCALE_DEFAULT {
+		im.SameLine()
+		im.PushFontFloat(nil, base_font_px)
+		if im.SmallButton(fmt.ctprintf("%.0f%%##TreeZoomReset", math.round(tree_sc * 100.0))) {
+			_set_tree_scale(file_exp.TREE_SCALE_DEFAULT)
+		}
+		widgets.tooltip("Folder Tree Zoom (Ctrl + MouseWheel over left pane)\nClick to reset to 100%%")
+		im.PopFont()
+	}
 	im.Separator()
 
 	_draw_folder_tree_node(file_exp.get_workspace_root(), "Workspace Root", depth = 0)
@@ -2265,9 +2355,10 @@ _draw_folder_tree_node :: proc(dir_path: string, label: string, depth: int) {
 
 	// Quiet Ghost Menu Button ("...")
 	im.SameLine(0, 0)
+	tree_btn_w := f32(22.0) * _current_tree_scale()
 	avail_tree_x := im.GetContentRegionAvail().x
-	if avail_tree_x > 26.0 {
-		im.SetCursorPosX(im.GetCursorPosX() + avail_tree_x - 22.0)
+	if avail_tree_x > tree_btn_w + 4.0 {
+		im.SetCursorPosX(im.GetCursorPosX() + avail_tree_x - tree_btn_w)
 	}
 	im.PushStyleColorImVec4(.Button, {0, 0, 0, 0})
 	im.PushStyleColorImVec4(.ButtonHovered, p.bg_hover)
@@ -2391,8 +2482,18 @@ _draw_right_pane :: proc() {
 			_new_script_template = 0
 			_show_new_script = true
 		}
+		if im.MenuItem(fmt.ctprintf("%s  New Blueprint Script (.bodin)...", icons.ICON_MD_ACCOUNT_TREE)) {
+			mem.zero(&_new_bodin_buf, len(_new_bodin_buf))
+			copy_str := "new_blueprint.bodin"
+			mem.copy(&_new_bodin_buf[0], raw_data(copy_str), len(copy_str))
+			_show_new_bodin = true
+		}
 		if im.MenuItem(fmt.ctprintf("%s  New Material (.mat)", icons.ICON_MD_PALETTE)) {
 			_create_new_material_in_dir(_get_current_dir())
+		}
+		if im.BeginMenu(fmt.ctprintf("%s  More Asset Types", icons.ICON_MD_ADD_CIRCLE_OUTLINE)) {
+			menu.draw_menu_sections({menu.section("Assets/Create", -14, menu.ORDER_DEFAULT)})
+			im.EndMenu()
 		}
 		im.Separator()
 		if im.MenuItem(fmt.ctprintf("%s  Refresh", icons.ICON_MD_REFRESH)) {
@@ -3966,6 +4067,21 @@ _draw_item_context_menu :: proc(item: file_exp.File_Item) {
 		if im.MenuItem(fmt.ctprintf("%s  Open / Launch", icons.ICON_MD_PLAY_ARROW)) {
 			_open_file_item(item.path)
 		}
+		item_ext_lo := strings.to_lower(filepath.ext(item.path), context.temp_allocator)
+		if item_ext_lo == ".bodin" {
+			if im.MenuItem(fmt.ctprintf("%s  Open Source in Odin Micro-Studio", icons.ICON_MD_CODE)) {
+				cs.open_file_in_studio(item.path)
+				wnd.open("odin_micro_studio")
+			}
+			if im.MenuItem(fmt.ctprintf("%s  Export as Pure Odin Script (.odin)", icons.ICON_MD_DESCRIPTION)) {
+				if out_odin, exp_ok := vs.export_bodin_to_standalone_odin(item.path); exp_ok {
+					_needs_refresh = true
+					engine.asset_db_request_refresh()
+					cs.open_file_in_studio(out_odin)
+					wnd.open("odin_micro_studio")
+				}
+			}
+		}
 	}
 
 	if im.MenuItem(fmt.ctprintf("%s  Show in %s", icons.ICON_MD_FOLDER_OPEN, file_exp.get_os_explorer_name())) {
@@ -4043,14 +4159,11 @@ file_explorer_window_draw :: proc() {
 	_explorer_window_hovered = im.IsWindowHovered(im.HoveredFlags_RootAndChildWindows)
 	_explorer_window_focused = im.IsWindowFocused(im.FocusedFlags_RootAndChildWindows)
 
-	// Content-only Ctrl + MouseWheel zoom: adjusts card size (Grid) or row density (List)
-	// without distorting toolbars, chrome, or sidebars, and locks child scrolling while Ctrl is held.
+	// Independent Ctrl + MouseWheel zoom: lock child scrolling while Ctrl is held,
+	// and route wheel notches exclusively to the hovered pane (`##ExplorerLeftPane`
+	// scales Folder Tree typography; `##ExplorerRightPane` scales Folder Content).
 	io := im.GetIO()
 	ctrl_zoom_lock := io.KeyCtrl && !_any_explorer_modal_open()
-	if _explorer_window_hovered && ctrl_zoom_lock && io.MouseWheel != 0 {
-		_explorer_step_zoom(io.MouseWheel)
-		io.MouseWheel = 0
-	}
 
 	// Keyboard shortcuts & Type-ahead jump (Del, F2, Ctrl+C, Ctrl+V, Ctrl+D, Ctrl+=/−/0, A-Z)
 	// Active when hovering OR focused on Void File Explorer so Delete/F2 never leak to Scene3D/Hierarchy!
@@ -4087,6 +4200,10 @@ file_explorer_window_draw :: proc() {
 		row_h := im.GetContentRegionAvail().y
 		// Left Pane: Bookmarks & Tree
 		im.BeginChild("##ExplorerLeftPane", {_left_pane_width, row_h}, {.Borders}, pane_scroll_flags)
+		if im.IsWindowHovered(im.HoveredFlags_RootAndChildWindows) && ctrl_zoom_lock && io.MouseWheel != 0 {
+			_step_tree_zoom(io.MouseWheel)
+			io.MouseWheel = 0
+		}
 		_draw_left_pane()
 		im.EndChild()
 
@@ -4097,6 +4214,10 @@ file_explorer_window_draw :: proc() {
 		// Center/Right Pane: Content Browser + Optional Live Asset Preview Inspector
 		if browser_w >= 60.0 {
 			im.BeginChild("##ExplorerRightPane", {browser_w, row_h}, {.Borders}, pane_scroll_flags)
+			if im.IsWindowHovered(im.HoveredFlags_RootAndChildWindows) && ctrl_zoom_lock && io.MouseWheel != 0 {
+				_explorer_step_zoom(io.MouseWheel)
+				io.MouseWheel = 0
+			}
 			_draw_right_pane()
 			im.EndChild()
 		}

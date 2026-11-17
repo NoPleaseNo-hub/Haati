@@ -31,8 +31,70 @@ import input "../engine/input"
 @(private = "file") _orig_platform_update_window:   proc "c" (vp: ^im.Viewport)
 @(private = "file") _orig_platform_set_window_pos:  proc "c" (vp: ^im.Viewport, pos: im.Vec2)
 @(private = "file") _orig_platform_set_window_size: proc "c" (vp: ^im.Viewport, size: im.Vec2)
+@(private = "file") _orig_renderer_render_window:   proc "c" (vp: ^im.Viewport, render_arg: rawptr)
+@(private = "file") _orig_renderer_swap_buffers:    proc "c" (vp: ^im.Viewport, render_arg: rawptr)
 
+@(private = "file")
+_Sec_Throttle_Slot :: struct {
+	id:      im.ID,
+	last_ns: u64,
+	skipped: bool,
+}
+
+@(private = "file") _sec_throttle_slots: [32]_Sec_Throttle_Slot
 @(private = "file") _editor_mouse_drag_active: bool
+
+@(private = "file")
+_sec_slot_for_vp :: proc "c" (vp_id: im.ID) -> ^_Sec_Throttle_Slot {
+	free_idx := -1
+	oldest_idx := 0
+	for &s, i in _sec_throttle_slots {
+		if s.id == vp_id do return &s
+		if s.id == 0 && free_idx < 0 do free_idx = i
+		if s.last_ns < _sec_throttle_slots[oldest_idx].last_ns do oldest_idx = i
+	}
+	idx := free_idx >= 0 ? free_idx : oldest_idx
+	_sec_throttle_slots[idx] = {id = vp_id}
+	return &_sec_throttle_slots[idx]
+}
+
+// Returns the secondary OS viewport currently being dragged by the user (or nil if none/main).
+viewport_active_dragged_os_viewport :: proc "c" () -> ^im.Viewport {
+	g_ctx := im.GetCurrentContext()
+	if g_ctx == nil || g_ctx.MovingWindow == nil do return nil
+	vp := g_ctx.MovingWindow.Viewport
+	main_vp := im.GetMainViewport()
+	if vp == nil || (main_vp != nil && vp.ID_ == main_vp.ID_) do return nil
+	return (^im.Viewport)(vp)
+}
+
+@(private = "file")
+_renderer_render_window_hook :: proc "c" (vp: ^im.Viewport, render_arg: rawptr) {
+	if drag_vp := viewport_active_dragged_os_viewport(); drag_vp != nil && vp != nil && vp.ID_ != drag_vp.ID_ {
+		slot := _sec_slot_for_vp(vp.ID_)
+		now_ns := sdl.GetTicksNS()
+		if slot.last_ns != 0 && now_ns - slot.last_ns < 40_000_000 {
+			slot.skipped = true
+			return
+		}
+		slot.last_ns = now_ns
+		slot.skipped = false
+	} else if vp != nil {
+		slot := _sec_slot_for_vp(vp.ID_)
+		slot.last_ns = sdl.GetTicksNS()
+		slot.skipped = false
+	}
+	if _orig_renderer_render_window != nil do _orig_renderer_render_window(vp, render_arg)
+}
+
+@(private = "file")
+_renderer_swap_buffers_hook :: proc "c" (vp: ^im.Viewport, render_arg: rawptr) {
+	if drag_vp := viewport_active_dragged_os_viewport(); drag_vp != nil && vp != nil && vp.ID_ != drag_vp.ID_ {
+		slot := _sec_slot_for_vp(vp.ID_)
+		if slot.skipped do return
+	}
+	if _orig_renderer_swap_buffers != nil do _orig_renderer_swap_buffers(vp, render_arg)
+}
 
 // Resolve the SDL_Window from a viewport's PlatformHandle (handles both SDL_WindowID
 // and direct ^sdl.Window pointer conventions across ImGui SDL3 backend versions).
@@ -143,8 +205,19 @@ viewport_main_refresh_hz :: proc() -> f32 {
 }
 
 // Returns the target display refresh rate (Hz) of whichever editor OS window
-// currently owns focus, falling back across active ImGui viewports or 60 Hz.
+// currently owns drag focus or focus, falling back across active ImGui viewports or 60 Hz.
 viewport_target_refresh_hz :: proc() -> f32 {
+	g_ctx := im.GetCurrentContext()
+	if g_ctx != nil && (g_ctx.MovingWindow != nil || g_ctx.DragDropActive) {
+		gx, gy: f32
+		_ = sdl.GetGlobalMouseState(&gx, &gy)
+		if did := sdl.GetDisplayForPoint({i32(gx), i32(gy)}); did != 0 {
+			dm := sdl.GetDesktopDisplayMode(did)
+			if dm != nil && dm.refresh_rate > 1.0 {
+				return clamp(dm.refresh_rate, 30.0, 500.0)
+			}
+		}
+	}
 	target_win := sdl.GetKeyboardFocus()
 	if target_win == nil do target_win = sdl.GetMouseFocus()
 	if target_win == nil do target_win = gfx.window()
@@ -241,7 +314,7 @@ viewport_platform_sync_drag_mouse :: proc() {
 	active_drag := moving_win || drag_drop_active
 
 	if !_editor_mouse_drag_active {
-		if left_down && (_any_editor_sdl_window_has_focus() || im.IsMouseDown(.Left)) {
+		if left_down && active_drag && (_any_editor_sdl_window_has_focus() || im.IsMouseDown(.Left)) {
 			_editor_mouse_drag_active = true
 		}
 	}
@@ -296,6 +369,14 @@ viewport_platform_install :: proc() {
 	if pio.Platform_SetWindowSize != nil && pio.Platform_SetWindowSize != _platform_set_window_size_hook {
 		_orig_platform_set_window_size = pio.Platform_SetWindowSize
 		pio.Platform_SetWindowSize = _platform_set_window_size_hook
+	}
+	if pio.Renderer_RenderWindow != nil && pio.Renderer_RenderWindow != _renderer_render_window_hook {
+		_orig_renderer_render_window = pio.Renderer_RenderWindow
+		pio.Renderer_RenderWindow = _renderer_render_window_hook
+	}
+	if pio.Renderer_SwapBuffers != nil && pio.Renderer_SwapBuffers != _renderer_swap_buffers_hook {
+		_orig_renderer_swap_buffers = pio.Renderer_SwapBuffers
+		pio.Renderer_SwapBuffers = _renderer_swap_buffers_hook
 	}
 }
 

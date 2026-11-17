@@ -15,8 +15,10 @@ binary and never reaches a game.
 | Box2D | MIT | runtime, `physics2d` package only | https://github.com/erincatto/box2d |
 | Box3D | MIT | runtime, `physics3d` package only | https://github.com/erincatto/box3d |
 | Dear ImGui | MIT | editor | https://github.com/ocornut/imgui |
-| odin-imgui (bindings) | MIT, Trevin Sorenson | editor | `moonhug/external/odin-imgui/LICENSE` |
-| Material Symbols Outlined (icon font) | Apache-2.0 | editor | `moonhug/external/fonts/material/LICENSE-Material.txt` |
+| odin-imgui (bindings) | MIT, Trevin Sorenson | editor | `haati/external/odin-imgui/LICENSE` |
+| Material Symbols Outlined (icon font) | Apache-2.0 | editor | `haati/external/fonts/material/LICENSE-Material.txt` |
+| Phosphor Icons (icon font) | MIT | editor | `haati/external/fonts/phosphor/LICENSE-Phosphor.txt` |
+| Watch-Wolf emblem (`wolf-head` by Lorc, game-icons.net) | CC-BY 3.0 | editor | `haati/external/icons/LICENSE-GameIcons.txt` |
 
 ## What a game built with MoonHug must include
 
@@ -27,8 +29,10 @@ binary and never reaches a game.
 - **MIT** (stb, Box2D, Box3D when used): the respective copyright notice and
   license text in the game's documentation or credits.
 
-Editor-only components (Dear ImGui, odin-imgui, Material Symbols, cgltf) and
-the CC0 assets impose nothing on shipped games.
+Editor-only components (Dear ImGui, odin-imgui, Material Symbols, Phosphor, cgltf) and
+the CC0 assets impose nothing on shipped games. The CC-BY 3.0 Watch-Wolf emblem is
+editor-only too, and is credited here: "Icons made by Lorc from https://game-icons.net".
+If you put game-icons.net art in a shipped game, credit the author in your game.
 
 Full license texts live with each component in the Odin `vendor/` tree or
 the paths listed above.

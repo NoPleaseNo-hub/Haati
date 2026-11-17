@@ -9,8 +9,6 @@ package visual_script
 import "base:runtime"
 import "core:fmt"
 import "core:math/linalg"
-import "core:os"
-import "core:path/filepath"
 import "core:strings"
 import cs "haati:editor/code_studio"
 import "haati:editor/icons"
@@ -591,6 +589,160 @@ collect_delegate_pin_bind_targets :: proc(
 	return out
 }
 
+@(private = "file")
+_draw_colon_colon_ram_scratchpad :: proc(
+	raw_query:   string,
+	spawn_pos:   [2]f32,
+	search_buf:  []byte,
+	is_pin_drop: bool,
+) -> (handled: bool) {
+	trimmed_q := strings.trim_left_space(raw_query)
+	if !strings.has_prefix(trimmed_q, "::") {
+		if _vs.scratchpad_seeded_for != "" {
+			prev_alloc := context.allocator
+			context.allocator = runtime.default_allocator()
+			delete(_vs.scratchpad_seeded_for)
+			_vs.scratchpad_seeded_for = ""
+			context.allocator = prev_alloc
+		}
+		return false
+	}
+
+	p := thm.palette()
+	if _vs.scratchpad_seeded_for == "" {
+		after_trigger := strings.trim_left_space(trimmed_q[2:])
+		seed_src := "my_proc :: proc(x: f32) -> f32 {\n\treturn x\n}"
+		lo_a := strings.to_lower(after_trigger, context.temp_allocator)
+		if lo_a != "" && lo_a != "proc" {
+			if strings.contains(after_trigger, ":=") || strings.contains(after_trigger, ":") || strings.contains(after_trigger, "::") {
+				seed_src = after_trigger
+			} else {
+				seed_src = fmt.tprintf("%s :: proc(x: f32) -> f32 {\n\treturn x\n}", sanitize_odin_ident(after_trigger, context.temp_allocator))
+			}
+		}
+		cs.scratchpad_init_or_seed(&_vs.scratchpad, seed_src)
+		prev_alloc := context.allocator
+		context.allocator = runtime.default_allocator()
+		_vs.scratchpad_seeded_for = strings.clone(after_trigger != "" ? after_trigger : "::empty")
+		context.allocator = prev_alloc
+	}
+
+	active_struct_lbl := _vs.active_struct_target != "" ? _vs.active_struct_target : "Self State (Component)"
+	im.TextColored(p.accent, "%s", fmt.ctprintf("%s RAM Odin Scratchpad", icons.ICON_MD_CODE))
+	im.SameLine(0, 10)
+	im.TextDisabled("%s", fmt.ctprintf("Active Struct: %s  |  Ctrl+Wheel: Zoom", active_struct_lbl))
+
+	code_now, err_cnt, ctrl_enter := cs.scratchpad_draw_editor(&_vs.scratchpad, "##bp_ram_scratch", im.GetMainViewport().WorkSize)
+	sk, ident_nm, inf_type, inf_expr := cs.analyze_odin_scratch_snippet(code_now, context.temp_allocator)
+
+	can_stage := sk != .Unknown && (err_cnt == 0 || sk == .Field_Decl || sk == .Var_Decl)
+	switch sk {
+	case .Proc_Decl:
+		im.TextColored(p.accent, "%s", fmt.ctprintf("Detected: Odin Procedure '%s' -> Spawn Editable BP_Node", ident_nm))
+	case .Struct_Decl, .Enum_Decl, .Const_Decl:
+		im.TextColored(p.status_info, "%s", fmt.ctprintf("Detected: Zone 1 Declaration '%s' -> Stage in RAM", ident_nm))
+	case .Field_Decl:
+		im.TextColored(p.status_success, "%s", fmt.ctprintf("Detected: Field '%s: %s' -> Add to %s", ident_nm, inf_type, active_struct_lbl))
+	case .Var_Decl:
+		im.TextColored(p.status_warning, "%s", fmt.ctprintf("Shorthand '%s := %s' -> Converts to Field '%s: %s' in %s", ident_nm, inf_expr, ident_nm, inf_type, active_struct_lbl))
+	case .Unknown:
+		im.TextColored(p.status_error, "Enter `name :: proc(...) { ... }`, `S :: struct { ... }`, `hp: f32`, or `hp := 100`")
+	}
+
+	_stage_now := proc(
+		sk_in:       cs.Scratch_Decl_Kind,
+		code_in:     string,
+		ident_in:    string,
+		type_in:     string,
+		expr_in:     string,
+		s_pos:       [2]f32,
+		s_buf:       []byte,
+		pin_drop:    bool,
+	) {
+		switch sk_in {
+		case .Proc_Decl:
+			adj := s_pos
+			if pin_drop && !_vs.pin_drop_from_out {
+				adj.x = max(s_pos.x - 280.0, 20.0)
+			}
+			uid := _spawn_graph_node(.Odin_Function_Node, adj, ident_in != "" ? ident_in : "Custom_Proc")
+			if nn := engine.vg_find_node(&_vs.graph, uid); nn != nil {
+				_, _ = apply_full_odin_proc_to_node(&_vs.graph, nn, code_in)
+				if pin_drop {
+					compat := engine.vg_find_compatible_pin_on_node(_vs.pin_drop_from_out, _vs.pin_drop_pin_def, nn)
+					if compat >= 0 {
+						from_uid := _vs.pin_drop_from_out ? _vs.pin_drop_from_uid : uid
+						from_pin := _vs.pin_drop_from_out ? _vs.pin_drop_from_pin : compat
+						to_uid   := _vs.pin_drop_from_out ? uid                   : _vs.pin_drop_from_uid
+						to_pin   := _vs.pin_drop_from_out ? compat                : _vs.pin_drop_from_pin
+						_connect_vg_wire_checked(from_uid, from_pin, to_uid, to_pin, push_undo = false)
+					}
+				}
+				_vs.dirty_unbaked = true
+				_sync_ide_blueprint_context()
+			}
+		case .Struct_Decl, .Enum_Decl, .Const_Decl:
+			_stage_snippet_to_zone1_ram(code_in)
+		case .Field_Decl, .Var_Decl:
+			_ = _add_field_to_active_struct_in_ram(ident_in, type_in, expr_in)
+		case .Unknown:
+			return
+		}
+		if len(s_buf) > 0 do s_buf[0] = 0
+		if _vs.scratchpad_seeded_for != "" {
+			prev_alloc := context.allocator
+			context.allocator = runtime.default_allocator()
+			delete(_vs.scratchpad_seeded_for)
+			_vs.scratchpad_seeded_for = ""
+			context.allocator = prev_alloc
+		}
+		_vs.pin_drop_pending = false
+		im.CloseCurrentPopup()
+	}
+
+	if !can_stage do im.BeginDisabled()
+	im.PushStyleColorImVec4(.Button, thm.with_alpha(p.accent, 0.30))
+	if im.Button(fmt.ctprintf("%s Stage in RAM (Ctrl+Enter)##sc_stage", icons.ICON_MD_MEMORY)) || (ctrl_enter && can_stage) {
+		_stage_now(sk, code_now, ident_nm, inf_type, inf_expr, spawn_pos, search_buf, is_pin_drop)
+	}
+	im.PopStyleColor()
+	if !can_stage do im.EndDisabled()
+
+	if sk == .Proc_Decl && err_cnt == 0 {
+		im.SameLine()
+		if im.Button("Stage as @(bp_node) in Zone 1##sc_z1_bp") {
+			z1_code := strings.contains(code_now, "@(bp_node)") ? code_now : strings.concatenate({"@(bp_node)\n", code_now}, context.temp_allocator)
+			_stage_snippet_to_zone1_ram(z1_code)
+			if len(search_buf) > 0 do search_buf[0] = 0
+			if _vs.scratchpad_seeded_for != "" {
+				prev_alloc := context.allocator
+				context.allocator = runtime.default_allocator()
+				delete(_vs.scratchpad_seeded_for)
+				_vs.scratchpad_seeded_for = ""
+				context.allocator = prev_alloc
+			}
+			_vs.pin_drop_pending = false
+			im.CloseCurrentPopup()
+		}
+		widgets.tooltip("Add directly to Zone 1 Odin source in RAM as a reusable `@(bp_node)` instead of spawning a single graph node")
+	}
+
+	im.SameLine()
+	if im.Button("Cancel##sc_cancel") {
+		if len(search_buf) > 0 do search_buf[0] = 0
+		if _vs.scratchpad_seeded_for != "" {
+			prev_alloc := context.allocator
+			context.allocator = runtime.default_allocator()
+			delete(_vs.scratchpad_seeded_for)
+			_vs.scratchpad_seeded_for = ""
+			context.allocator = prev_alloc
+		}
+		_vs.pin_drop_pending = false
+		im.CloseCurrentPopup()
+	}
+	return true
+}
+
 @(private)
 _draw_pin_drop_context_popup :: proc() {
 	im.SetNextWindowPos(_vs.pin_drop_screen, .Appearing)
@@ -616,7 +768,7 @@ _draw_pin_drop_context_popup :: proc() {
 	_vs.pin_drop_focus_search = false
 	sr := widgets.search_bar(_vs.pin_drop_search_buf[:], widgets.Search_Bar_Opts{
 		id         = "##vs_pin_drop_q",
-		hint       = "Filter compatible BP_Nodes, Custom Events, @(hot_proc)...",
+		hint       = "Filter compatible BP_Nodes, :: to write Odin in RAM...",
 		mode       = .Popup,
 		width      = 360,
 		auto_focus = auto_focus,
@@ -629,6 +781,9 @@ _draw_pin_drop_context_popup :: proc() {
 	im.Separator()
 
 	spawn_pos := [2]f32{_vs.pin_drop_canvas.x, _vs.pin_drop_canvas.y - 36.0}
+	if _draw_colon_colon_ram_scratchpad(sr.query, spawn_pos, _vs.pin_drop_search_buf[:], true) {
+		return
+	}
 	q_raw := strings.trim_space(sr.query)
 
 	// Quick Custom Event & Delegate Binding actions for `.Delegate` pins (`Input` and `Output`)
@@ -842,29 +997,38 @@ _draw_inline_pin_f32_param :: proc(
 @(private)
 _draw_embedded_scoped_node_or_proc :: proc(n: ^engine.VG_Node, avail_sz: im.Vec2) {
 	if n == nil {
-		im.TextDisabled("Select an Odin Function Node or Custom Procedure to edit its scoped Odin body.")
+		im.TextDisabled("Select an Odin Function Node or Custom Procedure to edit its Odin code.")
 		return
 	}
 	_sync_ide_blueprint_context()
 	badges := collect_node_scoped_pin_badges(&_vs.graph, n, context.temp_allocator)
 
-	sig: string
-	if n.kind == .Custom_Proc_Entry {
-		pname := sanitize_odin_ident(n.hot_proc_target != "" ? n.hot_proc_target : n.title, context.temp_allocator)
-		sb := strings.builder_make(context.temp_allocator)
-		fmt.sbprintf(&sb, "mhgraph_%s__proc_%s :: proc \"c\" (api: ^hot.Engine_Hot_API, self: hot.Hot_Entity, using &_bp, dt: f32", sanitize_odin_ident(_vs.graph.name, context.temp_allocator), pname)
-		for oi in 2 ..< len(n.outputs) {
-			op := n.outputs[oi]
-			if op.pin_type == .Exec || op.pin_type == .Delegate do continue
-			fmt.sbprintf(&sb, ", %s: %s", sanitize_odin_ident(op.name, context.temp_allocator), engine.vg_pin_odin_type(op.pin_type, op.is_array))
+	if n.kind == .Odin_Function_Node {
+		full_decl := format_node_as_full_odin_proc(n, &_vs.graph, context.temp_allocator)
+		upd, edited, trig_hs := cs.sync_and_draw_embedded_scoped_editor(n.uid, n.title, "", badges, full_decl, avail_sz, full_decl_mode = true)
+		if edited {
+			_, _ = apply_full_odin_proc_to_node(&_vs.graph, n, upd)
+			_vs.dirty_unbaked = true
+			_sync_ide_blueprint_context()
 		}
-		strings.write_byte(&sb, ')')
-		sig = strings.to_string(sb)
-	} else {
-		sig = build_scoped_node_signature(n, &_vs.graph, context.temp_allocator)
+		if trig_hs {
+			_bake_and_hot_swap_current_graph()
+		}
+		return
 	}
 
-	upd, edited, trig_hs := cs.sync_and_draw_embedded_scoped_editor(n.uid, n.title, sig, badges, n.odin_body, avail_sz)
+	pname := sanitize_odin_ident(n.hot_proc_target != "" ? n.hot_proc_target : n.title, context.temp_allocator)
+	sb := strings.builder_make(context.temp_allocator)
+	fmt.sbprintf(&sb, "mhgraph_%s__proc_%s :: proc \"c\" (api: ^hot.Engine_Hot_API, self: hot.Hot_Entity, using &_bp, dt: f32", sanitize_odin_ident(_vs.graph.name, context.temp_allocator), pname)
+	for oi in 2 ..< len(n.outputs) {
+		op := n.outputs[oi]
+		if op.pin_type == .Exec || op.pin_type == .Delegate do continue
+		fmt.sbprintf(&sb, ", %s: %s", sanitize_odin_ident(op.name, context.temp_allocator), engine.vg_pin_odin_type(op.pin_type, op.is_array))
+	}
+	strings.write_byte(&sb, ')')
+	sig := strings.to_string(sb)
+
+	upd, edited, trig_hs := cs.sync_and_draw_embedded_scoped_editor(n.uid, n.title, sig, badges, n.odin_body, avail_sz, full_decl_mode = false)
 	if edited {
 		context.allocator = runtime.default_allocator()
 		if n.odin_body != "" do delete(n.odin_body)
@@ -1037,10 +1201,6 @@ draw_visual_script_studio_window :: proc() {
 	_vs.window_hovered = im.IsWindowHovered(im.HoveredFlags_RootAndChildWindows)
 	_vs.window_focused = im.IsWindowFocused({.RootWindow, .ChildWindows})
 
-	// 1. Unified Domain Content Filter Switcher
-	_draw_unified_domain_switcher_bar()
-	im.Separator()
-
 	if visual_script_has_focus() && !io.WantTextInput && !im.IsAnyItemActive() && !im.IsPopupOpen("", im.PopupFlags_AnyPopupId) && io.KeyCtrl && im.GetFrameCount() != _vs.last_undo_redo_frame {
 		if im.IsKeyPressed(.Z, false) {
 			if io.KeyShift {
@@ -1053,36 +1213,23 @@ draw_visual_script_studio_window :: proc() {
 		}
 	}
 
-	// 2. `.bodin` Native Odin Graph Toolbar (Unified Namespace Graph)
+	// Single Merged Blueprint Toolbar
 	_draw_blueprint_top_toolbar()
 	im.Separator()
+	cs.draw_sandbox_fault_banner()
 
 	// Full `.bodin` Script View (`F12`)
 	if _vs.view_mode == .Full_Odin_Script {
 		if im.Button(fmt.ctprintf("%s <- Return to Blueprint Graph (F12)", icons.ICON_MD_ACCOUNT_TREE)) {
+			_sync_open_bodin_ast_to_graph_on_return()
 			_vs.view_mode = .Blueprint_Graph
 		}
 		im.SameLine(0, 10)
 		im.TextDisabled("%s", fmt.ctprintf("Editing Unified File: %s", _vs.graph_rel_path))
 		req_save, req_hs := cs.draw_embedded_script_panel(_vs.graph_rel_path, im.GetContentRegionAvail())
 		if req_save || req_hs {
-			repo_root := engine.resolve_repo_root(context.temp_allocator)
-			abs_p := _vs.graph_rel_path
-			if !filepath.is_abs(abs_p) {
-				abs_p, _ = filepath.join({repo_root, _vs.graph_rel_path}, context.temp_allocator)
-			}
-			if os.exists(abs_p) {
-				context.allocator = runtime.default_allocator()
-				if engine.vg_load_from_file(&_vs.graph, abs_p) {
-					vs_clear_undo()
-				}
-				_vs.preview_bb.initialized = false
-				_vs.dirty_unbaked = false
-				_sync_ide_blueprint_context()
-			}
-			if req_hs {
-				_sync_bodin_disk_to_hot_cartridge()
-			}
+			abs_p := _vs_resolve_graph_path(_vs.graph_rel_path, context.temp_allocator)
+			_sync_bodin_file_edits_and_hot_swap(abs_p, req_hs)
 		}
 		return
 	}
@@ -1241,6 +1388,7 @@ draw_visual_script_studio_window :: proc() {
 							b, open := nc.canvas_bp_node_begin(&_vs.canvas, &npos, {
 								id                 = ni,
 								title              = fmt.ctprintf("%s", n.title),
+								header_icon        = vg_node_kind_icon(n.kind),
 								category           = cat,
 								step_badge         = fmt.ctprintf("#%d", n.uid),
 								color              = col,
@@ -1279,9 +1427,12 @@ draw_visual_script_studio_window :: proc() {
 										if ip.split_expanded {
 											in_lbl = fmt.ctprintf("%s %s (Split)", icons.ICON_MD_EXPAND_MORE, clean_in)
 										} else {
+											ip_ck := engine.vg_pin_container_kind(ip)
 											badge := ip.pin_type == .Exec \
 												? icons.ICON_MD_PLAY_ARROW \
-												: (ip.pin_type == .Delegate ? icons.ICON_MD_DIAMOND : (ip.pass_mode == .By_Reference ? icons.ICON_MD_DIAMOND : icons.ICON_MD_CIRCLE))
+												: (ip_ck == .Slice ? icons.ICON_MD_VIEW_TIMELINE \
+												: (ip_ck != .Single ? icons.ICON_MD_STACKS \
+												: (ip.pin_type == .Delegate ? icons.ICON_MD_DIAMOND : (ip.pass_mode == .By_Reference ? icons.ICON_MD_DIAMOND : icons.ICON_MD_CIRCLE))))
 											in_type_nm := ip.custom_type_name != "" ? ip.custom_type_name : engine.vg_pin_odin_type(ip.pin_type, ip.is_array)
 											if ip.pin_type == .Delegate || ip.pin_type == .Exec {
 												in_lbl = fmt.ctprintf("%s %s", badge, clean_in)
@@ -1298,9 +1449,12 @@ draw_visual_script_studio_window :: proc() {
 										if op.split_expanded {
 											out_lbl = fmt.ctprintf("%s %s (Split)", icons.ICON_MD_EXPAND_MORE, clean_out)
 										} else {
+											op_ck := engine.vg_pin_container_kind(op)
 											badge := op.pin_type == .Exec \
 												? icons.ICON_MD_PLAY_ARROW \
-												: (op.pin_type == .Delegate ? icons.ICON_MD_DIAMOND : (op.is_addressable ? icons.ICON_MD_DIAMOND : icons.ICON_MD_CIRCLE))
+												: (op_ck == .Slice ? icons.ICON_MD_VIEW_TIMELINE \
+												: (op_ck != .Single ? icons.ICON_MD_STACKS \
+												: (op.pin_type == .Delegate ? icons.ICON_MD_DIAMOND : (op.is_addressable ? icons.ICON_MD_DIAMOND : icons.ICON_MD_CIRCLE))))
 											out_lbl = fmt.ctprintf("%s %s", badge, clean_out)
 										}
 										out_c = _pin_color(op)
@@ -1540,17 +1694,21 @@ draw_visual_script_studio_window :: proc() {
 										_open_odin_node_in_popup_ide(&n)
 									}
 								} else if n.kind == .Call_Hot_Proc && n.hot_proc_target != "" {
-									src_file := "haati/hot_scripts/builtin_hot_scripts.odin"
-									proc_nm  := n.hot_proc_target
-									if sm, ok := engine.hot_proc_find_sig_meta(n.hot_proc_target); ok && sm.source_proc_name != "" {
-										proc_nm = sm.source_proc_name
+									if z1_line := _find_bodin_proc_line(n.hot_proc_target); z1_line > 0 {
+										_jump_to_bodin_line(z1_line)
+									} else {
+										src_file := "haati/hot_scripts/builtin_hot_scripts.odin"
+										proc_nm  := n.hot_proc_target
+										if sm, ok := engine.hot_proc_find_sig_meta(n.hot_proc_target); ok && sm.source_proc_name != "" {
+											proc_nm = sm.source_proc_name
+										}
+										if he, hok := cs.resolve_hot_proc_info(n.hot_proc_target); hok && he.source_file != "" {
+											src_file = he.source_file
+										} else if he2, hok2 := cs.resolve_hot_proc_info(proc_nm); hok2 && he2.source_file != "" {
+											src_file = he2.source_file
+										}
+										cs.open_scoped_proc_popup(n.hot_proc_target, src_file, proc_nm, _clone_readonly_proc_to_bodin_cb, nil)
 									}
-									if he, hok := cs.resolve_hot_proc_info(n.hot_proc_target); hok && he.source_file != "" {
-										src_file = he.source_file
-									} else if he2, hok2 := cs.resolve_hot_proc_info(proc_nm); hok2 && he2.source_file != "" {
-										src_file = he2.source_file
-									}
-									cs.open_scoped_proc_popup(n.hot_proc_target, src_file, proc_nm)
 								} else if n.kind == .Custom_Proc_Entry && n.hot_proc_target != "" {
 									_navigate_to_subgraph(n.hot_proc_target)
 								} else if n.kind == .Bind_Input_Action || n.kind == .Bind_Input_Vector || n.kind == .Bind_Debug_Key || n.kind == .Delegate_Bind || n.kind == .Call_Blueprint_Proc {
@@ -1566,6 +1724,9 @@ draw_visual_script_studio_window :: proc() {
 									if tgt != "" && engine.vg_find_custom_proc_node(&_vs.graph, tgt) != nil {
 										_navigate_to_subgraph(tgt)
 									}
+								} else {
+									snippet := format_builtin_node_readonly_odin(&n, &_vs.graph, context.temp_allocator)
+									cs.open_readonly_snippet_popup(n.title, snippet, _clone_builtin_snippet_as_odin_node_cb, nil)
 								}
 							}
 
@@ -1639,18 +1800,49 @@ draw_visual_script_studio_window :: proc() {
 						_vs.canvas.suppress_node_drag = hovered_ep >= 0 || _vs.dragging_wire
 
 						// Render Stationary Idle-Delay Tooltip strictly when resting calmly on card background/header
+						hovered_doc_unsafe: cstring = nil
+						if hovered_doc_uid > 0 {
+							if hn := engine.vg_find_node(&_vs.graph, hovered_doc_uid); hn != nil {
+								hck := engine.VG_Container_Kind.Single
+								hpt := hot.Hot_Pin_Type.Float
+								if hn.var_name != "" {
+									if hvi := engine.vg_find_var_index(&_vs.graph, hn.var_name); hvi >= 0 {
+										hck = engine.vg_resolve_container_kind(_vs.graph.variables[hvi])
+										hpt = _vs.graph.variables[hvi].pin_type
+									}
+								}
+								hovered_doc_unsafe = bp_unsafe_tooltip_warning(hpt, hck, false, hn.kind, hn.sub_op)
+							}
+						}
 						if hovered_doc_uid > 0 && hovered_ep < 0 && hovered_doc_txt != "" &&
 						   (!im.IsAnyItemHovered() || hovered_hdr_drag) &&
 						   !im.IsPopupOpen("", im.PopupFlags_AnyPopup) {
-							widgets.tooltip_unchecked_delayed(u64(hovered_doc_uid) ~ 0x517cc1b727220a95, fmt.ctprintf("%s", hovered_doc_txt))
+							widgets.tooltip_unchecked_unsafe_delayed(u64(hovered_doc_uid) ~ 0x517cc1b727220a95, fmt.ctprintf("%s", hovered_doc_txt), hovered_doc_unsafe)
 						}
 						if hovered_ep >= 0 && !_vs.dragging_wire && !im.IsPopupOpen("", im.PopupFlags_AnyPopup) {
 							hep := endpoints[hovered_ep]
+							hep_ck := engine.vg_pin_container_kind(hep.pin_def)
+							hep_unsafe := bp_unsafe_tooltip_warning(hep.pin_def.pin_type, hep_ck, hep.pin_def.pass_mode == .By_Reference)
+							tname := hep.pin_def.custom_type_name != "" ? hep.pin_def.custom_type_name : engine.vg_pin_odin_type(hep.pin_def.pin_type, hep.pin_def.is_array)
+							if hep_ck == .Slice {
+								tname = fmt.tprintf("[]%s", hep.pin_def.custom_type_name != "" ? hep.pin_def.custom_type_name : engine.vg_pin_odin_type(hep.pin_def.pin_type, false))
+							}
 							if dbg_bb != nil && hep.is_out && hep.pin_def.pin_type != .Exec {
 								if lslot, lok := engine.visual_script_get_live_pin_value(dbg_ent, hep.node_uid, hep.pin_idx); lok {
-									tname := hep.pin_def.custom_type_name != "" ? hep.pin_def.custom_type_name : engine.vg_pin_odin_type(hep.pin_def.pin_type, hep.pin_def.is_array)
-									widgets.tooltip_unchecked(fmt.ctprintf("%s : %s\nLive: %s", hep.pin_def.name, tname, _format_live_slot(lslot)))
+									widgets.tooltip_unchecked_unsafe_delayed(
+										(u64(hep.node_uid) << 16) | u64(hep.pin_idx),
+										fmt.ctprintf("%s : %s\nLive: %s", hep.pin_def.name, tname, _format_live_slot(lslot)),
+										hep_unsafe,
+										0.05,
+									)
 								}
+							} else if hep_unsafe != nil {
+								widgets.tooltip_unchecked_unsafe_delayed(
+									(u64(hep.node_uid) << 16) | u64(hep.pin_idx),
+									fmt.ctprintf("%s : %s", hep.pin_def.name, tname),
+									hep_unsafe,
+									0.20,
+								)
 							}
 						}
 
@@ -1899,8 +2091,14 @@ draw_visual_script_studio_window :: proc() {
 									_vs.selected_node_uid = cn.uid
 									_vs.selected_var_idx  = -1
 								}
-								if cn.kind == .Odin_Function_Node && im.MenuItem("Edit Scoped Odin Code (Popup IDE)...") {
-									_open_odin_node_in_popup_ide(cn)
+								if cn.kind == .Odin_Function_Node {
+									if im.MenuItem("Edit Scoped Odin Code (Popup IDE)...") {
+										_open_odin_node_in_popup_ide(cn)
+									}
+									if im.MenuItem("View in Full .bodin Script...") {
+										clean_nm := sanitize_odin_ident(_vs.graph.name != "" ? _vs.graph.name : "custom_graph", context.temp_allocator)
+										_jump_to_bodin_line(_find_bodin_proc_line(fmt.tprintf("_node_%s_%d_body", clean_nm, cn.uid)))
+									}
 								}
 								if im.MenuItem("Collapse Selected to Scoped Odin BP_Node") {
 									_collapse_selected_to_odin_node()
@@ -1917,10 +2115,10 @@ draw_visual_script_studio_window :: proc() {
 							}
 
 							_vs.ctx_spawn_canvas = (io.MousePos - _vs.canvas.origin) / max(_vs.canvas.zoom, 0.2) - _vs.canvas.pan
-							im.TextColored(p.accent, "%s", fmt.ctprintf("%s Add BP_Node (by Namespace)", icons.ICON_MD_SEARCH))
+							im.TextColored(p.accent, "%s", fmt.ctprintf("%s Add BP_Node or `::` Write Odin in RAM", icons.ICON_MD_SEARCH))
 							sr := widgets.search_bar(_vs.ctx_search_buf[:], widgets.Search_Bar_Opts{
 								id         = "##vg_ctx_q",
-								hint       = "Search BP_Nodes, namespaces, @hot_proc, variables...",
+								hint       = "Search BP_Nodes, :: to write Odin in RAM...",
 								mode       = .Popup,
 								width      = 340,
 								auto_focus = im.IsWindowAppearing(),
@@ -1929,12 +2127,14 @@ draw_visual_script_studio_window :: proc() {
 								im.CloseCurrentPopup()
 							} else {
 								spawn_pos := [2]f32{_vs.ctx_spawn_canvas.x, _vs.ctx_spawn_canvas.y}
-								if im.BeginChild("##vg_palette_scroll", {360, 280}) {
-									_draw_namespace_node_palette(spawn_pos, sr.query)
+								if !_draw_colon_colon_ram_scratchpad(sr.query, spawn_pos, _vs.ctx_search_buf[:], false) {
+									if im.BeginChild("##vg_palette_scroll", {360, 280}) {
+										_draw_namespace_node_palette(spawn_pos, sr.query)
+									}
+									im.EndChild()
+									im.Separator()
+									nc.canvas_draw_default_context_menu_items(&_vs.canvas, pos_arr, 0)
 								}
-								im.EndChild()
-								im.Separator()
-								nc.canvas_draw_default_context_menu_items(&_vs.canvas, pos_arr, 0)
 							}
 							im.EndPopup()
 						}

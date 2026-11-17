@@ -23,6 +23,7 @@ NODE_PIN_Y       :: NODE_HEADER_H + NODE_PIN_STRIP_H * 0.5
 Node_Block_Spec :: struct {
 	id:                 int,
 	title:              cstring,
+	header_icon:        cstring, // optional category/kind glyph drawn before `title`
 	category:           cstring, // optional short module tag (e.g. "DUAL BASE", "FAKER GAS")
 	step_badge:         cstring, // optional topological badge (e.g. "#1", "OFF", "ACTIVE")
 	color:              im.Vec4, // category accent hue
@@ -123,13 +124,14 @@ canvas_node_block_begin :: proc(
 	// Measure exact header & pin-strip intrinsic widths so titles/badges NEVER clip!
 	left_chk_w:  f32 = spec.enabled_ptr != nil ? (22.0 * zm) : 0.0
 	badge_w:     f32 = spec.step_badge  != nil ? (im.CalcTextSize(spec.step_badge).x + 12.0 * zm) : 0.0
+	hdr_ic_w:    f32 = spec.header_icon != nil ? (im.CalcTextSize(spec.header_icon).x + 6.0 * zm) : 0.0
 	title_w:     f32 = spec.title       != nil ? im.CalcTextSize(spec.title).x : 0.0
 	cat_w:       f32 = spec.category    != nil ? (im.CalcTextSize(spec.category).x + 12.0 * zm) : 0.0
 	code_btn_w:  f32 = spec.has_code_btn       ? (24.0 * zm) : 0.0
 	coll_btn_w:  f32 = 22.0 * zm
 	right_btns_w := code_btn_w + coll_btn_w + (spec.has_code_btn ? 4.0 * zm : 0.0)
 
-	hdr_req_w := pad_x * 2 + left_chk_w + badge_w + title_w + 18.0 * zm + cat_w + right_btns_w
+	hdr_req_w := pad_x * 2 + left_chk_w + badge_w + hdr_ic_w + title_w + 18.0 * zm + cat_w + right_btns_w
 	in_lbl_w:  f32 = spec.in_label  != nil ? im.CalcTextSize(spec.in_label).x  : 0.0
 	out_lbl_w: f32 = spec.out_label != nil ? im.CalcTextSize(spec.out_label).x : 0.0
 	pin_req_w: f32 = pin_h > 0.0 ? (in_lbl_w + out_lbl_w + 38.0 * zm) : 0.0
@@ -217,6 +219,13 @@ canvas_node_block_begin :: proc(
 		im.DrawList_AddRect(dl, bp_min, bp_max, im.GetColorU32ImVec4(thm.with_alpha(spec.color, 0.65)), 4.0 * zm, 1.0 * zm)
 		im.DrawList_AddText(dl, {bp_min.x + 4.0 * zm, text_y}, im.GetColorU32ImVec4(enabled_val ? p.text_primary : p.text_muted), spec.step_badge)
 		cur_hx = bp_max.x + 6.0 * zm
+	}
+
+	// Optional Node Header Icon
+	if spec.header_icon != nil {
+		ic_col := enabled_val ? thm.lerp_col(spec.color, p.text_primary, 0.35) : p.text_muted
+		im.DrawList_AddText(dl, {cur_hx, text_y}, im.GetColorU32ImVec4(ic_col), spec.header_icon)
+		cur_hx += hdr_ic_w
 	}
 
 	// Unclipped Module Title

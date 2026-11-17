@@ -22,11 +22,12 @@ import "core:net"
 HANDSHAKE :: "WELCOME MOONHUG-MCP 1\n"
 MAX_FRAME :: 16 * 1024 * 1024
 
-// Written by the editor next to its other session state; the shim reads it
-// to find and authenticate to the running editor. Paths are cwd-relative:
-// the editor runs from moonhug/, the shim from the repo root.
-BRIDGE_FILE_FROM_EDITOR :: "library/state_cache/mcp_bridge.json"
-BRIDGE_FILE_FROM_ROOT :: "haati/library/state_cache/mcp_bridge.json"
+// Written by the editor next to engine UserSettings AND local state cache so external
+// projects find the running editor instance regardless of CWD or active project root.
+BRIDGE_FILE_USER_SETTINGS       :: "UserSettings/mcp_bridge.json"
+BRIDGE_FILE_HAATI_USER_SETTINGS :: "haati/UserSettings/mcp_bridge.json"
+BRIDGE_FILE_FROM_EDITOR         :: "library/state_cache/mcp_bridge.json"
+BRIDGE_FILE_FROM_ROOT           :: "haati/library/state_cache/mcp_bridge.json"
 
 Bridge_Info :: struct {
 	port:    int,

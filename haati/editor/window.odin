@@ -4,6 +4,7 @@ import gfx "../engine/gfx"
 import "base:runtime"
 import "core:encoding/json"
 import "core:encoding/uuid"
+import "core:hash"
 import "core:os"
 import "core:strings"
 import sdl "vendor:sdl3"
@@ -168,6 +169,7 @@ load_editor_settings :: proc() -> (w, h, x, y: i32) {
         }
     }
     if read_err == nil {
+        _last_settings_fnv = hash.fnv64a(data)
         err := json.unmarshal(data, &editor_settings)
         if err == nil {
             // Zero grid/snap = settings file predates the field; keep code defaults.
@@ -235,7 +237,9 @@ load_editor_settings :: proc() -> (w, h, x, y: i32) {
                 editor_settings.scene_views = clean_views
             }
             if len(editor_settings.popped_window_ids) > 0 {
-                wnd.set_popped_ids(editor_settings.popped_window_ids[:])
+                // Clear legacy persisted NoAutoMerge locks so every floating panel stays dockable.
+                for s in editor_settings.popped_window_ids do delete(s)
+                clear(&editor_settings.popped_window_ids)
             }
             if editor_settings.width > 0 && editor_settings.height > 0 {
                 return editor_settings.width, editor_settings.height, editor_settings.x, editor_settings.y
@@ -263,10 +267,20 @@ apply_default_window_size :: proc() {
     gfx.set_window_geometry(dx + (dw - w) / 2, dy + (dh - h) / 2, w, h)
 }
 
+@(private = "file")
+_last_settings_fnv: u64
+@(private = "file")
+_settings_dir_ready: bool
+
 save_editor_settings :: proc() {
+    prev_alloc := context.allocator
     context.allocator = runtime.default_allocator()
-    os.make_directory(USER_SETTINGS_DIR)
-    if w := gfx.window(); w != nil && .MINIMIZED not_in sdl.GetWindowFlags(w) {
+    defer context.allocator = prev_alloc
+    if !_settings_dir_ready {
+        os.make_directory(USER_SETTINGS_DIR)
+        _settings_dir_ready = true
+    }
+    if w := gfx.window(); w != nil && .MINIMIZED not_in sdl.GetWindowFlags(w) && !engine.is_project_hub_startup() {
         pos := gfx.window_position()
         size := gfx.window_size()
         if size.x > 0 && size.y > 0 {
@@ -412,11 +426,11 @@ save_editor_settings :: proc() {
         spaces     = 2,
     }
     if data, err := json.marshal(editor_settings, opts, allocator = context.temp_allocator); err == nil {
-        if existing, rerr := os.read_entire_file(EDITOR_SETTINGS_FILE, context.temp_allocator); rerr == nil {
-            if len(existing) == len(data) && string(existing) == string(data) {
-                return
-            }
+        h := hash.fnv64a(data)
+        if h == _last_settings_fnv {
+            return
         }
+        _last_settings_fnv = h
         _ = os.write_entire_file(EDITOR_SETTINGS_FILE, data)
     }
 }

@@ -15,6 +15,7 @@ package visual_script
 //     `Reroute_Knot`, Split/Recombine inline sub-pins, real V3 `hot.*` bridges,
 //     & zero-boilerplate `@(bp_node)` `Call_Hot_Proc` exports.
 
+import "base:runtime"
 import "core:fmt"
 import "core:os"
 import "core:path/filepath"
@@ -47,9 +48,11 @@ _node_has_var_pin_collision :: proc(g: ^engine.Visual_Graph, n: ^engine.VG_Node)
 
 @(private)
 _pin_odin_type_in_graph :: proc(g: ^engine.Visual_Graph, p: engine.VG_Pin_Def, allocator := context.temp_allocator) -> string {
+	ck := engine.vg_pin_container_kind(p)
 	v_tmp := engine.VG_Var_Decl{
 		pin_type         = p.pin_type,
-		is_array         = p.is_array,
+		is_array         = p.is_array || ck != .Single,
+		container_kind   = ck,
 		custom_type_name = p.custom_type_name,
 	}
 	return engine.vg_var_odin_type_ex(g, v_tmp, allocator)
@@ -93,6 +96,8 @@ _emit_hot_call_frame_inputs :: proc(
 		exp := use_in_param ? fmt.tprintf("in_%d", pi) : _transpile_input_expr(g, clean_graph, n, pi, 0)
 		if p.pass_mode == .By_Reference {
 			fmt.sbprintf(b, "%s%s.inputs[%d] = {{pin_type = .%v, pass_mode = .By_Reference, ref_ptr = %s}}\n", indent, frame_expr, arg_idx, p.pin_type, exp)
+		} else if engine.vg_pin_container_kind(p) == .Slice {
+			fmt.sbprintf(b, "%s%s.inputs[%d] = {{pin_type = .%v, pass_mode = .Copy_Value, ref_ptr = rawptr(raw_data(%s)), slice_len = i32(len(%s)), slice_cap = -1}}\n", indent, frame_expr, arg_idx, p.pin_type, exp, exp)
 		} else if p.pin_type == .Enum_U8 || p.pin_type == .BitSet_U8 {
 			fmt.sbprintf(b, "%s%s.inputs[%d] = {{pin_type = .%v, pass_mode = .Copy_Value, val_u8 = u8(%s)}}\n", indent, frame_expr, arg_idx, p.pin_type, exp)
 		} else {
@@ -172,10 +177,15 @@ build_scoped_node_signature :: proc(n: ^engine.VG_Node, g: ^engine.Visual_Graph 
 
 @(private = "file")
 _emit_pin_default_expr :: proc(p: engine.VG_Pin_Def, g: ^engine.Visual_Graph = nil) -> string {
+	pck := engine.vg_pin_container_kind(p)
+	if pck == .Slice || pck == .Dynamic_Array {
+		return "nil"
+	}
 	if p.is_array {
 		return fmt.tprintf("%s{{}}", _pin_odin_type_in_graph(g, p, context.temp_allocator))
 	}
 	#partial switch p.pin_type {
+	case .Raw_Ptr:        return "nil"
 	case .Bool:           return p.default_bool ? "true" : "false"
 	case .Int:            return fmt.tprintf("i32(%d)", p.default_int)
 	case .Int64:          return fmt.tprintf("i64(%d)", p.default_i64)
@@ -235,8 +245,37 @@ _emit_pin_default_expr :: proc(p: engine.VG_Pin_Def, g: ^engine.Visual_Graph = n
 
 @(private = "file")
 _emit_var_default_expr :: proc(v: engine.VG_Var_Decl, g: ^engine.Visual_Graph) -> string {
-	if v.is_array {
-		return fmt.tprintf("%s{{}}", engine.vg_var_odin_type_ex(g, v, context.temp_allocator))
+	ck := engine.vg_resolve_container_kind(v)
+	if ck == .Slice || ck == .Dynamic_Array {
+		return "nil"
+	}
+	if ck != .Single {
+		v_type := engine.vg_var_odin_type_ex(g, v, context.temp_allocator)
+		if ck == .Fixed_Array && v.pin_type == .Float && len(v.default_f32_list) > 0 {
+			max_n := v.array_count > 0 ? v.array_count : 8
+			n := min(len(v.default_f32_list), max_n)
+			sb := strings.builder_make(context.temp_allocator)
+			fmt.sbprintf(&sb, "%s{{", v_type)
+			for i in 0 ..< n {
+				if i > 0 do strings.write_string(&sb, ", ")
+				fmt.sbprintf(&sb, "f32(%.5f)", v.default_f32_list[i])
+			}
+			strings.write_byte(&sb, '}')
+			return strings.to_string(sb)
+		}
+		if ck == .Bounded_Array && v.pin_type == .Float && len(v.default_f32_list) > 0 {
+			max_n := v.array_count > 0 ? v.array_count : 8
+			n := min(len(v.default_f32_list), max_n)
+			sb := strings.builder_make(context.temp_allocator)
+			fmt.sbprintf(&sb, "%s{{data = {{", v_type)
+			for i in 0 ..< n {
+				if i > 0 do strings.write_string(&sb, ", ")
+				fmt.sbprintf(&sb, "f32(%.5f)", v.default_f32_list[i])
+			}
+			fmt.sbprintf(&sb, "}}, count = %d}}", n)
+			return strings.to_string(sb)
+		}
+		return fmt.tprintf("%s{{}}", v_type)
 	}
 	return _emit_pin_default_expr(_pin_def_from_var_decl(v), g)
 }
@@ -262,13 +301,19 @@ _slot_field_for_pin :: proc(pt: hot.Hot_Pin_Type) -> string {
 	case .String, .Asset:         return "val_cstr"
 	case .Entity:                 return "val_ent"
 	case .Delegate:               return "val_delegate"
+	case .Raw_Ptr:                return "val_ptr"
 	}
 	return "val_f32"
 }
 
 @(private = "file")
 _slot_read_call_for_pin :: proc(p: engine.VG_Pin_Def, slot_expr: string, is_ref: bool = false, g: ^engine.Visual_Graph = nil) -> string {
+	if engine.vg_pin_container_kind(p) == .Slice {
+		elem_t := _pin_odin_type_in_graph(g, engine.VG_Pin_Def{pin_type = p.pin_type, custom_type_name = p.custom_type_name}, context.temp_allocator)
+		return fmt.tprintf("(proc(s: ^hot.Hot_Slot) -> []%s {{ d, l := hot.slot_read_slice_raw(s); return (d != nil && l > 0) ? ([^]%s)(d)[:l] : nil }})(%s)", elem_t, elem_t, slot_expr)
+	}
 	#partial switch p.pin_type {
+	case .Raw_Ptr:        return is_ref ? fmt.tprintf("hot.slot_ref_rawptr(%s)", slot_expr) : fmt.tprintf("hot.slot_read_rawptr(%s)", slot_expr)
 	case .Float:          return is_ref ? fmt.tprintf("hot.slot_ref_f32(%s)", slot_expr)    : fmt.tprintf("hot.slot_read_f32(%s)", slot_expr)
 	case .F64:            return is_ref ? fmt.tprintf("hot.slot_ref_f64(%s)", slot_expr)    : fmt.tprintf("hot.slot_read_f64(%s)", slot_expr)
 	case .Vec2:           return is_ref ? fmt.tprintf("hot.slot_ref_vec2(%s)", slot_expr)   : fmt.tprintf("hot.slot_read_vec2(%s)", slot_expr)
@@ -307,6 +352,20 @@ _emit_autocast_expr :: proc(g: ^engine.Visual_Graph, src_expr: string, src_p, ds
 	sp := src_p.pin_type
 	dp := dst_p.pin_type
 	if sp == dp do return src_expr
+
+	// Zero-cost `^T` / addressable -> `rawptr` or guarded `rawptr` -> value cast
+	if dp == .Raw_Ptr {
+		if sp == .Entity do return fmt.tprintf("rawptr(uintptr((%s).index))", src_expr)
+		if sp == .U64 || sp == .Int64 do return fmt.tprintf("rawptr(uintptr(%s))", src_expr)
+		return fmt.tprintf("rawptr(%s)", src_expr)
+	}
+	if sp == .Raw_Ptr {
+		dt_t := _pin_odin_type_in_graph(g, dst_p, context.temp_allocator)
+		return fmt.tprintf(
+			"(proc(p: rawptr, api: ^hot.Engine_Hot_API) -> %s {{ if pok, preason := hot.validate_raw_ptr(p, align_of(%s)); !pok {{ if api != nil && api.report_sandbox_fault != nil {{ api.report_sandbox_fault(preason, #file, #procedure, #line) }}; _z: %s; return _z }}; return (cast(^%s)p)^ }})(%s, api)",
+			dt_t, dt_t, dt_t, dt_t, src_expr,
+		)
+	}
 
 	// Scalar splat -> vector
 	if (sp == .Float || sp == .F64) && (dp == .Vec2 || dp == .Vec3 || dp == .Vec4) {
@@ -367,16 +426,17 @@ _resolve_transpiled_delegate_sym :: proc(g: ^engine.Visual_Graph, clean_graph: s
 }
 
 @(private = "file")
-_resolve_array_access :: proc(g: ^engine.Visual_Graph, var_name: string) -> (v_decl: engine.VG_Var_Decl, slice_expr: string, elem_default: string, is_bounded: bool, ok: bool) {
+_resolve_array_access :: proc(g: ^engine.Visual_Graph, var_name: string) -> (v_decl: engine.VG_Var_Decl, slice_expr: string, elem_default: string, ck: engine.VG_Container_Kind, ok: bool) {
 	vi := engine.vg_find_var_index(g, var_name)
-	if vi < 0 do return {}, "", "f32(0)", false, false
+	if vi < 0 do return {}, "", "f32(0)", .Single, false
 	v := g.variables[vi]
 	v_id := sanitize_odin_ident(v.name, context.temp_allocator)
 	ed := _emit_pin_default_expr(_pin_def_from_var_decl(v), g)
-	if v.array_is_bounded {
-		return v, fmt.tprintf("_bp.%s.data[:clamp(int(_bp.%s.count), 0, len(_bp.%s.data))]", v_id, v_id, v_id), ed, true, true
+	res_ck := engine.vg_resolve_container_kind(v)
+	if res_ck == .Bounded_Array {
+		return v, fmt.tprintf("_bp.%s.data[:clamp(int(_bp.%s.count), 0, len(_bp.%s.data))]", v_id, v_id, v_id), ed, res_ck, true
 	}
-	return v, fmt.tprintf("_bp.%s[:]", v_id), ed, false, true
+	return v, fmt.tprintf("_bp.%s[:]", v_id), ed, res_ck, true
 }
 
 @(private = "file")
@@ -411,7 +471,8 @@ _transpile_pure_expr :: proc(g: ^engine.Visual_Graph, clean_graph: string, node_
 	case .Auto_Cast:
 		src_p := len(n.inputs) > 0 ? n.inputs[0] : engine.VG_Pin_Def{pin_type = .Float}
 		dst_p := len(n.outputs) > 0 ? n.outputs[0] : engine.VG_Pin_Def{pin_type = .Int}
-		src_e := _transpile_input_expr(g, clean_graph, n, 0, depth + 1)
+		want_addr := (dst_p.pin_type == .Raw_Ptr && src_p.is_addressable)
+		src_e := _transpile_input_expr_ex(g, clean_graph, n, 0, want_addr, depth + 1)
 		return _emit_autocast_expr(g, src_e, src_p, dst_p)
 
 	case .Event_Tick:
@@ -494,28 +555,41 @@ _transpile_pure_expr :: proc(g: ^engine.Visual_Graph, clean_graph: string, node_
 
 	case .Array_Op:
 		mode := engine.VG_Array_Op_Mode(n.sub_op)
-		v, _, ed, is_bounded, ok := _resolve_array_access(g, n.target_var_or_type)
+		v, arr_slice_e, ed, ck, ok := _resolve_array_access(g, n.target_var_or_type)
 		if !ok {
 			return (mode == .Len) ? "i32(0)" : "f32(0)"
 		}
 		v_id := sanitize_odin_ident(v.name, context.temp_allocator)
+		elem_t := _pin_odin_type_in_graph(g, engine.VG_Pin_Def{pin_type = v.pin_type, custom_type_name = v.custom_type_name}, context.temp_allocator)
 		#partial switch mode {
 		case .Len:
-			return is_bounded ? fmt.tprintf("_bp.%s.count", v_id) : fmt.tprintf("i32(len(_bp.%s))", v_id)
+			return ck == .Bounded_Array ? fmt.tprintf("_bp.%s.count", v_id) : fmt.tprintf("i32(len(_bp.%s))", v_id)
+		case .Sub_Slice:
+			lo_e := _transpile_input_expr(g, clean_graph, n, 0, depth + 1)
+			hi_e := _transpile_input_expr(g, clean_graph, n, 1, depth + 1)
+			return fmt.tprintf("(proc(s: []%s, a, b: i32) -> []%s {{ lo := clamp(int(a), 0, len(s)); hi := clamp(int(b), lo, len(s)); return s[lo:hi] }})(%s, %s, %s)", elem_t, elem_t, arr_slice_e, lo_e, hi_e)
 		case .Get_Copy:
 			idx_e := _transpile_input_expr(g, clean_graph, n, 0, depth + 1)
-			if is_bounded {
+			if ck == .Bounded_Array {
 				return fmt.tprintf("(_bp.%s.count > 0 ? _bp.%s.data[clamp(int(%s), 0, int(_bp.%s.count) - 1)] : %s)", v_id, v_id, idx_e, v_id, ed)
 			}
-			return fmt.tprintf("_bp.%s[clamp(int(%s), 0, len(_bp.%s) - 1)]", v_id, idx_e, v_id)
+			return fmt.tprintf("(len(_bp.%s) > 0 ? _bp.%s[clamp(int(%s), 0, len(_bp.%s) - 1)] : %s)", v_id, v_id, idx_e, v_id, ed)
 		case .Get_Ref:
 			idx_e := _transpile_input_expr(g, clean_graph, n, 0, depth + 1)
-			if is_bounded {
-				if want_ref do return fmt.tprintf("&_bp.%s.data[clamp(int(%s), 0, len(_bp.%s.data) - 1)]", v_id, idx_e, v_id)
-				return fmt.tprintf("_bp.%s.data[clamp(int(%s), 0, len(_bp.%s.data) - 1)]", v_id, idx_e, v_id)
+			if ck == .Bounded_Array {
+				if want_ref do return fmt.tprintf("&_bp.%s.data[clamp(int(%s), 0, max(len(_bp.%s.data) - 1, 0))]", v_id, idx_e, v_id)
+				return fmt.tprintf("(_bp.%s.count > 0 ? _bp.%s.data[clamp(int(%s), 0, int(_bp.%s.count) - 1)] : %s)", v_id, v_id, idx_e, v_id, ed)
 			}
-			if want_ref do return fmt.tprintf("&_bp.%s[clamp(int(%s), 0, len(_bp.%s) - 1)]", v_id, idx_e, v_id)
-			return fmt.tprintf("_bp.%s[clamp(int(%s), 0, len(_bp.%s) - 1)]", v_id, idx_e, v_id)
+			if want_ref {
+				if (ck == .Slice || ck == .Dynamic_Array) {
+					if v.pin_type == .Float {
+						return fmt.tprintf("(len(_bp.%s) > 0 ? &_bp.%s[clamp(int(%s), 0, len(_bp.%s) - 1)] : &_dummy_f32)", v_id, v_id, idx_e, v_id)
+					}
+					return fmt.tprintf("(len(_bp.%s) > 0 ? &_bp.%s[clamp(int(%s), 0, len(_bp.%s) - 1)] : new(%s, context.temp_allocator))", v_id, v_id, idx_e, v_id, elem_t)
+				}
+				return fmt.tprintf("&_bp.%s[clamp(int(%s), 0, max(len(_bp.%s) - 1, 0))]", v_id, idx_e, v_id)
+			}
+			return fmt.tprintf("(len(_bp.%s) > 0 ? _bp.%s[clamp(int(%s), 0, len(_bp.%s) - 1)] : %s)", v_id, v_id, idx_e, v_id, ed)
 		case .Pop, .Append:
 			return fmt.tprintf("_out_%d_%d", n.uid, out_pin)
 		}
@@ -987,23 +1061,25 @@ _emit_exec_chain :: proc(b: ^strings.Builder, g: ^engine.Visual_Graph, clean_gra
 
 		case .Array_Op:
 			mode := engine.VG_Array_Op_Mode(n.sub_op)
-			v, _, ed, is_bounded, ok := _resolve_array_access(g, n.target_var_or_type)
+			v, _, ed, ck, ok := _resolve_array_access(g, n.target_var_or_type)
 			if ok {
 				v_id := sanitize_odin_ident(v.name, context.temp_allocator)
 				switch mode {
 				case .Set_Elem:
 					idx_e := _transpile_input_expr(g, clean_graph, n, 1, 0)
 					val_e := _transpile_input_expr(g, clean_graph, n, 2, 0)
-					if is_bounded {
+					if ck == .Bounded_Array {
 						fmt.sbprintf(b, "%sif _bp.%s.count > 0 {{ _bp.%s.data[clamp(int(%s), 0, int(_bp.%s.count) - 1)] = %s }}\n", indent, v_id, v_id, idx_e, v_id, val_e)
 					} else {
-						fmt.sbprintf(b, "%s_bp.%s[clamp(int(%s), 0, len(_bp.%s) - 1)] = %s\n", indent, v_id, idx_e, v_id, val_e)
+						fmt.sbprintf(b, "%sif len(_bp.%s) > 0 {{ _bp.%s[clamp(int(%s), 0, len(_bp.%s) - 1)] = %s }}\n", indent, v_id, v_id, idx_e, v_id, val_e)
 					}
 				case .Append:
 					val_e := _transpile_input_expr(g, clean_graph, n, 1, 0)
 					fmt.sbprintf(b, "%s_out_%d_1 := false\n", indent, n.uid)
-					if is_bounded {
+					if ck == .Bounded_Array {
 						fmt.sbprintf(b, "%sif int(_bp.%s.count) < len(_bp.%s.data) {{ _bp.%s.data[_bp.%s.count] = %s; _bp.%s.count += 1; _out_%d_1 = true }}\n", indent, v_id, v_id, v_id, v_id, val_e, v_id, n.uid)
+					} else if ck == .Dynamic_Array {
+						fmt.sbprintf(b, "%sappend(&_bp.%s, %s); _out_%d_1 = true\n", indent, v_id, val_e, n.uid)
 					} else {
 						fmt.sbprintf(b, "%s_ = %s\n", indent, val_e)
 					}
@@ -1011,24 +1087,32 @@ _emit_exec_chain :: proc(b: ^strings.Builder, g: ^engine.Visual_Graph, clean_gra
 				case .Pop:
 					fmt.sbprintf(b, "%s_out_%d_1 := %s\n", indent, n.uid, ed)
 					fmt.sbprintf(b, "%s_out_%d_2 := false\n", indent, n.uid)
-					if is_bounded {
+					if ck == .Bounded_Array {
 						fmt.sbprintf(b, "%sif _bp.%s.count > 0 {{ _bp.%s.count -= 1; _out_%d_1 = _bp.%s.data[_bp.%s.count]; _out_%d_2 = true }}\n", indent, v_id, v_id, n.uid, v_id, v_id, n.uid)
+					} else if ck == .Dynamic_Array {
+						fmt.sbprintf(b, "%sif len(_bp.%s) > 0 {{ _out_%d_1 = pop(&_bp.%s); _out_%d_2 = true }}\n", indent, v_id, n.uid, v_id, n.uid)
 					}
 					fmt.sbprintf(b, "%s_ = _out_%d_1; _ = _out_%d_2\n", indent, n.uid, n.uid)
 				case .Clear:
-					if is_bounded {
+					if ck == .Bounded_Array {
 						fmt.sbprintf(b, "%s_bp.%s.count = 0\n", indent, v_id)
+					} else if ck == .Dynamic_Array {
+						fmt.sbprintf(b, "%sclear(&_bp.%s)\n", indent, v_id)
+					} else if ck == .Slice {
+						fmt.sbprintf(b, "%s_bp.%s = nil\n", indent, v_id)
 					} else {
 						fmt.sbprintf(b, "%s_bp.%s = {{}}\n", indent, v_id)
 					}
 				case .Swap_Remove:
 					idx_e := _transpile_input_expr(g, clean_graph, n, 1, 0)
-					if is_bounded {
+					if ck == .Bounded_Array {
 						fmt.sbprintf(b, "%s{{ _sr_i := int(%s); if _sr_i >= 0 && _sr_i < int(_bp.%s.count) {{ _bp.%s.data[_sr_i] = _bp.%s.data[_bp.%s.count - 1]; _bp.%s.count -= 1 }} }}\n", indent, idx_e, v_id, v_id, v_id, v_id, v_id)
+					} else if ck == .Dynamic_Array {
+						fmt.sbprintf(b, "%s{{ _sr_i := int(%s); if _sr_i >= 0 && _sr_i < len(_bp.%s) {{ unordered_remove(&_bp.%s, _sr_i) }} }}\n", indent, idx_e, v_id, v_id)
 					} else {
 						fmt.sbprintf(b, "%s_ = %s\n", indent, idx_e)
 					}
-				case .Get_Copy, .Get_Ref, .Len:
+				case .Get_Copy, .Get_Ref, .Len, .Sub_Slice:
 					// pure modes
 				}
 			}
@@ -1172,6 +1256,7 @@ _emit_exec_chain :: proc(b: ^strings.Builder, g: ^engine.Visual_Graph, clean_gra
 @(private = "file")
 _emit_proc_entry_boilerplate :: proc(b: ^strings.Builder, clean_name: string, proc_sym: string, is_custom_proc: bool, is_trigger: bool = false) {
 	fmt.sbprintf(b, "@(hot_proc)\n%s :: proc \"c\" (api: ^hot.Engine_Hot_API, self: hot.Hot_Entity, raw_dt: f32, frame: ^hot.Hot_Call_Frame) {{\n", proc_sym)
+	strings.write_string(b, "\tcontext = hot.make_script_context(api)\n")
 	strings.write_string(b, "\tdt := api != nil && api.get_object_dt != nil ? api.get_object_dt(self, raw_dt) : raw_dt\n")
 	strings.write_string(b, "\t_dummy_pos := [3]f32{}\n")
 	strings.write_string(b, "\t_dummy_f32 := f32(0)\n")
@@ -1216,9 +1301,9 @@ _struct_needs_constructor :: proc(g: ^engine.Visual_Graph, struct_name: string) 
 
 @(private = "file")
 _emit_user_types_and_helpers :: proc(b: ^strings.Builder, g: ^engine.Visual_Graph, clean_name: string) {
-	// User Enum u8 + optional bit_set[Enum; u8]
+	// User Enum u8 + optional bit_set[Enum; u8] (skip declarations already authored in Zone 1!)
 	for ed in g.enums {
-		if ed.name == "" do continue
+		if ed.name == "" || ed.code_authored do continue
 		ename := sanitize_odin_ident(ed.name, context.temp_allocator)
 		fmt.sbprintf(b, "%s :: enum u8 {{\n", ename)
 		if len(ed.variants) == 0 {
@@ -1243,29 +1328,31 @@ _emit_user_types_and_helpers :: proc(b: ^strings.Builder, g: ^engine.Visual_Grap
 		strings.write_byte(b, '\n')
 	}
 
-	// User POD Structs (supporting `using _base`)
+	// User POD Structs (supporting `using _base`; skip declarations already authored in Zone 1!)
 	for sd in g.structs {
 		if sd.name == "" do continue
 		sname := sanitize_odin_ident(sd.name, context.temp_allocator)
-		fmt.sbprintf(b, "%s :: struct {{\n", sname)
-		has_member := false
-		if sd.using_parent_name != "" && sd.using_parent_name != sd.name {
-			fmt.sbprintf(b, "\tusing _base: %s,\n", sanitize_odin_ident(sd.using_parent_name, context.temp_allocator))
-			has_member = true
+		if !sd.code_authored {
+			fmt.sbprintf(b, "%s :: struct {{\n", sname)
+			has_member := false
+			if sd.using_parent_name != "" && sd.using_parent_name != sd.name {
+				fmt.sbprintf(b, "\tusing _base: %s,\n", sanitize_odin_ident(sd.using_parent_name, context.temp_allocator))
+				has_member = true
+			}
+			for f in sd.fields {
+				ft_pin := engine.VG_Pin_Def{pin_type = f.pin_type, custom_type_name = f.custom_type}
+				fmt.sbprintf(b, "\t%s: %s,\n", sanitize_odin_ident(f.name, context.temp_allocator), _pin_odin_type_in_graph(g, ft_pin, context.temp_allocator))
+				has_member = true
+			}
+			if !has_member {
+				strings.write_string(b, "\t_reserved: u8,\n")
+			}
+			strings.write_string(b, "}\n")
 		}
-		for f in sd.fields {
-			ft_pin := engine.VG_Pin_Def{pin_type = f.pin_type, custom_type_name = f.custom_type}
-			fmt.sbprintf(b, "\t%s: %s,\n", sanitize_odin_ident(f.name, context.temp_allocator), _pin_odin_type_in_graph(g, ft_pin, context.temp_allocator))
-			has_member = true
-		}
-		if !has_member {
-			strings.write_string(b, "\t_reserved: u8,\n")
-		}
-		strings.write_string(b, "}\n")
 
 		if _struct_needs_constructor(g, sd.name) {
 			fl, _, _ := engine.vg_struct_layout(g, sd.name, context.temp_allocator)
-			fmt.sbprintf(b, "_bp_make_%s_%s :: #force_inline proc \"c\" (", clean_name, sname)
+			fmt.sbprintf(b, "_bp_make_%s_%s :: #force_inline proc(", clean_name, sname)
 			for f, fi in fl {
 				if fi > 0 do strings.write_string(b, ", ")
 				ft_pin := engine.VG_Pin_Def{pin_type = f.pin_type, custom_type_name = f.custom_type}
@@ -1278,13 +1365,15 @@ _emit_user_types_and_helpers :: proc(b: ^strings.Builder, g: ^engine.Visual_Grap
 			}
 			strings.write_string(b, "\treturn res\n}\n")
 		}
-		strings.write_byte(b, '\n')
+		if !sd.code_authored || _struct_needs_constructor(g, sd.name) {
+			strings.write_byte(b, '\n')
+		}
 	}
 
 	// Zero-heap C-ABI `BP_Bounded_<T>_<Cap>` structs
 	emitted_bounded := make(map[string]bool, 8, context.temp_allocator)
 	for v in g.variables {
-		if !v.is_array || !v.array_is_bounded do continue
+		if engine.vg_resolve_container_kind(v) != .Bounded_Array do continue
 		btype := engine.vg_var_odin_type_ex(g, v, context.temp_allocator)
 		if btype in emitted_bounded do continue
 		emitted_bounded[btype] = true
@@ -1303,7 +1392,7 @@ _emit_user_types_and_helpers :: proc(b: ^strings.Builder, g: ^engine.Visual_Grap
 		for po, oi in n.outputs {
 			if po.pin_type == .Exec || po.split_parent_name != "" do continue
 			out_t := _pin_odin_type_in_graph(g, po, context.temp_allocator)
-			fmt.sbprintf(b, "_bp_pure_%s_%d_out%d :: #force_inline proc \"c\" (api: ^hot.Engine_Hot_API, self: hot.Hot_Entity, dt: f32", clean_name, n.uid, oi)
+			fmt.sbprintf(b, "_bp_pure_%s_%d_out%d :: #force_inline proc(api: ^hot.Engine_Hot_API, self: hot.Hot_Entity, dt: f32", clean_name, n.uid, oi)
 			for p, pi in n.inputs {
 				if p.pin_type == .Exec || p.split_parent_name != "" do continue
 				pt := _pin_odin_type_in_graph(g, p, context.temp_allocator)
@@ -1324,29 +1413,77 @@ _emit_user_types_and_helpers :: proc(b: ^strings.Builder, g: ^engine.Visual_Grap
 	}
 }
 
-// Generates the complete, `-vet-unused` clean `.odin` source string for `g`!
-transpile_graph_to_odin :: proc(g: ^engine.Visual_Graph, allocator := context.allocator) -> (odin_source: string, main_proc_name: string) {
+// Returns the default Zone 1 header for a new or migrated `.bodin` file.
+// Everything above `// @BODIN_GENERATED_BEGIN` is user-owned raw Odin (multiple structs, enums,
+// helper procs, `defer`, `context.temp_allocator`, `mem.Arena`, `[]f32`, `[dynamic]f32`).
+default_bodin_zone1_header :: proc(clean_name: string, allocator := context.temp_allocator) -> string {
+	sb := strings.builder_make(allocator)
+	strings.write_string(&sb, "#+feature using-stmt\n")
+	strings.write_string(&sb, "package hot_scripts\n\n")
+	fmt.sbprintf(&sb, "// =============================================================================\n")
+	fmt.sbprintf(&sb, "// CHIMERA `.bodin` USER ODIN ZONE (%s.bodin)\n", clean_name)
+	fmt.sbprintf(&sb, "// =============================================================================\n")
+	strings.write_string(&sb, "// Everything ABOVE `// @BODIN_GENERATED_BEGIN` is 100%% user-owned raw Odin:\n")
+	strings.write_string(&sb, "//   - Multiple `struct` & `enum` declarations auto-sync to Blueprint Graph!\n")
+	strings.write_string(&sb, "//   - Full `defer`, `context.temp_allocator`, `mem.Arena`, `[]f32`, `[dynamic]f32`, `@(bp_node)`!\n\n")
+	strings.write_string(&sb, "@(require) import hot \"haati:engine/hot_api\"\n")
+	return strings.to_string(sb)
+}
+
+@(private = "file")
+_odin_body_ends_with_top_return :: proc(body: string) -> bool {
+	trimmed := strings.trim_right_space(body)
+	if trimmed == "" do return false
+	lines := strings.split_lines(trimmed, context.temp_allocator)
+	if len(lines) == 0 do return false
+	last := strings.trim_suffix(lines[len(lines) - 1], "\r")
+	// Only skip trailing `return` if the final line is an unindented top-level `return`.
+	clean := strings.trim_left_space(last)
+	if len(last) != len(clean) do return false
+	return clean == "return" || strings.has_prefix(clean, "return ")
+}
+
+// Emits Zone 2 (Blueprint-managed Odin state, loaders, node bodies, and `@(hot_proc)` entry points)
+// with import paths deduplicated against `zone1_src` for `-vet-unused` safety.
+transpile_graph_zone2 :: proc(
+	g:         ^engine.Visual_Graph,
+	zone1_src: string,
+	allocator := context.allocator,
+) -> (zone2_source: string, main_proc_name: string) {
 	clean_name := sanitize_odin_ident(g.name != "" ? g.name : "custom_graph", context.temp_allocator)
 	main_proc_name = strings.clone(fmt.tprintf("mhgraph_%s", clean_name), allocator)
 	state_struct := fmt.tprintf("%s_Blueprint_State", clean_name)
 
-	b := strings.builder_make(allocator)
-	strings.write_string(&b, "#+feature using-stmt\n")
-	strings.write_string(&b, "package hot_scripts\n\n")
-	fmt.sbprintf(&b, "// =============================================================================\n")
-	fmt.sbprintf(&b, "// AUTO-TRANSPILED BY HAATI BLUEPRINT STUDIO (`%s.bodin`)\n", clean_name)
-	fmt.sbprintf(&b, "// =============================================================================\n")
-	strings.write_string(&b, "// Flat Data-Oriented Odin struct + `@(hot_proc)` C-ABI machine code (0.00 ms VM tax!)\n\n")
+	need_runtime := false
+	for v in g.variables {
+		if engine.vg_resolve_container_kind(v) == .Dynamic_Array {
+			need_runtime = true
+			break
+		}
+	}
 
-	strings.write_string(&b, "@(require) import \"core:math\"\n")
-	strings.write_string(&b, "@(require) import \"core:math/linalg\"\n")
-	if engine.vg_has_using_space(g, "ease") {
+	b := strings.builder_make(allocator)
+	fmt.sbprintf(&b, "// Auto-generated by Haati Blueprint Studio (`%s.bodin`) — edits to _node_*_body sync back on save.\n", clean_name)
+
+	if need_runtime && !strings.contains(zone1_src, "\"base:runtime\"") {
+		strings.write_string(&b, "@(require) import \"base:runtime\"\n")
+	}
+	if !strings.contains(zone1_src, "\"core:math\"") {
+		strings.write_string(&b, "@(require) import \"core:math\"\n")
+	}
+	if !strings.contains(zone1_src, "\"core:math/linalg\"") {
+		strings.write_string(&b, "@(require) import \"core:math/linalg\"\n")
+	}
+	if engine.vg_has_using_space(g, "ease") && !strings.contains(zone1_src, "\"core:math/ease\"") {
 		strings.write_string(&b, "@(require) import \"core:math/ease\"\n")
 	}
-	if engine.vg_has_using_space(g, "rand") {
+	if engine.vg_has_using_space(g, "rand") && !strings.contains(zone1_src, "\"core:math/rand\"") {
 		strings.write_string(&b, "@(require) import \"core:math/rand\"\n")
 	}
-	strings.write_string(&b, "import hot \"haati:engine/hot_api\"\n\n")
+	if !strings.contains(zone1_src, "hot \"haati:engine/hot_api\"") {
+		strings.write_string(&b, "@(require) import hot \"haati:engine/hot_api\"\n")
+	}
+	strings.write_byte(&b, '\n')
 
 	// 0. User Enums, BitSets, POD Structs, Bounded Array Structs, & Pure Call Helpers
 	_emit_user_types_and_helpers(&b, g, clean_name)
@@ -1363,15 +1500,26 @@ transpile_graph_to_odin :: proc(g: ^engine.Visual_Graph, allocator := context.al
 	}
 	strings.write_string(&b, "}\n\n")
 
-	// State loader & writer bridging persistent per-entity `hot.var_blob_ptr`/`hot.var_ptr` AND `Hot_Call_Frame` slots!
-	fmt.sbprintf(&b, "_load_%s_state :: #force_inline proc \"c\" (api: ^hot.Engine_Hot_API, self: hot.Hot_Entity, frame: ^hot.Hot_Call_Frame) -> (st: %s) {{\n", clean_name, state_struct)
+	// State loader & writer bridging persistent per-entity `var_f32_seq_ptr`/`var_blob_ptr`/`var_ptr` AND `Hot_Call_Frame` slots!
+	fmt.sbprintf(&b, "_load_%s_state :: #force_inline proc(api: ^hot.Engine_Hot_API, self: hot.Hot_Entity, frame: ^hot.Hot_Call_Frame) -> (st: %s) {{\n", clean_name, state_struct)
 	for v, vi in g.variables {
 		v_id := sanitize_odin_ident(v.name, context.temp_allocator)
 		v_type := engine.vg_var_odin_type_ex(g, v, context.temp_allocator)
 		def_expr := _emit_var_default_expr(v, g)
-		if v.is_array {
+		ck := engine.vg_resolve_container_kind(v)
+		if ck == .Slice && v.pin_type == .Float {
+			fmt.sbprintf(&b, "\t{{\n\t\t_l, _c: i32\n\t\t_p := hot.var_f32_seq_ptr(api, self, %q, &_l, &_c)\n\t\tst.%s = (_p != nil && _l > 0) ? ([^]f32)(_p)[:_l] : nil\n\t}}\n", v.name, v_id)
+		} else if ck == .Dynamic_Array && v.pin_type == .Float {
+			fmt.sbprintf(&b, "\t{{\n\t\t_l, _c: i32\n\t\t_p := hot.var_f32_seq_ptr(api, self, %q, &_l, &_c)\n\t\t_al := (api != nil && api.host_allocator.procedure != nil) ? api.host_allocator : context.allocator\n\t\tst.%s = transmute([dynamic]f32)runtime.Raw_Dynamic_Array{{data = _p, len = int(max(_l, 0)), cap = int(max(_c, 0)), allocator = _al}}\n\t}}\n", v.name, v_id)
+		} else if ck == .Slice {
+			elem_t := _pin_odin_type_in_graph(g, engine.VG_Pin_Def{pin_type = v.pin_type, custom_type_name = v.custom_type_name}, context.temp_allocator)
+			fmt.sbprintf(&b, "\t{{\n\t\t_l, _c: i32\n\t\t_p := hot.var_seq_ptr(api, self, %q, i32(size_of(%s)), i32(align_of(%s)), &_l, &_c)\n\t\tst.%s = (_p != nil && _l > 0) ? ([^]%s)(_p)[:_l] : nil\n\t}}\n", v.name, elem_t, elem_t, v_id, elem_t)
+		} else if ck == .Dynamic_Array {
+			elem_t := _pin_odin_type_in_graph(g, engine.VG_Pin_Def{pin_type = v.pin_type, custom_type_name = v.custom_type_name}, context.temp_allocator)
+			fmt.sbprintf(&b, "\t{{\n\t\t_l, _c: i32\n\t\t_p := hot.var_seq_ptr(api, self, %q, i32(size_of(%s)), i32(align_of(%s)), &_l, &_c)\n\t\t_al := (api != nil && api.host_allocator.procedure != nil) ? api.host_allocator : context.allocator\n\t\tst.%s = transmute([dynamic]%s)runtime.Raw_Dynamic_Array{{data = _p, len = int(max(_l, 0)), cap = int(max(_c, 0)), allocator = _al}}\n\t}}\n", v.name, elem_t, elem_t, v_id, elem_t)
+		} else if ck != .Single {
 			fmt.sbprintf(&b, "\tst.%s = %s\n", v_id, def_expr)
-			if v.array_is_bounded || v.pin_type == .Struct_Val {
+			if ck == .Bounded_Array || v.pin_type == .Struct_Val {
 				fmt.sbprintf(&b, "\tif bp_blob := hot.var_blob_ptr(api, self, %q, size_of(%s)); bp_blob != nil {{\n", v.name, v_type)
 				fmt.sbprintf(&b, "\t\tst.%s = (cast(^%s)bp_blob)^\n\t}}\n", v_id, v_type)
 			} else {
@@ -1399,13 +1547,24 @@ transpile_graph_to_odin :: proc(g: ^engine.Visual_Graph, allocator := context.al
 	}
 	strings.write_string(&b, "\t_ = api; _ = self; _ = frame\n\treturn\n}\n\n")
 
-	fmt.sbprintf(&b, "_save_%s_state :: #force_inline proc \"c\" (api: ^hot.Engine_Hot_API, self: hot.Hot_Entity, frame: ^hot.Hot_Call_Frame, st: ^%s) {{\n", clean_name, state_struct)
+	fmt.sbprintf(&b, "_save_%s_state :: #force_inline proc(api: ^hot.Engine_Hot_API, self: hot.Hot_Entity, frame: ^hot.Hot_Call_Frame, st: ^%s) {{\n", clean_name, state_struct)
 	for v, vi in g.variables {
 		v_id := sanitize_odin_ident(v.name, context.temp_allocator)
 		v_type := engine.vg_var_odin_type_ex(g, v, context.temp_allocator)
-		if v.is_array {
+		ck := engine.vg_resolve_container_kind(v)
+		if ck == .Slice && v.pin_type == .Float {
+			fmt.sbprintf(&b, "\thot.var_f32_seq_sync(api, self, %q, raw_data(st.%s), i32(len(st.%s)), -1)\n", v.name, v_id, v_id)
+		} else if ck == .Dynamic_Array && v.pin_type == .Float {
+			fmt.sbprintf(&b, "\thot.var_f32_seq_sync(api, self, %q, raw_data(st.%s), i32(len(st.%s)), i32(cap(st.%s)))\n", v.name, v_id, v_id, v_id)
+		} else if ck == .Slice {
+			elem_t := _pin_odin_type_in_graph(g, engine.VG_Pin_Def{pin_type = v.pin_type, custom_type_name = v.custom_type_name}, context.temp_allocator)
+			fmt.sbprintf(&b, "\thot.var_seq_sync(api, self, %q, rawptr(raw_data(st.%s)), i32(size_of(%s)), i32(align_of(%s)), i32(len(st.%s)), -1)\n", v.name, v_id, elem_t, elem_t, v_id)
+		} else if ck == .Dynamic_Array {
+			elem_t := _pin_odin_type_in_graph(g, engine.VG_Pin_Def{pin_type = v.pin_type, custom_type_name = v.custom_type_name}, context.temp_allocator)
+			fmt.sbprintf(&b, "\thot.var_seq_sync(api, self, %q, rawptr(raw_data(st.%s)), i32(size_of(%s)), i32(align_of(%s)), i32(len(st.%s)), i32(cap(st.%s)))\n", v.name, v_id, elem_t, elem_t, v_id, v_id)
+		} else if ck != .Single {
 			fmt.sbprintf(&b, "\tif bp_blob := hot.var_blob_ptr(api, self, %q, size_of(%s)); bp_blob != nil {{ (cast(^%s)bp_blob)^ = st.%s }}\n", v.name, v_type, v_type, v_id)
-			if !v.array_is_bounded && v.pin_type != .Struct_Val {
+			if ck != .Bounded_Array && v.pin_type != .Struct_Val {
 				scalar_type := _pin_odin_type_in_graph(g, engine.VG_Pin_Def{pin_type = v.pin_type, custom_type_name = v.custom_type_name}, context.temp_allocator)
 				fmt.sbprintf(&b, "\tif vp := hot.var_ptr(api, self, %d); vp != nil {{ (cast(^%s)vp)^ = st.%s[0] }}\n", vi, scalar_type, v_id)
 			}
@@ -1420,7 +1579,7 @@ transpile_graph_to_odin :: proc(g: ^engine.Visual_Graph, allocator := context.al
 	}
 	strings.write_string(&b, "\t_ = api; _ = self; _ = frame; _ = st\n}\n\n")
 
-	// 2. Emit each `Odin_Function_Node` as both a `#force_inline` typed Odin proc AND a hot-callable `@(hot_proc)` wrapper!
+	// 2. Emit each `Odin_Function_Node` as a standard Odin proc (full `defer`/allocators/slices) AND a `@(hot_proc)` wrapper!
 	use_self_global := len(g.variables) > 0 && engine.vg_has_using_space(g, "self")
 	use_math_ns     := engine.vg_has_using_space(g, "using_math")
 	use_linalg_ns   := engine.vg_has_using_space(g, "using_linalg")
@@ -1432,7 +1591,7 @@ transpile_graph_to_odin :: proc(g: ^engine.Visual_Graph, allocator := context.al
 		fmt.sbprintf(&b, "// Scoped Odin Node #%d: %s\n", n.uid, n.title)
 		fmt.sbprintf(
 			&b,
-			"_node_%s_%d_body :: #force_inline proc \"c\" (\n\tapi: ^hot.Engine_Hot_API,\n\tself: hot.Hot_Entity,\n\t%sbp: ^%s,\n\tdt: f32",
+			"_node_%s_%d_body :: #force_inline proc(\n\tapi: ^hot.Engine_Hot_API,\n\tself: hot.Hot_Entity,\n\t%sbp: ^%s,\n\tdt: f32",
 			clean_name,
 			n.uid,
 			use_self_here ? "using " : "",
@@ -1465,6 +1624,11 @@ transpile_graph_to_odin :: proc(g: ^engine.Visual_Graph, allocator := context.al
 		strings.write_string(&b, " {\n")
 		if use_math_ns   do strings.write_string(&b, "\tusing math\n")
 		if use_linalg_ns do strings.write_string(&b, "\tusing linalg\n")
+		strings.write_string(&b, "\t_ = api; _ = self; _ = bp; _ = dt\n")
+		for p in n.inputs {
+			if p.pin_type == .Exec || p.split_parent_name != "" do continue
+			fmt.sbprintf(&b, "\t_ = %s\n", sanitize_odin_ident(p.name, context.temp_allocator))
+		}
 
 		for ln in strings.split_lines(n.odin_body, context.temp_allocator) {
 			trimmed_cr := strings.trim_suffix(ln, "\r")
@@ -1473,18 +1637,17 @@ transpile_graph_to_odin :: proc(g: ^engine.Visual_Graph, allocator := context.al
 			}
 		}
 
-		strings.write_string(&b, "\t_ = api; _ = self; _ = bp; _ = dt\n")
-		for p in n.inputs {
-			if p.pin_type == .Exec || p.split_parent_name != "" do continue
-			fmt.sbprintf(&b, "\t_ = %s\n", sanitize_odin_ident(p.name, context.temp_allocator))
+		if !_odin_body_ends_with_top_return(n.odin_body) {
+			strings.write_string(&b, "\treturn\n")
 		}
-		strings.write_string(&b, "\treturn\n}\n\n")
+		strings.write_string(&b, "}\n\n")
 
 		node_sym := fmt.tprintf("_mhnode_%s_%d", clean_name, n.uid)
 		if n.hot_proc_target != "" && !strings.has_prefix(n.hot_proc_target, "_mhnode_") {
 			node_sym = sanitize_odin_ident(n.hot_proc_target, context.temp_allocator)
 		}
 		fmt.sbprintf(&b, "@(hot_proc)\n%s :: proc \"c\" (api: ^hot.Engine_Hot_API, self: hot.Hot_Entity, dt: f32, frame: ^hot.Hot_Call_Frame) {{\n", node_sym)
+		strings.write_string(&b, "\tcontext = hot.make_script_context(api)\n")
 		strings.write_string(&b, "\tif frame == nil do return\n")
 		fmt.sbprintf(&b, "\t_bp := _load_%s_state(api, self, frame)\n", clean_name)
 		fmt.sbprintf(&b, "\tdefer _save_%s_state(api, self, frame, &_bp)\n", clean_name)
@@ -1509,7 +1672,9 @@ transpile_graph_to_odin :: proc(g: ^engine.Visual_Graph, allocator := context.al
 		for ca in call_args do fmt.sbprintf(&b, ", %s", ca)
 		strings.write_string(&b, ")\n")
 		for rp, ri in ret_pins {
-			if rp.pin_type == .Enum_U8 || rp.pin_type == .BitSet_U8 {
+			if engine.vg_pin_container_kind(rp) == .Slice {
+				fmt.sbprintf(&b, "\tframe.outputs[%d] = {{pin_type = .%v, ref_ptr = rawptr(raw_data(_r%d)), slice_len = i32(len(_r%d)), slice_cap = -1}}\n", ri, rp.pin_type, ri, ri)
+			} else if rp.pin_type == .Enum_U8 || rp.pin_type == .BitSet_U8 {
 				fmt.sbprintf(&b, "\tframe.outputs[%d] = {{pin_type = .%v, val_u8 = u8(_r%d)}}\n", ri, rp.pin_type, ri)
 			} else if rp.pin_type == .Struct_Val {
 				fmt.sbprintf(&b, "\tframe.outputs[%d] = {{pin_type = .Struct_Val}}; if size_of(_r%d) <= hot.HOT_MAX_STRUCT_BYTES {{ (cast(^%s)raw_data(frame.outputs[%d].val_bytes[:]))^ = _r%d }}\n", ri, ri, _pin_odin_type_in_graph(g, rp, context.temp_allocator), ri, ri)
@@ -1586,19 +1751,84 @@ transpile_graph_to_odin :: proc(g: ^engine.Visual_Graph, allocator := context.al
 	return strings.to_string(b), main_proc_name
 }
 
-// Writes unified `<graph>.bodin` AND syncs `haati/hot_scripts/<name>_mhgraph_generated.odin`
-// for instant `hot_cartridge.dll` hot-swap!
+// Assembles Zone 1 + Zone 2 Chimera `.bodin` Odin source cleanly from `zone1_src` (or default Zone 1).
+assemble_bodin_odin_sections :: proc(
+	g:             ^engine.Visual_Graph,
+	zone1_src:     string,
+	with_markers:  bool,
+	allocator := context.allocator,
+) -> (combined_odin: string, main_proc_name: string) {
+	clean_name := sanitize_odin_ident(g.name != "" ? g.name : "custom_graph", context.temp_allocator)
+	z1 := strings.trim_right_space(zone1_src)
+	if z1 == "" {
+		z1 = strings.trim_right_space(default_bodin_zone1_header(clean_name, context.temp_allocator))
+	}
+	z2, main_p := transpile_graph_zone2(g, z1, context.temp_allocator)
+	z2_trim := strings.trim_space(z2)
+
+	sb := strings.builder_make(0, len(z1) + len(z2_trim) + 96, allocator)
+	strings.write_string(&sb, z1)
+	strings.write_string(&sb, "\n\n")
+	if with_markers {
+		strings.write_string(&sb, engine.BODIN_GENERATED_BEGIN)
+		strings.write_byte(&sb, '\n')
+	}
+	strings.write_string(&sb, z2_trim)
+	if with_markers {
+		strings.write_byte(&sb, '\n')
+		strings.write_string(&sb, engine.BODIN_GENERATED_END)
+	}
+	strings.write_byte(&sb, '\n')
+	return strings.to_string(sb), strings.clone(main_p, allocator)
+}
+
+// Generates the complete, `-vet-unused` clean `.odin` source string for `g`!
+transpile_graph_to_odin :: proc(g: ^engine.Visual_Graph, allocator := context.allocator) -> (odin_source: string, main_proc_name: string) {
+	return assemble_bodin_odin_sections(g, "", false, allocator)
+}
+
+@(private = "file")
+_read_existing_bodin_source :: proc(abs_g: string, allocator := context.temp_allocator) -> string {
+	if open_txt, is_open := cs.get_open_tab_text(abs_g, allocator); is_open {
+		return open_txt
+	}
+	if abs_g != "" && os.exists(abs_g) {
+		if raw, err := os.read_entire_file(abs_g, context.temp_allocator); err == nil {
+			return strings.clone(string(raw), allocator)
+		}
+	}
+	return ""
+}
+
+// Writes unified `<graph>.bodin` (preserving Zone 1 raw Odin above `// @BODIN_GENERATED_BEGIN`)
+// AND syncs `haati/hot_scripts/<name>_mhgraph_generated.odin` for instant `hot_cartridge.dll` hot-swap!
 bake_graph_to_odin_file :: proc(g: ^engine.Visual_Graph, mhgraph_save_path: string = "") -> (gen_odin_abs: string, proc_name: string, ok: bool) {
 	repo_root := engine.resolve_repo_root(context.temp_allocator)
-	odin_code, main_proc := transpile_graph_to_odin(g, context.temp_allocator)
-
+	abs_g := ""
 	if mhgraph_save_path != "" {
-		abs_g := mhgraph_save_path
-		if !filepath.is_abs(abs_g) {
-			save_root := engine.active_project_root()
-			if save_root == "" do save_root = repo_root
-			abs_g, _ = filepath.join({save_root, mhgraph_save_path}, context.temp_allocator)
-		}
+		abs_g = _vs_resolve_graph_path(mhgraph_save_path, context.temp_allocator)
+	}
+
+	clean_name := sanitize_odin_ident(g.name != "" ? g.name : "custom_graph", context.temp_allocator)
+	zone1 := ""
+	has_z1 := false
+	if g == &_vs.graph && _vs.ram_zone1_override != "" {
+		zone1 = strings.clone(_vs.ram_zone1_override, context.temp_allocator)
+		has_z1 = true
+	} else {
+		existing_src := _read_existing_bodin_source(abs_g, context.temp_allocator)
+		zone1, has_z1 = engine.vg_extract_bodin_user_zone(existing_src, context.temp_allocator)
+	}
+	if !has_z1 || strings.trim_space(zone1) == "" {
+		zone1 = default_bodin_zone1_header(clean_name, context.temp_allocator)
+	}
+
+	sync_bodin_user_ast_into_graph(g, zone1)
+
+	bodin_odin, main_proc := assemble_bodin_odin_sections(g, zone1, true, context.temp_allocator)
+	flat_odin, _          := assemble_bodin_odin_sections(g, zone1, false, context.temp_allocator)
+
+	if abs_g != "" {
 		dir_g: string
 		{
 			context.allocator = context.temp_allocator
@@ -1606,14 +1836,21 @@ bake_graph_to_odin_file :: proc(g: ^engine.Visual_Graph, mhgraph_save_path: stri
 		}
 		_ = os.make_directory_all(dir_g)
 		if strings.has_suffix(strings.to_lower(abs_g, context.temp_allocator), ".bodin") {
-			_ = engine.vg_save_bodin_file(g, abs_g, odin_code)
+			_ = engine.vg_save_bodin_file(g, abs_g, bodin_odin)
 		} else {
 			_ = engine.vg_save_to_file(g, abs_g)
 		}
 		engine.visual_script_invalidate_cached_graph(mhgraph_save_path)
+		if g == &_vs.graph && _vs.ram_zone1_override != "" {
+			prev_alloc := context.allocator
+			context.allocator = runtime.default_allocator()
+			delete(_vs.ram_zone1_override)
+			_vs.ram_zone1_override = ""
+			context.allocator = prev_alloc
+		}
+		cs.reload_file_tab_from_disk(abs_g)
 	}
 
-	clean_name := sanitize_odin_ident(g.name != "" ? g.name : "custom_graph", context.temp_allocator)
 	rel_odin := fmt.tprintf("haati/hot_scripts/%s_mhgraph_generated.odin", clean_name)
 	abs_odin, _ := filepath.join({repo_root, rel_odin}, context.temp_allocator)
 	dir_odin: string
@@ -1623,7 +1860,7 @@ bake_graph_to_odin_file :: proc(g: ^engine.Visual_Graph, mhgraph_save_path: stri
 	}
 	_ = os.make_directory_all(dir_odin)
 
-	if os.write_entire_file(abs_odin, transmute([]u8)odin_code) != nil {
+	if os.write_entire_file(abs_odin, transmute([]u8)flat_odin) != nil {
 		return "", "", false
 	}
 	norm_abs, _ := strings.replace_all(abs_odin, "\\", "/", context.temp_allocator)

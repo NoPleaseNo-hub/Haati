@@ -5,8 +5,62 @@ import "core:mem"
 import "core:slice"
 import "core:strings"
 import im "haati:external/odin-imgui"
+import "haati:editor/icons"
 import thm "haati:editor/theme"
 import "haati:editor/widgets"
+
+// Optional callback wired at editor startup to fetch registered @(editor_window) icons without import cycles.
+window_icon_lookup: proc(plain_title: string) -> string
+
+@(private = "file")
+_menu_node_icon :: proc(node: ^MenuNode) -> string {
+	if node == nil do return ""
+	if window_icon_lookup != nil {
+		if ic := window_icon_lookup(node.name); ic != "" do return ic
+	}
+	switch node.name {
+	case "Project Hub (New & Open)...": return icons.ICON_MD_FOLDER_OPEN
+	case "Save":                        return icons.ICON_MD_SAVE
+	case "Relaunch":                    return icons.ICON_MD_REFRESH
+	case "Quit":                        return icons.ICON_MD_CLOSE
+	case "Undo":                        return icons.ICON_MD_UNDO
+	case "Redo":                        return icons.ICON_MD_REDO
+	case "Undo History":                return icons.ICON_MD_HISTORY
+	case "Play":                        return icons.ICON_MD_PLAY_ARROW
+	case "Pause":                       return icons.ICON_MD_PAUSE
+	case "Settings...":                 return icons.ICON_MD_SETTINGS
+	case "Toggle Transform Active":     return icons.ICON_MD_VISIBILITY
+	case "Frame Selected":              return icons.ICON_MD_CENTER_FOCUS
+	case "Hot-Swap Gameplay Cartridge": return icons.ICON_MD_BOLT
+	case "Refresh AssetDB":             return icons.ICON_MD_REFRESH
+	case "Haati Engine & Game Manual",
+	     "Haati Engine Manual":         return icons.ICON_MD_MENU_BOOK
+	case "Input Debug":                 return icons.ICON_MD_BUG_REPORT
+	case "About":                       return icons.ICON_MD_INFO
+	case "Scene3D":                     return icons.ICON_MD_LANDSCAPE
+	case "Scene 2D":                    return icons.ICON_MD_GRID_4X4
+	case "Game":                        return icons.ICON_MD_SPORTS_ESPORTS
+	case "Console":                     return icons.ICON_MD_TERMINAL
+	case "Output":                      return icons.ICON_MD_RECEIPT_LONG
+	case "Animation":                   return icons.ICON_MD_ANIMATION
+	case "Playable Graph":              return icons.ICON_MD_HUB
+	case "Theme",
+	     "Customize Themes & Visuals...": return icons.ICON_MD_PALETTE
+	case "General":                     return icons.ICON_MD_WIDGETS
+	case "Recent Scenes":               return icons.ICON_MD_STACKS
+	}
+	return ""
+}
+
+@(private = "file")
+_menu_display_label :: proc(node: ^MenuNode) -> cstring {
+	if node == nil do return ""
+	ic := _menu_node_icon(node)
+	if ic != "" {
+		return fmt.ctprintf("%s %s###%s", ic, node.name, node.name)
+	}
+	return node.name_cstr
+}
 
 MenuEntryKind :: enum {
 	Submenu,
@@ -543,7 +597,7 @@ _draw_menu_child :: proc(child: ^MenuNode) {
 		// "last item" is inside the child window.
 		prev := widgets.ui_origin_push(child.origin)
 		defer widgets.ui_origin_pop(prev)
-		if im.BeginMenu(child.name_cstr, _node_enabled(child)) {
+		if im.BeginMenu(_menu_display_label(child), _node_enabled(child)) {
 			if child.draw != nil do child.draw()
 			im.EndMenu()
 		} else {
@@ -551,8 +605,12 @@ _draw_menu_child :: proc(child: ^MenuNode) {
 		}
 	case .Submenu, .Action, .Toggle:
 		if child.kind == .Submenu || len(child.children) > 0 {
-			if im.BeginMenu(child.name_cstr, true) {
-				_draw_menu_children(child)
+			if im.BeginMenu(_menu_display_label(child), true) {
+				if _is_searchable_menu(child.name) {
+					_draw_searchable_menu_contents(child)
+				} else {
+					_draw_menu_children(child)
+				}
 				im.EndMenu()
 			}
 		} else {
@@ -560,17 +618,18 @@ _draw_menu_child :: proc(child: ^MenuNode) {
 			// draws nothing outside debug tooltips.
 			prev := widgets.ui_origin_push(child.origin)
 			defer widgets.ui_origin_pop(prev)
+			disp := _menu_display_label(child)
 			#partial switch child.kind {
 			case .Action:
 				shortcut_label := child.shortcut_cstr if child.shortcut_cstr != nil else ""
 				ticked := child.checked != nil && child.checked()
-				if im.MenuItem(child.name_cstr, shortcut_label, ticked, _node_enabled(child)) {
+				if im.MenuItem(disp, shortcut_label, ticked, _node_enabled(child)) {
 					if child.action != nil do child.action()
 				}
 				widgets.tooltip("", im.HoveredFlags_AllowWhenDisabled)
 			case .Toggle:
 				if child.value != nil {
-					im.MenuItemBoolPtr(child.name_cstr, child.shortcut_cstr, child.value, _node_enabled(child))
+					im.MenuItemBoolPtr(disp, child.shortcut_cstr, child.value, _node_enabled(child))
 					widgets.tooltip("", im.HoveredFlags_AllowWhenDisabled)
 				}
 			}
@@ -587,7 +646,114 @@ process_shortcuts :: proc() {
 @(private = "file")
 _inline_open_menu_idx: int = -1
 
-// Draws top-level menus (`File`, `Edit`, `View`, `Window`, ...) inline inside the unified
+@(private = "file")
+_menu_filter_buf: [128]u8
+
+@(private = "file")
+_menu_filter_node: ^MenuNode
+
+@(private = "file")
+_Menu_Flat_Entry :: struct {
+	node:       ^MenuNode,
+	breadcrumb: string,
+}
+
+@(private = "file")
+_is_searchable_menu :: #force_inline proc(name: string) -> bool {
+	return name == "Window" || name == "Tools"
+}
+
+@(private = "file")
+_collect_menu_leaves :: proc(node: ^MenuNode, prefix: string, out: ^[dynamic]_Menu_Flat_Entry) {
+	if node == nil do return
+	for child in node.children {
+		if child.kind == .Separator || child.kind == .Dynamic do continue
+		crumb := prefix != "" ? fmt.tprintf("%s > %s", prefix, child.name) : child.name
+		if child.kind == .Submenu || len(child.children) > 0 {
+			_collect_menu_leaves(child, crumb, out)
+		} else {
+			append(out, _Menu_Flat_Entry{node = child, breadcrumb = crumb})
+		}
+	}
+}
+
+@(private = "file")
+_draw_searchable_menu_contents :: proc(node: ^MenuNode) {
+	if node == nil do return
+	if im.IsWindowAppearing() || _menu_filter_node != node {
+		_menu_filter_buf[0] = 0
+		_menu_filter_node = node
+	}
+	hint: cstring = node.name == "Window" ? "Search windows..." : "Search tools..."
+	sr := widgets.search_bar(_menu_filter_buf[:], widgets.Search_Bar_Opts{
+		id            = "##top_menu_filter",
+		hint          = hint,
+		mode          = .Popup,
+		width         = 240,
+		enter_returns = true,
+	})
+	if sr.escape_close {
+		im.CloseCurrentPopup()
+		return
+	}
+	im.Separator()
+
+	if len(sr.query) == 0 {
+		_draw_menu_children(node)
+		return
+	}
+
+	terms := widgets.search_terms(sr.query)
+	flat := make([dynamic]_Menu_Flat_Entry, 0, 32, context.temp_allocator)
+	_collect_menu_leaves(node, "", &flat)
+
+	trigger_first := sr.submitted || (sr.active && (im.IsKeyPressed(.Enter) || im.IsKeyPressed(.KeypadEnter)))
+	matched := 0
+	for entry in flat {
+		haystack := entry.node.shortcut != "" ? fmt.tprintf("%s %s", entry.breadcrumb, entry.node.shortcut) : entry.breadcrumb
+		if !widgets.search_match(haystack, terms) do continue
+
+		child := entry.node
+		en := _node_enabled(child)
+		if trigger_first && matched == 0 && en {
+			#partial switch child.kind {
+			case .Action:
+				if child.action != nil do child.action()
+			case .Toggle:
+				if child.value != nil do child.value^ = !child.value^
+			}
+			im.CloseCurrentPopup()
+			return
+		}
+
+		matched += 1
+		ic := _menu_node_icon(child)
+		crumb_cstr := ic != "" \
+			? fmt.ctprintf("%s %s###crumb_%s", ic, entry.breadcrumb, entry.breadcrumb) \
+			: strings.clone_to_cstring(entry.breadcrumb, context.temp_allocator)
+		shortcut_label := child.shortcut_cstr if child.shortcut_cstr != nil else ""
+		prev := widgets.ui_origin_push(child.origin)
+		#partial switch child.kind {
+		case .Action:
+			ticked := child.checked != nil && child.checked()
+			if im.MenuItem(crumb_cstr, shortcut_label, ticked, en) {
+				if child.action != nil do child.action()
+			}
+			widgets.tooltip("", im.HoveredFlags_AllowWhenDisabled)
+		case .Toggle:
+			if child.value != nil {
+				im.MenuItemBoolPtr(crumb_cstr, shortcut_label, child.value, en)
+				widgets.tooltip("", im.HoveredFlags_AllowWhenDisabled)
+			}
+		}
+		widgets.ui_origin_pop(prev)
+	}
+	if matched == 0 {
+		im.TextDisabled("No matching items")
+	}
+}
+
+// Draws top-level menus (`File`, `Edit`, `Tools`, `Window`, `Help`) inline inside the unified
 // studio header bar (`##ToolBar`), eliminating the separate top menu strip while keeping
 // native hover-switching across open menus.
 draw_inline_menus :: proc(measuring: bool = false) {
@@ -607,7 +773,7 @@ draw_inline_menus :: proc(measuring: bool = false) {
 	any_open_now := false
 	drawn := 0
 	for child, idx in _menu_root.children {
-		if child.name == "GameObject" || child.name == "Component" do continue
+		if child.name == "GameObject" || child.name == "Component" || child.name == "Assets" do continue
 		if drawn > 0 do im.SameLine(0, 2.0)
 		drawn += 1
 
@@ -642,7 +808,11 @@ draw_inline_menus :: proc(measuring: bool = false) {
 		im.SetNextWindowPos({rmin.x, rmax.y + 3.0}, .Always)
 		if im.BeginPopup(popup_id) {
 			any_open_now = true
-			_draw_menu_children(child)
+			if _is_searchable_menu(child.name) {
+				_draw_searchable_menu_contents(child)
+			} else {
+				_draw_menu_children(child)
+			}
 			im.EndPopup()
 		}
 	}
@@ -661,10 +831,9 @@ draw_menu_bar :: proc() -> bool {
 	if !im.BeginMainMenuBar() do return false
 	defer im.EndMainMenuBar()
 	for child in _menu_root.children {
-		// "GameObject" and "Component" live in _menu_root to back keyboard shortcuts,
-		// context menus, and the Add Component popup, but are hidden from the top
-		// menu bar (where Void Hierarchy and Void Inspector handle node/component creation).
-		if child.name == "GameObject" || child.name == "Component" do continue
+		// "GameObject", "Component", and "Assets" live in _menu_root to back keyboard shortcuts,
+		// context menus, and the Add Component / Explorer create menus, but are hidden from the top bar.
+		if child.name == "GameObject" || child.name == "Component" || child.name == "Assets" do continue
 		_draw_menu_child(child)
 	}
 	return true

@@ -106,6 +106,8 @@ _gfx: struct {
 	fence_query_inverted:   bool,
 	multi_viewport_present: bool,
 	main_mailbox_active:    bool,
+	last_present_win_w:     i32,
+	last_present_win_h:     i32,
 }
 
 // Window + GPU device + pipelines. show=false lets the caller apply saved
@@ -852,13 +854,26 @@ dynamic_mesh_destroy_wire_indices :: proc(wire_mesh: ^Mesh) {
 	wire_mesh.index_count = 0
 }
 
-// Switches the main swapchain to non-blocking MAILBOX while secondary OS viewports are active
-// so higher-Hz secondary monitors never hit the 4-frame FIFO queue backpressure stall.
+// Switches the main swapchain to non-blocking IMMEDIATE/MAILBOX while secondary OS viewports
+// are active (and re-applies across swapchain pixel-size changes on maximize/restore) so
+// higher-Hz secondary monitors never stall behind main FIFO queue backpressure.
 set_multi_viewport_present_mode :: proc(multi_active: bool) {
-	if multi_active == _gfx.multi_viewport_present do return
 	if _gfx.device == nil || _platform.window == nil do return
+	pw, ph: i32
+	_ = sdl.GetWindowSizeInPixels(_platform.window, &pw, &ph)
+	if multi_active == _gfx.multi_viewport_present && pw == _gfx.last_present_win_w && ph == _gfx.last_present_win_h {
+		return
+	}
 	_gfx.multi_viewport_present = multi_active
+	_gfx.last_present_win_w = pw
+	_gfx.last_present_win_h = ph
 	if multi_active {
+		if sdl.WindowSupportsGPUPresentMode(_gfx.device, _platform.window, .IMMEDIATE) {
+			if sdl.SetGPUSwapchainParameters(_gfx.device, _platform.window, .SDR, .IMMEDIATE) {
+				_gfx.main_mailbox_active = true
+				return
+			}
+		}
 		if sdl.WindowSupportsGPUPresentMode(_gfx.device, _platform.window, .MAILBOX) {
 			if sdl.SetGPUSwapchainParameters(_gfx.device, _platform.window, .SDR, .MAILBOX) {
 				_gfx.main_mailbox_active = true

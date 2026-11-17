@@ -5,6 +5,7 @@ package crash_journal
 
 import "base:intrinsics"
 import "base:runtime"
+import "core:c/libc"
 import "core:os"
 
 CRASH_MAX_FRAMES     :: 64
@@ -330,4 +331,104 @@ test_crash :: proc() {
 	addr: uintptr = 0x8 // never mapped
 	p := (^int)(intrinsics.volatile_load(&addr))
 	intrinsics.volatile_store(p, 1)
+}
+
+// =============================================================================
+// Two-Layer Hot-Cartridge Script Sandbox (Odin Assertion Trap + VEH Unwind)
+// =============================================================================
+
+Sandbox_Fault_Info :: struct {
+	occurred:   bool,
+	code:       u32,
+	line:       i32,
+	reason:     [256]byte,
+	reason_len: int,
+	file:       [260]byte,
+	file_len:   int,
+	proc_name:  [128]byte,
+	proc_len:   int,
+}
+
+sandbox_fault_reason :: proc(f: ^Sandbox_Fault_Info) -> string {
+	if f == nil || f.reason_len <= 0 do return ""
+	return string(f.reason[:min(f.reason_len, len(f.reason))])
+}
+
+sandbox_fault_file :: proc(f: ^Sandbox_Fault_Info) -> string {
+	if f == nil || f.file_len <= 0 do return ""
+	return string(f.file[:min(f.file_len, len(f.file))])
+}
+
+sandbox_fault_proc :: proc(f: ^Sandbox_Fault_Info) -> string {
+	if f == nil || f.proc_len <= 0 do return ""
+	return string(f.proc_name[:min(f.proc_len, len(f.proc_name))])
+}
+
+@(thread_local)
+_sandbox_active: bool
+
+@(thread_local)
+_sandbox_fault: Sandbox_Fault_Info
+
+@(thread_local)
+_sandbox_jmp_buf: libc.jmp_buf
+
+@(private = "package")
+_sandbox_copy_cstr :: proc "contextless" (dst: []byte, s: cstring) -> int {
+	if len(dst) == 0 || s == nil do return 0
+	raw := ([^]byte)(rawptr(s))
+	n := 0
+	for n < len(dst) - 1 && raw[n] != 0 {
+		dst[n] = raw[n]
+		n += 1
+	}
+	dst[n] = 0
+	return n
+}
+
+@(private = "package")
+_sandbox_copy_str :: proc "contextless" (dst: []byte, s: string) -> int {
+	if len(dst) == 0 || len(s) == 0 do return 0
+	n := min(len(s), len(dst) - 1)
+	copy(dst[:n], s[:n])
+	dst[n] = 0
+	return n
+}
+
+sandbox_record_assertion_fault :: proc "c" (msg, file, proc_name: cstring, line: i32) {
+	if !_sandbox_active do return
+	_sandbox_fault = {
+		occurred = true,
+		code     = 1,
+		line     = line,
+	}
+	_sandbox_fault.reason_len = _sandbox_copy_cstr(_sandbox_fault.reason[:], msg)
+	_sandbox_fault.file_len   = _sandbox_copy_cstr(_sandbox_fault.file[:], file)
+	_sandbox_fault.proc_len   = _sandbox_copy_cstr(_sandbox_fault.proc_name[:], proc_name)
+	_sandbox_active = false
+	libc.longjmp(&_sandbox_jmp_buf, 1)
+}
+
+@(optimization_mode = "none")
+sandbox_exec :: proc(fn: proc "c" (rawptr), arg: rawptr) -> (fault: Sandbox_Fault_Info, ok: bool) {
+	if fn == nil do return {}, true
+	_ensure_sandbox_veh_installed()
+	prev_active := _sandbox_active
+	prev_fault  := _sandbox_fault
+	if prev_active {
+		fn(arg)
+		return {}, true
+	}
+	_sandbox_fault = {}
+	_sandbox_active = true
+	if libc.setjmp(&_sandbox_jmp_buf) == 0 {
+		fn(arg)
+		_sandbox_active = false
+		_sandbox_fault  = prev_fault
+		return {}, true
+	}
+	caught := _sandbox_fault
+	_sandbox_active = false
+	_sandbox_fault  = prev_fault
+	return caught, false
 }

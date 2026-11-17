@@ -20,8 +20,9 @@ import "core:encoding/base64"
 import "core:encoding/json"
 import "core:fmt"
 import "core:net"
-import "core:reflect"
 import "core:os"
+import "core:path/filepath"
+import "core:reflect"
 import "core:slice"
 import "core:strings"
 import stbi "vendor:stb/image"
@@ -57,6 +58,7 @@ _Mcp_Window_Shot :: struct {
 
 @(private = "file") _mcp: struct {
 	active:       bool,
+	port:         int,
 	listener:     net.TCP_Socket,
 	client:       net.TCP_Socket,
 	has_client:   bool,
@@ -68,15 +70,40 @@ _Mcp_Window_Shot :: struct {
 	pending_window_shot: _Mcp_Window_Shot,
 }
 
+@(private = "file")
+_mcp_remove_bridge_files :: proc() {
+	os.remove(mcp.BRIDGE_FILE_FROM_EDITOR)
+	if us_p := engine.engine_file_path(mcp.BRIDGE_FILE_USER_SETTINGS, context.temp_allocator); us_p != "" {
+		os.remove(us_p)
+	}
+}
+
+mcp_bridge_status :: proc() -> (active: bool, port: int) {
+	return _mcp.active, _mcp.port
+}
+
+mcp_bridge_set_enabled :: proc(enable: bool) {
+	engine.mcp_settings.enabled = enable
+	_ = engine.project_settings_save("MCP", &engine.mcp_settings, typeid_of(type_of(engine.mcp_settings)))
+	if enable {
+		if !_mcp.active {
+			mcp_bridge_init()
+		}
+	} else {
+		mcp_bridge_shutdown()
+	}
+}
+
 mcp_bridge_init :: proc() {
 	engine.project_settings_load("MCP", &engine.mcp_settings)
 	if !engine.mcp_settings.enabled {
 		// A file left by an earlier enabled run would send shims to a port
 		// nobody is listening on — remove it so they report "not running".
-		os.remove(mcp.BRIDGE_FILE_FROM_EDITOR)
-		log.info("[MCP] Bridge disabled (Edit > Project Settings > MCP)")
+		_mcp_remove_bridge_files()
+		log.info("[MCP] Bridge disabled (Settings -> Editor & Appearance -> AI Agent Bridge)")
 		return
 	}
+	if _mcp.active do return
 
 	port := 0
 	for candidate in _MCP_PORT_FIRST ..< _MCP_PORT_FIRST + _MCP_PORT_COUNT {
@@ -98,9 +125,11 @@ mcp_bridge_init :: proc() {
 
 	raw: [16]u8
 	crypto.rand_bytes(raw[:])
+	if _mcp.token != "" do delete(_mcp.token)
 	_mcp.token = fmt.aprintf("%032x", transmute(u128be)raw)
 
-	info := mcp.Bridge_Info{port = port, pid = os.get_pid(), token = _mcp.token, project = "haati"}
+	proj_slug := engine.has_active_project() ? engine.active_project_slug(context.temp_allocator) : "haati"
+	info := mcp.Bridge_Info{port = port, pid = os.get_pid(), token = _mcp.token, project = proj_slug}
 	data, merr := json.marshal(info, {pretty = true}, context.temp_allocator)
 	if merr != nil {
 		log.error("[MCP] Bridge file marshal failed — bridge disabled")
@@ -109,18 +138,31 @@ mcp_bridge_init :: proc() {
 	}
 	os.make_directory("library")
 	os.make_directory("library/state_cache")
-	if os.write_entire_file(mcp.BRIDGE_FILE_FROM_EDITOR, data) != nil {
+	local_ok := os.write_entire_file(mcp.BRIDGE_FILE_FROM_EDITOR, data) == nil
+
+	us_ok := false
+	if us_p := engine.engine_file_path(mcp.BRIDGE_FILE_USER_SETTINGS, context.temp_allocator); us_p != "" {
+		dir_us: string
+		{
+			context.allocator = context.temp_allocator
+			dir_us = filepath.dir(us_p)
+		}
+		if dir_us != "" do _ = os.make_directory_all(dir_us)
+		us_ok = os.write_entire_file(us_p, data) == nil
+	}
+	if !local_ok && !us_ok {
 		log.error("[MCP] Bridge file write failed — bridge disabled")
 		net.close(_mcp.listener)
 		return
 	}
 	_mcp.active = true
-	log.infof("[MCP] Bridge listening on 127.0.0.1:%d", port)
+	_mcp.port   = port
+	log.infof("[MCP] Bridge listening on 127.0.0.1:%d (project=%s)", port, proj_slug)
 }
 
 mcp_bridge_shutdown :: proc() {
 	if _mcp.active {
-		os.remove(mcp.BRIDGE_FILE_FROM_EDITOR)
+		_mcp_remove_bridge_files()
 		net.close(_mcp.listener)
 	}
 	_mcp_drop_client()

@@ -17,7 +17,6 @@ import "core:mem"
 import "core:strings"
 import im "haati:external/odin-imgui"
 import engine "haati:engine"
-import wnd "haati:editor/window"
 import "haati:editor/icons"
 import thm "haati:editor/theme"
 import "haati:editor/widgets"
@@ -170,14 +169,6 @@ _draw_top_bar :: proc(tH: engine.Transform_Handle, asset_mode: bool = false) {
 	} else {
 		im.TextDisabled("[AUTO]")
 	}
-
-	im.SameLine()
-	is_docked := im.IsWindowDocked()
-	dock_icon := is_docked ? icons.ICON_MD_OPEN_IN_NEW : icons.ICON_MD_DOCK
-	if im.Button(fmt.ctprintf("%s##ViDockToggle", dock_icon), {28, 24}) {
-		wnd.toggle_window_dock("void_inspector")
-	}
-	widgets.tooltip(is_docked ? "Dock Out as Floating Window" : "Dock Window Back into Workspace")
 
 	if tH != {} {
 		im.SameLine(0, 15)
@@ -1405,22 +1396,46 @@ _get_component_badge :: proc(name: string) -> Component_Badge {
 		return make_badge(p, icons.ICON_MD_OPEN_WITH, {0.95, 0.70, 0.26, 1.0})
 	}
 	if strings.contains(name_lower, "camera") {
-		return make_badge(p, icons.ICON_MD_VISIBILITY, {0.36, 0.78, 0.94, 1.0})
+		return make_badge(p, icons.ICON_MD_VIDEOCAM, {0.36, 0.78, 0.94, 1.0})
+	}
+	if strings.contains(name_lower, "spotlight") || (strings.contains(name_lower, "spot") && strings.contains(name_lower, "light")) {
+		return make_badge(p, icons.ICON_MD_FLASHLIGHT_ON, {0.96, 0.80, 0.28, 1.0})
+	}
+	if strings.contains(name_lower, "directional") || strings.contains(name_lower, "sunlight") {
+		return make_badge(p, icons.ICON_MD_WB_SUNNY, {0.98, 0.82, 0.32, 1.0})
 	}
 	if strings.contains(name_lower, "light") {
-		return make_badge(p, icons.ICON_MD_RECORD, {0.96, 0.80, 0.28, 1.0})
+		return make_badge(p, icons.ICON_MD_LIGHTBULB, {0.96, 0.80, 0.28, 1.0})
 	}
-	if strings.contains(name_lower, "controlrig") || strings.contains(name_lower, "armature") || strings.contains(name_lower, "anim") || strings.contains(name_lower, "skinned") {
+	if strings.contains(name_lower, "controlrig") || strings.contains(name_lower, "armature") || strings.contains(name_lower, "skeleton") {
+		return make_badge(p, icons.ICON_MD_SKELETON, {0.72, 0.54, 0.98, 1.0})
+	}
+	if strings.contains(name_lower, "humanoid") || strings.contains(name_lower, "character") {
+		return make_badge(p, icons.ICON_MD_DIRECTIONS_RUN, {0.62, 0.56, 0.98, 1.0})
+	}
+	if strings.contains(name_lower, "anim") || strings.contains(name_lower, "skinned") {
 		return make_badge(p, icons.ICON_MD_ANIMATION, {0.72, 0.54, 0.98, 1.0})
+	}
+	if strings.contains(name_lower, "navmesh") || strings.contains(name_lower, "path") {
+		return make_badge(p, icons.ICON_MD_ROUTE, {0.38, 0.84, 0.68, 1.0})
+	}
+	if strings.contains(name_lower, "agent") || strings.contains(name_lower, "ai") {
+		return make_badge(p, icons.ICON_MD_SMART_TOY, {0.38, 0.84, 0.68, 1.0})
 	}
 	if strings.contains(name_lower, "mesh") || strings.contains(name_lower, "renderer") {
 		return make_badge(p, icons.ICON_MD_DEPLOYED_CODE, {0.48, 0.66, 0.97, 1.0})
+	}
+	if strings.contains(name_lower, "csg") || strings.contains(name_lower, "brush") {
+		return make_badge(p, icons.ICON_MD_JOIN_FULL, {0.42, 0.74, 0.96, 1.0})
 	}
 	if strings.contains(name_lower, "collider") || strings.contains(name_lower, "rigid") || strings.contains(name_lower, "physics") {
 		return make_badge(p, icons.ICON_MD_WIDGETS, {0.94, 0.58, 0.26, 1.0})
 	}
 	if strings.contains(name_lower, "audio") {
-		return make_badge(p, icons.ICON_MD_VOLUME_UP, {0.92, 0.46, 0.68, 1.0})
+		return make_badge(p, icons.ICON_MD_SPEAKER, {0.92, 0.46, 0.68, 1.0})
+	}
+	if strings.contains(name_lower, "visualscript") || strings.contains(name_lower, "blueprint") || strings.contains(name_lower, "graph") {
+		return make_badge(p, icons.ICON_MD_SCHEMA, {0.44, 0.82, 0.96, 1.0})
 	}
 	if strings.contains(name_lower, "sprite") {
 		return make_badge(p, icons.ICON_MD_IMAGE, {0.32, 0.78, 0.56, 1.0})

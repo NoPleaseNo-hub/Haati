@@ -75,6 +75,16 @@ editor_defaults_reset_struct :: proc(d: ^Editor_Defaults_Data) {
 }
 
 @(private = "file")
+_on_ide_sandbox_toggled :: proc(enabled: bool) {
+	editor_visuals.code_ide_settings.ide_sandbox_mode = enabled
+	_ = engine.project_settings_save(
+		"Code & Script IDE",
+		&editor_visuals.code_ide_settings,
+		typeid_of(editor_visuals.Code_IDE_Settings),
+	)
+}
+
+@(private = "file")
 _on_global_wire_style_changed :: proc(style: nc.Canvas_Wire_Style) {
 	editor_visuals.code_ide_settings.graph_wire_style = editor_visuals.Graph_Wire_Style_Choice(clamp(int(style), 0, 2))
 	editor_defaults_sync_from_settings(false)
@@ -180,6 +190,8 @@ editor_defaults_sync_from_settings :: proc(sync_ide_panes := false) {
 		sync_ide_panes,
 		ide.problem_check_delay_sec,
 	)
+	cs.set_sandbox_mode(ide.ide_sandbox_mode)
+	watchdog_set_enabled(ide.enable_crash_watchdog)
 	nc.on_global_wire_style_changed = _on_global_wire_style_changed
 	nc.set_global_wire_style(nc.Canvas_Wire_Style(ide.graph_wire_style), false)
 	vs.configure_graph_studio_defaults(
@@ -190,6 +202,8 @@ editor_defaults_sync_from_settings :: proc(sync_ide_panes := false) {
 	custom_exe := ide.custom_ide_executable
 	if custom_exe == "" {
 		custom_exe = file_explorer.settings.ide_executable
+	} else {
+		file_explorer.settings.ide_executable = custom_exe
 	}
 	file_explorer.set_external_ide_config(
 		ide.prefer_external_ide,
@@ -201,6 +215,7 @@ editor_defaults_sync_from_settings :: proc(sync_ide_panes := false) {
 editor_defaults_init :: proc() {
 	engine.register_pointer_type(editor_visuals.External_IDE_Choice)
 	engine.register_pointer_type(editor_visuals.Graph_Wire_Style_Choice)
+	cs.register_sandbox_toggle_hook(_on_ide_sandbox_toggled)
 	editor_defaults_sync_from_settings(true)
 }
 

@@ -19,6 +19,7 @@ package window
 import "base:runtime"
 import "core:fmt"
 import "core:strings"
+import sdl "vendor:sdl3"
 import im "haati:external/odin-imgui"
 
 @(private = "file")
@@ -87,8 +88,34 @@ apply_pending_dock_ops :: proc() {
 		resize(&_pending_dock_ops, write_idx)
 	}
 
-	// Idle Anti-Narnia rescue for joined floating DockNode OS windows.
+	// Detect titlebar drag-out of maximized floating DockNode OS windows and restore `m.restore_size`.
 	g := im.GetCurrentContext()
+	if _max_states != nil && len(_frame_floating_dock_ids) > 0 && g != nil && g.MovingWindow != nil && g.MovingWindow.RootWindow != nil {
+		io := im.GetIO()
+		for dock_id in _frame_floating_dock_ids {
+			node := im.DockBuilderGetNode(dock_id)
+			if node == nil do continue
+			root := node
+			for root.ParentNode != nil do root = root.ParentNode
+			if root.HostWindow == nil do continue
+			if g.MovingWindow != root.HostWindow && g.MovingWindow.RootWindow != root.HostWindow do continue
+			dk := fmt.tprintf("__docknode_%d", root.ID_)
+			if m, ok := &_max_states[dk]; ok && m.maximized && m.settle_frames == 0 {
+				rsz := m.restore_size
+				if rsz.x < 160 || rsz.y < 100 {
+					rsz = {max(min(root.Size.x * 0.72, 980), 320), max(min(root.Size.y * 0.72, 640), 240)}
+				}
+				ratio := clamp((io.MousePos.x - root.Pos.x) / max(root.Size.x, 1.0), 0.15, 0.85)
+				m.maximized     = false
+				m.target_pos    = {io.MousePos.x - ratio * rsz.x, io.MousePos.y - 14.0}
+				m.target_size   = rsz
+				m.settle_frames = 2
+				_ = _queue_pending_dock_op(root.ID_, m.target_pos, m.target_size)
+			}
+		}
+	}
+
+	// Idle Anti-Narnia rescue for joined floating DockNode OS windows.
 	if len(_frame_floating_dock_ids) > 0 && g != nil && g.MovingWindow == nil && !im.IsMouseDown(.Left) {
 		mons := _collect_platform_monitors(context.temp_allocator)
 		mvp := im.GetMainViewport()
@@ -287,6 +314,50 @@ monitor_work_rect_at :: proc(center: im.Vec2, outside_main: bool) -> (pos: im.Ve
 }
 
 @(private = "file")
+_viewport_sdl_win :: proc(vp: ^im.Viewport) -> ^sdl.Window {
+	if vp == nil || vp.PlatformHandle == nil do return nil
+	if w := sdl.GetWindowFromID(sdl.WindowID(uintptr(vp.PlatformHandle))); w != nil {
+		return w
+	}
+	return (^sdl.Window)(vp.PlatformHandle)
+}
+
+@(private = "file")
+_usable_work_rect_for_sdl_win :: proc(w: ^sdl.Window, fallback_center: im.Vec2, outside_main: bool) -> (pos: im.Vec2, size: im.Vec2) {
+	if w != nil {
+		if did := sdl.GetDisplayForWindow(w); did != 0 {
+			rect: sdl.Rect
+			if sdl.GetDisplayUsableBounds(did, &rect) && rect.w > 64 && rect.h > 64 {
+				return {f32(rect.x), f32(rect.y)}, {f32(rect.w), f32(rect.h)}
+			}
+		}
+	}
+	return monitor_work_rect_at(fallback_center, outside_main)
+}
+
+@(private = "file")
+_queue_pending_dock_op :: proc(root_id: im.ID, pos, size: im.Vec2) -> bool {
+	if _pending_dock_ops == nil {
+		_pending_dock_ops = make([dynamic]_Pending_Dock_Node_Op, 0, 4, runtime.default_allocator())
+	}
+	for &existing in _pending_dock_ops {
+		if existing.node_id == root_id {
+			existing.pos         = pos
+			existing.size        = size
+			existing.frames_left = 2
+			return true
+		}
+	}
+	append(&_pending_dock_ops, _Pending_Dock_Node_Op{
+		node_id     = root_id,
+		pos         = pos,
+		size        = size,
+		frames_left = 2,
+	})
+	return true
+}
+
+@(private = "file")
 _get_max_state :: proc(k: string) -> ^_Max_State {
 	if m, ok := &_max_states[k]; ok do return m
 	prev := context.allocator
@@ -307,11 +378,24 @@ is_window_maximized :: proc(title: cstring) -> bool {
 toggle_maximize_window :: proc(title: cstring, cur_pos, cur_size: im.Vec2, outside_main: bool) {
 	k := _key(title)
 	m := _get_max_state(k)
+	vp := im.GetWindowViewport()
+	sdl_w := outside_main ? _viewport_sdl_win(vp) : nil
 	if !m.maximized {
-		wpos, wsz := monitor_work_rect_at(cur_pos + cur_size * 0.5, outside_main)
-		if cur_size.x < wsz.x - 16 || cur_size.y < wsz.y - 16 {
-			m.restore_pos  = cur_pos
-			m.restore_size = cur_size
+		eff_pos := cur_pos
+		eff_size := cur_size
+		if sdl_w != nil {
+			wx, wy, ww, wh: i32
+			_ = sdl.GetWindowPosition(sdl_w, &wx, &wy)
+			_ = sdl.GetWindowSize(sdl_w, &ww, &wh)
+			if ww > 64 && wh > 32 {
+				eff_pos = {f32(wx), f32(wy)}
+				eff_size = {f32(ww), f32(wh)}
+			}
+		}
+		wpos, wsz := _usable_work_rect_for_sdl_win(sdl_w, eff_pos + eff_size * 0.5, outside_main)
+		if eff_size.x >= 120 && eff_size.y >= 80 && (eff_size.x < wsz.x - 16 || eff_size.y < wsz.y - 16) {
+			m.restore_pos  = eff_pos
+			m.restore_size = eff_size
 		} else if m.restore_size.x < 160 || m.restore_size.y < 100 {
 			rsize := im.Vec2{max(wsz.x * 0.72, 320), max(wsz.y * 0.72, 240)}
 			m.restore_size = rsize
@@ -320,7 +404,7 @@ toggle_maximize_window :: proc(title: cstring, cur_pos, cur_size: im.Vec2, outsi
 		m.target_pos    = wpos
 		m.target_size   = wsz
 		m.maximized     = true
-		m.settle_frames = 6
+		m.settle_frames = 2
 	} else {
 		mons := outside_main ? _collect_platform_monitors(context.temp_allocator) : nil
 		mvp := im.GetMainViewport()
@@ -329,7 +413,7 @@ toggle_maximize_window :: proc(title: cstring, cur_pos, cur_size: im.Vec2, outsi
 		rpos := m.restore_pos
 		rsz  := m.restore_size
 		if rsz.x < 160 || rsz.y < 100 {
-			wpos, wsz := resolve_monitor_work_rect(m.target_pos + m.target_size * 0.5, mons, fb_pos, fb_size)
+			wpos, wsz := _usable_work_rect_for_sdl_win(sdl_w, m.target_pos + m.target_size * 0.5, outside_main)
 			rsz  = {max(min(wsz.x * 0.72, 960), 320), max(min(wsz.y * 0.72, 620), 240)}
 			rpos = wpos + (wsz - rsz) * 0.5
 		}
@@ -337,7 +421,7 @@ toggle_maximize_window :: proc(title: cstring, cur_pos, cur_size: im.Vec2, outsi
 		m.target_pos    = cpos
 		m.target_size   = csz
 		m.maximized     = false
-		m.settle_frames = 6
+		m.settle_frames = 2
 	}
 }
 
@@ -347,11 +431,6 @@ is_dock_node_maximized :: proc(node: ^im.DockNode) -> bool {
 	for root.ParentNode != nil do root = root.ParentNode
 	dk := fmt.tprintf("__docknode_%d", root.ID_)
 	if m, ok := &_max_states[dk]; ok {
-		if m.maximized && m.settle_frames == 0 {
-			if abs(root.Size.x - m.target_size.x) > 48 || abs(root.Size.y - m.target_size.y) > 48 {
-				m.maximized = false
-			}
-		}
 		return m.maximized
 	}
 	return false
@@ -363,11 +442,26 @@ toggle_maximize_dock_node :: proc(node: ^im.DockNode) {
 	for root.ParentNode != nil do root = root.ParentNode
 	dk := fmt.tprintf("__docknode_%d", root.ID_)
 	m := _get_max_state(dk)
+	vp := root.HostWindow != nil ? im.FindViewportByID(root.HostWindow.ViewportId) : nil
+	main_vp := im.GetMainViewport()
+	outside := vp != nil && (main_vp == nil || vp.ID_ != main_vp.ID_)
+	sdl_w := outside ? _viewport_sdl_win(vp) : nil
 	if !m.maximized {
-		wpos, wsz := monitor_work_rect_at(root.Pos + root.Size * 0.5, true)
-		if root.Size.x < wsz.x - 16 || root.Size.y < wsz.y - 16 {
-			m.restore_pos  = root.Pos
-			m.restore_size = root.Size
+		eff_pos := root.Pos
+		eff_size := root.Size
+		if sdl_w != nil {
+			wx, wy, ww, wh: i32
+			_ = sdl.GetWindowPosition(sdl_w, &wx, &wy)
+			_ = sdl.GetWindowSize(sdl_w, &ww, &wh)
+			if ww > 64 && wh > 32 {
+				eff_pos = {f32(wx), f32(wy)}
+				eff_size = {f32(ww), f32(wh)}
+			}
+		}
+		wpos, wsz := _usable_work_rect_for_sdl_win(sdl_w, eff_pos + eff_size * 0.5, true)
+		if eff_size.x >= 120 && eff_size.y >= 80 && (eff_size.x < wsz.x - 16 || eff_size.y < wsz.y - 16) {
+			m.restore_pos  = eff_pos
+			m.restore_size = eff_size
 		} else if m.restore_size.x < 160 || m.restore_size.y < 100 {
 			rsize := im.Vec2{max(wsz.x * 0.72, 320), max(wsz.y * 0.72, 240)}
 			m.restore_size = rsize
@@ -384,7 +478,7 @@ toggle_maximize_dock_node :: proc(node: ^im.DockNode) {
 		rpos := m.restore_pos
 		rsz  := m.restore_size
 		if rsz.x < 160 || rsz.y < 100 {
-			wpos, wsz := resolve_monitor_work_rect(m.target_pos + m.target_size * 0.5, mons, fb_pos, fb_size)
+			wpos, wsz := _usable_work_rect_for_sdl_win(sdl_w, m.target_pos + m.target_size * 0.5, true)
 			rsz  = {max(min(wsz.x * 0.72, 980), 320), max(min(wsz.y * 0.72, 640), 240)}
 			rpos = wpos + (wsz - rsz) * 0.5
 		}
@@ -393,24 +487,8 @@ toggle_maximize_dock_node :: proc(node: ^im.DockNode) {
 		m.target_size = csz
 		m.maximized   = false
 	}
-	m.settle_frames = 6
-	if _pending_dock_ops == nil {
-		_pending_dock_ops = make([dynamic]_Pending_Dock_Node_Op, 0, 4, runtime.default_allocator())
-	}
-	for &existing in _pending_dock_ops {
-		if existing.node_id == root.ID_ {
-			existing.pos         = m.target_pos
-			existing.size        = m.target_size
-			existing.frames_left = 6
-			return
-		}
-	}
-	append(&_pending_dock_ops, _Pending_Dock_Node_Op{
-		node_id     = root.ID_,
-		pos         = m.target_pos,
-		size        = m.target_size,
-		frames_left = 6,
-	})
+	m.settle_frames = 2
+	_ = _queue_pending_dock_op(root.ID_, m.target_pos, m.target_size)
 }
 
 @(private = "file")
@@ -570,20 +648,12 @@ begin :: proc(title: cstring, p_open: ^bool = nil, flags: im.WindowFlags = {}) -
 	}
 
 	actual_flags := flags
-	if p.popped {
-		// Popped-out OS windows reunite via their title-bar Return button, not
-		// by scanning dock-split targets on every mouse-move over the main window.
-		wc := im.WindowClass{
-			ParentViewportId         = 0,
-			DockingAllowUnclassed    = false,
-			ViewportFlagsOverrideSet = {.NoAutoMerge},
-		}
-		im.SetNextWindowClass(&wc)
-		actual_flags += {.NoDocking}
-	} else if p.own_viewport || (!p.docked && im.IsMouseDown(.Left)) {
-		// Keep a dragged/floating panel's or joined dock container's secondary OS window & swapchain alive
-		// even while passing back over the main window (preventing mid-drag Vulkan swapchain destroy/recreate
-		// stalls), while still allowing full DockSpace drop-target docking via DockingAllowUnclassed = true.
+	g_pre := im.GetCurrentContext()
+	if p.popped || (p.own_viewport && g_pre != nil && g_pre.MovingWindow != nil) {
+		// Keep a popped or actively dragged external OS window & swapchain alive while passing
+		// back over the main window (avoiding mid-drag Vulkan swapchain destroy/recreate stalls),
+		// while keeping full DockSpace drop-target docking enabled (and allowing auto-merge when
+		// dropped back inside the main window).
 		wc := im.WindowClass{
 			ParentViewportId         = 0,
 			DockingAllowUnclassed    = true,
@@ -600,7 +670,7 @@ begin :: proc(title: cstring, p_open: ^bool = nil, flags: im.WindowFlags = {}) -
 
 	// Always record dock state inside Begin (even when `open == false` for
 	// inactive tabs) so `p.docked`, `p.dock_id`, `p.pos`, and `p.size` stay
-	// accurate when `pop_out` is triggered while the tab is hidden.
+	// accurate across frames.
 	p.docked = im.IsWindowDocked()
 	if p.docked do p.dock_id = im.GetWindowDockID()
 	vp := im.GetWindowViewport()
@@ -623,11 +693,19 @@ begin :: proc(title: cstring, p_open: ^bool = nil, flags: im.WindowFlags = {}) -
 				p.pos = cpos
 			}
 		}
-		if _max_states != nil {
+		cur_win := im.GetCurrentWindow()
+		if _max_states != nil && g != nil && cur_win != nil && g.MovingWindow == cur_win {
 			if m, ok := &_max_states[_key(title)]; ok && m.maximized && m.settle_frames == 0 {
-				if abs(p.size.x - m.target_size.x) > 48 || abs(p.size.y - m.target_size.y) > 48 {
-					m.maximized = false
+				io := im.GetIO()
+				rsz := m.restore_size
+				if rsz.x < 160 || rsz.y < 100 {
+					rsz = {max(min(p.size.x * 0.72, 960), 320), max(min(p.size.y * 0.72, 620), 240)}
 				}
+				ratio := clamp((io.MousePos.x - p.pos.x) / max(p.size.x, 1.0), 0.15, 0.85)
+				m.maximized     = false
+				m.target_pos    = {io.MousePos.x - ratio * rsz.x, io.MousePos.y - 14.0}
+				m.target_size   = rsz
+				m.settle_frames = 2
 			}
 		}
 	}

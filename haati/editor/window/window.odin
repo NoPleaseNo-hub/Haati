@@ -29,6 +29,7 @@ Draw_Proc :: proc()
 _Registered :: struct {
 	id:           string,  // stable handle from the attribute
 	plain_title:  string,  // the title as declared, without icon or id
+	icon:         string,  // icon rune string declared on the window
 	title:        cstring, // the imgui window name: "<icon> <title>###<id>"
 	draw:         Draw_Proc,
 	default_size: im.Vec2, // {} = imgui's default
@@ -99,11 +100,20 @@ register :: proc(id: string, title: string, icon: string, draw: Draw_Proc, width
 	append(&_registry, _Registered{
 		id           = id,
 		plain_title  = title,
+		icon         = icon,
 		title        = strings.clone_to_cstring(fmt.tprintf("%s %s###%s", icon, title, id), runtime.default_allocator()),
 		draw         = draw,
 		default_size = {width, height},
 		origin       = origin,
 	})
+}
+
+// Looks up the registered icon rune for a window by its plain title (e.g. for Window menu entries).
+icon_by_plain_title :: proc(plain_title: string) -> string {
+	for &r in _registry {
+		if r.plain_title == plain_title do return r.icon
+	}
+	return ""
 }
 
 // Every registered window's plain title and id, for imgui.ini migration
@@ -599,25 +609,6 @@ _get_central_dock_target :: proc() -> im.ID {
 	return 0
 }
 
-toggle_window_dock :: proc(id: string) {
-	for &r in _registry {
-		if r.id == id {
-			if im.IsWindowDocked() {
-				pop_out(r.title)
-			} else {
-				reunite(r.title)
-			}
-			return
-		}
-	}
-	c_title := strings.clone_to_cstring(id, context.temp_allocator)
-	if im.IsWindowDocked() {
-		pop_out(c_title)
-	} else {
-		reunite(c_title)
-	}
-}
-
 // Draws a pixel-crisp Maximize (`[□]`) or Restore (`[❐]`) vector glyph centered inside `[bmin, bmax]`.
 draw_maximize_restore_icon :: proc(dl: ^im.DrawList, bmin, bmax: im.Vec2, is_maximized: bool, col: u32) {
 	center := (bmin + bmax) * 0.5
@@ -652,7 +643,7 @@ decorate_floating_window :: proc(title: cstring, p_open: ^bool = nil) {
 	style := im.GetStyle()
 	title_h := im.GetFrameHeight()
 	btn_w := max(title_h * 1.22, 26.0)
-	if win_size.x < btn_w * 3.5 do return
+	if win_size.x < btn_w * 2.5 do return
 
 	right_x := win_pos.x + win_size.x - style.WindowBorderSize
 
@@ -662,58 +653,29 @@ decorate_floating_window :: proc(title: cstring, p_open: ^bool = nil) {
 	max_min := im.Vec2{close_min.x - btn_w - 2.0, win_pos.y + style.WindowBorderSize}
 	max_max := im.Vec2{close_min.x - 2.0, win_pos.y + title_h}
 
-	dock_min := im.Vec2{max_min.x - btn_w - 2.0, win_pos.y + style.WindowBorderSize}
-	dock_max := im.Vec2{max_min.x - 2.0, win_pos.y + title_h}
-
 	mouse_pos := im.GetMousePos()
 	in_close := mouse_pos.x >= close_min.x && mouse_pos.x <= close_max.x && mouse_pos.y >= close_min.y && mouse_pos.y <= close_max.y
 	in_max   := mouse_pos.x >= max_min.x   && mouse_pos.x <= max_max.x   && mouse_pos.y >= max_min.y   && mouse_pos.y <= max_max.y
-	in_dock  := mouse_pos.x >= dock_min.x  && mouse_pos.x <= dock_max.x  && mouse_pos.y >= dock_min.y  && mouse_pos.y <= dock_max.y
 
 	// AllowWhenBlockedByActiveItem allows hover and clicks to register even while the title bar dragging handler is active
 	is_win_hovered := im.IsWindowHovered(im.HoveredFlags_AllowWhenBlockedByActiveItem | im.HoveredFlags_RootAndChildWindows)
 	close_hovered := in_close && is_win_hovered
 	max_hovered   := in_max   && is_win_hovered
-	dock_hovered  := in_dock  && is_win_hovered
 
 	close_active := close_hovered && im.IsMouseDown(.Left)
 	max_active   := max_hovered   && im.IsMouseDown(.Left)
-	dock_active  := dock_hovered  && im.IsMouseDown(.Left)
 
-	if close_hovered || max_hovered || dock_hovered {
+	if close_hovered || max_hovered {
 		im.SetMouseCursor(.Arrow)
 		if im.IsMouseDown(.Left) || im.IsMouseClicked(.Left) {
 			im.StopMouseMovingWindow()
 		}
 	}
 
-	// Pop-out button: inside the main window it lifts the panel into its own
-	// OS window; in its own OS window it brings it back (viewports.odin).
-	// Without multi-viewport support it keeps the old "dock back" meaning.
-	can_pop := viewports_enabled()
-	outside := can_pop && in_own_os_window(title)
+	outside := viewports_enabled() && in_own_os_window(title)
 	is_max  := is_window_maximized(title)
-	glyph: cstring = icons.ICON_MD_DOCK
-	tip: cstring = "Dock Window Back into Workspace"
-	if can_pop {
-		glyph = outside ? icons.ICON_MD_DOCK : icons.ICON_MD_OPEN_IN_NEW
-		tip = outside ? "Return to Main Window (re-dock where it was)" : "Pop Out into a Separate OS Window"
-	}
 
-	// Handle clicks on press edge and cancel any ImGui window-drag (`MovingWindow`) on button interaction.
-	if dock_hovered && im.IsMouseClicked(.Left) {
-		im.StopMouseMovingWindow()
-		im.ClearActiveID()
-		if !can_pop {
-			reunite(title)
-		} else if outside {
-			reunite(title)
-		} else {
-			pop_out(title)
-		}
-	}
-
-	in_title_bar := mouse_pos.x >= win_pos.x && mouse_pos.x < dock_min.x && mouse_pos.y >= win_pos.y && mouse_pos.y <= win_pos.y + title_h
+	in_title_bar := mouse_pos.x >= win_pos.x && mouse_pos.x < max_min.x && mouse_pos.y >= win_pos.y && mouse_pos.y <= win_pos.y + title_h
 	if (max_hovered && im.IsMouseClicked(.Left)) || (in_title_bar && is_win_hovered && im.IsMouseDoubleClicked(.Left)) {
 		im.StopMouseMovingWindow()
 		im.ClearActiveID()
@@ -737,22 +699,13 @@ decorate_floating_window :: proc(title: cstring, p_open: ^bool = nil) {
 	dl := im.GetWindowDrawList()
 	im.DrawList_PushClipRect(dl, win_pos, win_pos + win_size, false)
 
-	// 1. Pop-out / return button (clean, clear blue accent button so it never appears grayed out)
-	dock_bg := dock_active ? im.GetColorU32ImVec4(im.Vec4{0.15, 0.28, 0.45, 1.0}) : (dock_hovered ? im.GetColorU32ImVec4(im.Vec4{0.28, 0.50, 0.80, 1.0}) : im.GetColorU32ImVec4(im.Vec4{0.22, 0.32, 0.46, 0.85}))
-	im.DrawList_AddRectFilled(dl, dock_min, dock_max, dock_bg, 2.0)
-
-	glyph_sz := im.CalcTextSize(glyph, nil, false, -1)
-	glyph_pos := dock_min + (im.Vec2{btn_w, title_h - style.WindowBorderSize} - glyph_sz) * 0.5
-	text_col := dock_hovered ? im.GetColorU32ImVec4(im.Vec4{1.0, 1.0, 1.0, 1.0}) : im.GetColorU32ImVec4(im.Vec4{0.90, 0.94, 1.0, 0.95})
-	im.DrawList_AddText(dl, glyph_pos, text_col, glyph)
-
-	// 2. Maximize / Restore ("Make Window Big") button
+	// 1. Maximize / Restore ("Make Window Big") button
 	max_bg := max_active ? im.GetColorU32ImVec4(im.Vec4{0.18, 0.34, 0.42, 1.0}) : (max_hovered ? im.GetColorU32ImVec4(im.Vec4{0.26, 0.46, 0.58, 1.0}) : im.GetColorU32ImVec4(im.Vec4{0.20, 0.25, 0.34, 0.88}))
 	im.DrawList_AddRectFilled(dl, max_min, max_max, max_bg, 2.0)
 	max_icon_col := max_hovered ? im.GetColorU32ImVec4(im.Vec4{1.0, 1.0, 1.0, 1.0}) : im.GetColorU32ImVec4(im.Vec4{0.90, 0.94, 1.0, 0.95})
 	draw_maximize_restore_icon(dl, max_min, max_max, is_max, max_icon_col)
 
-	// 3. Red square Close button (distinct, high contrast red square with centered white X)
+	// 2. Red square Close button (distinct, high contrast red square with centered white X)
 	close_bg := close_active ? im.GetColorU32ImVec4(im.Vec4{0.60, 0.10, 0.10, 1.0}) : (close_hovered ? im.GetColorU32ImVec4(im.Vec4{0.96, 0.22, 0.22, 1.0}) : im.GetColorU32ImVec4(im.Vec4{0.80, 0.16, 0.16, 0.92}))
 	im.DrawList_AddRectFilled(dl, close_min, close_max, close_bg, 2.0)
 
@@ -766,7 +719,6 @@ decorate_floating_window :: proc(title: cstring, p_open: ^bool = nil) {
 	im.DrawList_PopClipRect(dl)
 
 	if !im.IsMouseDown(.Left) {
-		if dock_hovered  do widgets.tooltip_unchecked(tip)
 		if max_hovered   do widgets.tooltip_unchecked(is_max ? "Restore Window Size" : "Maximize Window")
 		if close_hovered do widgets.tooltip_unchecked("Close Window")
 	}

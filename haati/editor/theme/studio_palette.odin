@@ -53,11 +53,12 @@ STUDIO_PIN_TABLE := [hot.Hot_Pin_Type]Studio_Pin_Visual {
 	.Enum_U8    = {"Enum(u8)", {0.96, 0.82, 0.28, 1.0}, icons.ICON_MD_LIST_ALT,      true},
 	.BitSet_U8  = {"BitSet",   {0.98, 0.64, 0.24, 1.0}, icons.ICON_MD_TUNE,          true},
 	.Struct_Val = {"Struct",   {0.32, 0.64, 0.98, 1.0}, icons.ICON_MD_DATA_OBJECT,   true},
+	.Raw_Ptr    = {"rawptr",   {1.00, 0.40, 0.36, 1.0}, icons.ICON_MD_BOLT,          true},
 }
 
 // Ordered list displayed in Blueprint type pickers (`Variables`, `Struct Fields`, `Proc Params`).
 @(rodata)
-STUDIO_PICKER_TYPES := [22]hot.Hot_Pin_Type {
+STUDIO_PICKER_TYPES := [23]hot.Hot_Pin_Type {
 	.Bool,
 	.U8,
 	.I8,
@@ -80,6 +81,7 @@ STUDIO_PICKER_TYPES := [22]hot.Hot_Pin_Type {
 	.Enum_U8,
 	.BitSet_U8,
 	.Struct_Val,
+	.Raw_Ptr,
 }
 
 // =============================================================================
@@ -93,6 +95,8 @@ Studio_Container_Kind :: enum u8 {
 	Bounded_Array = 3,
 	Delegate_Pin  = 4,
 	Exec_Flow     = 5,
+	Slice_View    = 6,
+	Dynamic_Array = 7,
 }
 
 Studio_Container_Visual :: struct {
@@ -110,6 +114,8 @@ STUDIO_CONTAINER_TABLE := [Studio_Container_Kind]Studio_Container_Visual {
 	.Bounded_Array = {icons.ICON_MD_LAYERS,     "Bounded",  icons.ICON_MD_LAYERS + " Bounded",      {0.52, 0.76, 1.00, 1.0}},
 	.Delegate_Pin  = {icons.ICON_MD_DIAMOND,    "Delegate", icons.ICON_MD_DIAMOND + " Delegate",    {0.22, 0.94, 0.92, 1.0}},
 	.Exec_Flow     = {icons.ICON_MD_PLAY_ARROW, "Exec",     nil,                                    {0.95, 0.96, 0.98, 1.0}},
+	.Slice_View    = {icons.ICON_MD_GRID_4X4,   "[]",       icons.ICON_MD_GRID_4X4 + " [] Slice",   {0.34, 0.90, 0.92, 1.0}},
+	.Dynamic_Array = {icons.ICON_MD_LAYERS,     "[+]",      icons.ICON_MD_LAYERS + " [dynamic]",    {0.46, 0.84, 1.00, 1.0}},
 }
 
 studio_resolve_container :: proc(

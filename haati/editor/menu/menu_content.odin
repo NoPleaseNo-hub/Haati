@@ -76,13 +76,13 @@ window_menu_scene_2d :: proc() { _open_window(&show_scene_2d, icons.TITLE_SCENE_
 @(menu_item={path="Window/General/Game", order=2, shortcut="Ctrl+2"})
 window_menu_game :: proc() { _open_window(&show_game, icons.TITLE_GAME) }
 
-@(menu_item={path="Window/General/Inspector", order=2, shortcut="Ctrl+3"})
+@(menu_item={path="Window/General/Void Inspector", order=2, shortcut="Ctrl+3"})
 window_menu_inspector :: proc() { wnd.open("void_inspector") }
 
-@(menu_item={path="Window/General/Hierarchy", order=4, shortcut="Ctrl+4"})
+@(menu_item={path="Window/General/Void Hierarchy", order=4, shortcut="Ctrl+4"})
 window_menu_hierarchy :: proc() { wnd.open("void_hierarchy") }
 
-@(menu_item={path="Window/General/Project", order=5, shortcut="Ctrl+5"})
+@(menu_item={path="Window/General/Void File Explorer", order=5, shortcut="Ctrl+5"})
 window_menu_project :: proc() { wnd.open("void_file_explorer") }
 
 @(menu_item={path="Window/General/Console", order=7, shortcut="Ctrl+Shift+C"})
@@ -124,7 +124,7 @@ file_separator_menu2 :: proc() {}
 @(menu_item={path="File/Quit", order=10, shortcut="Alt+F4"})
 file_quit_menu :: proc() { quit_requested = true }
 
-@(menu_item={path="Assets/Refresh AssetDB", order=0, shortcut=""})
+@(menu_item={path="Tools/Refresh AssetDB", order=20, shortcut=""})
 refresh_asset_db_menu :: proc() {
 	asset_pipeline.asset_db_refresh()
 }
