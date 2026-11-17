@@ -1,17 +1,21 @@
 # Physics (3D)
 
-3D physics simulation built on box3d, with Unity-style authoring: add plain
-data components to objects, press Play, and the package simulates them on the
-engine's fixed tick. The editor never simulates — bodies exist only while the
-app runs.
+3D physics simulation built on **Jolt Physics** via **JoltC** (`haati/external/jolt`), with
+Unity-style authoring: add plain data components to objects, press Play, and the package
+simulates them on the engine's fixed tick. The editor never simulates — bodies exist only
+while the app runs.
 
-## Components (Add Component → Physics)
+## Components (Add Component -> Physics)
 
 - **Rigidbody** — makes the object dynamic. `use_gravity` toggles gravity,
-  `is_kinematic` makes it animation/code-driven (it pushes dynamic bodies but
-  is never pushed), freeze flags lock position/rotation per axis.
-- **BoxCollider / SphereCollider / CapsuleCollider** — collision shapes with
-  a local `center` offset. Transform scale affects the shape size.
+  `is_kinematic` makes it animation/code-driven (it pushes dynamic bodies but is
+  never pushed), and freeze flags lock position/rotation per axis.
+- **BoxCollider / SphereCollider / CapsuleCollider / MeshCollider** — collision
+  shapes (with local `center` offsets and `friction` settings). Transform scale
+  affects shape size.
+- **CharacterController3D / PhysicsJoint3D / SpringArm3D / TimeDilationVolume** —
+  character movement, rigid constraints, camera/rig spring arms, and per-volume
+  time dilation.
 
 ## How bodies form
 
@@ -36,11 +40,12 @@ the visitor second).
 
 ## Going beyond the components
 
-`body_of(handle)` returns the live box3d body, so forces, joints, raycasts
-and anything else box3d offers can be used directly from game code.
+`body_of(handle)` returns `(jolt.BodyID, bool)` for the live Jolt body, so forces,
+joints, and custom Jolt calls (alongside `raycast_solid_ignore` / `raycast_masked`)
+can be used directly from game code.
 
 ## Current limitations
 
 - Moving or rescaling a child collider after creation doesn't re-bake its
-  shape, and runtime component field edits don't re-sync (use `body_of`).
-- No layer collision matrix, mesh colliders, or physics material assets yet.
+  shape, and runtime component field edits don't automatically re-sync (use `body_of`).
+- No layer collision matrix or standalone physics material assets yet.

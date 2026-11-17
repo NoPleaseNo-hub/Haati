@@ -1,6 +1,6 @@
 package physics3d_tests
 
-// End-to-end physics3d package test: authored components -> box3d sync ->
+// End-to-end physics3d package test: authored components -> Jolt sync ->
 // step -> transform write-back, through the same path the app takes.
 
 import "core:testing"

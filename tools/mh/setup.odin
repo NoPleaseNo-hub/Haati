@@ -5,8 +5,8 @@ package mh
 //
 // Odin's own vendor folders carry a build_*.sh and a build.bat per library —
 // which is exactly the split this tool exists to avoid, so setup picks the one
-// that matches the host. stb and cgltf are plain makefiles; box2d needs cmake;
-// box3d needs clang.
+// that matches the host (stb and cgltf). 3D physics runs on JoltC prebuilt in
+// haati/external/jolt.
 //
 // Already-built libraries are skipped, so this is safe to re-run.
 
