@@ -41,7 +41,6 @@ is_core_engine_module :: proc(name: string) -> bool {
 		"text",
 		"sprites",
 		"essentials",
-		"node_graph",
 		"audio",
 		"animation",
 		"sequencer",

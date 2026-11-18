@@ -164,8 +164,10 @@ test_prefabs_example_no_spurious_overrides :: proc(t: ^testing.T) {
 	defer common.teardown(tc)
 
 	// Saves land OUTSIDE assets/ so the committed files stay untouched.
-	tmp := "haati/packages/prefabs_example/tests/_tmp_save.scene"
-	defer os.remove(tmp)
+	tmp_dir := "haati/tests/_tmp_prefabs_chain"
+	_ = os.make_directory(tmp_dir)
+	defer _ = os.remove_all(tmp_dir)
+	tmp := "haati/tests/_tmp_prefabs_chain/_tmp_save.scene"
 
 	for path in _scene_paths() {
 		s := engine.scene_load_single_path(path)
@@ -188,13 +190,10 @@ test_prefabs_example_no_spurious_overrides :: proc(t: ^testing.T) {
 // a freshly loaded host. Mutates files, so it runs on a temp copy of the chain.
 @(test)
 test_prefabs_example_variant_edit_propagates :: proc(t: ^testing.T) {
-	dir := "haati/packages/prefabs_example/tests/_tmp_propagate"
-	os.make_directory(dir)
+	dir := "haati/tests/_tmp_prefabs_chain_propagate"
+	_ = os.make_directory(dir)
 	copied := make([dynamic]string, context.temp_allocator)
-	defer {
-		for f in copied do os.remove(f)
-		os.remove(dir)
-	}
+	defer _ = os.remove_all(dir)
 	for src in _scene_paths() {
 		for suffix in ([]string{"", ".meta"}) {
 			from := strings.concatenate({src, suffix}, context.temp_allocator)

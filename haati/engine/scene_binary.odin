@@ -18,6 +18,7 @@ import "core:encoding/json"
 import "core:encoding/uuid"
 import "core:fmt"
 import "core:hash"
+import "core:math"
 import "core:slice"
 import "core:strings"
 
@@ -25,6 +26,7 @@ SCENE_BINARY_MAGIC          :: "HTSCN001"
 SCENE_BINARY_HEADER_SIZE    :: 32
 SCENE_BINARY_FORMAT_VERSION :: u32(1)
 _SCENE_BIN_MAX_ITEMS        :: 4_000_000
+_SCENE_BIN_MAX_JSON_DEPTH   :: 64
 
 @(private = "file")
 _Bin_JSON_Tag :: enum u8 {
@@ -64,14 +66,16 @@ _bw_i64 :: proc(w: ^_Bin_Writer, v: i64) {
 @(private = "file")
 _bw_f32 :: proc(w: ^_Bin_Writer, v: f32) {
 	b: [4]u8
-	endian.put_f32(b[:], .Little, v)
+	clean := (math.is_nan(v) || math.is_inf(v) || v == 0) ? f32(0) : v
+	endian.put_f32(b[:], .Little, clean)
 	append(&w.buf, ..b[:])
 }
 
 @(private = "file")
 _bw_f64 :: proc(w: ^_Bin_Writer, v: f64) {
 	b: [8]u8
-	endian.put_f64(b[:], .Little, v)
+	clean := (math.is_nan(v) || math.is_inf(v) || v == 0) ? f64(0) : v
+	endian.put_f64(b[:], .Little, clean)
 	append(&w.buf, ..b[:])
 }
 
@@ -240,7 +244,8 @@ _br_pptr :: proc(r: ^_Bin_Reader) -> (PPtr, bool) {
 }
 
 @(private = "file")
-_br_json_value :: proc(r: ^_Bin_Reader, allocator := context.allocator) -> (json.Value, bool) {
+_br_json_value :: proc(r: ^_Bin_Reader, allocator := context.allocator, depth: int = 0) -> (json.Value, bool) {
+	if depth > _SCENE_BIN_MAX_JSON_DEPTH do return nil, false
 	tb, tok := _br_u8(r)
 	if !tok do return nil, false
 	switch _Bin_JSON_Tag(tb) {
@@ -267,7 +272,7 @@ _br_json_value :: proc(r: ^_Bin_Reader, allocator := context.allocator) -> (json
 		if !cok || cnt > _SCENE_BIN_MAX_ITEMS || int(cnt) > _br_rem(r) do return nil, false
 		arr := make(json.Array, 0, int(cnt), allocator)
 		for _ in 0 ..< cnt {
-			elem, eok := _br_json_value(r, allocator)
+			elem, eok := _br_json_value(r, allocator, depth + 1)
 			if !eok {
 				for it in arr {
 					json.destroy_value(it, allocator)
@@ -292,7 +297,7 @@ _br_json_value :: proc(r: ^_Bin_Reader, allocator := context.allocator) -> (json
 				delete(obj)
 				return nil, false
 			}
-			val, vok := _br_json_value(r, allocator)
+			val, vok := _br_json_value(r, allocator, depth + 1)
 			if !vok {
 				delete(k, allocator)
 				for ok_k, ok_v in obj {
@@ -302,7 +307,13 @@ _br_json_value :: proc(r: ^_Bin_Reader, allocator := context.allocator) -> (json
 				delete(obj)
 				return nil, false
 			}
-			obj[k] = val
+			if prev_val, dup := obj[k]; dup {
+				json.destroy_value(prev_val, allocator)
+				obj[k] = val
+				delete(k, allocator)
+			} else {
+				obj[k] = val
+			}
 		}
 		return obj, true
 	}
@@ -422,6 +433,40 @@ _build_scene_summary_text :: proc(sf: ^SceneFile, allocator := context.temp_allo
 	add_dep := #force_inline proc(set: ^map[Asset_GUID]bool, g: Asset_GUID) {
 		if !asset_guid_is_empty(g) do set^[g] = true
 	}
+	collect_json_guids :: proc(set: ^map[Asset_GUID]bool, v: json.Value, skip_type_key := false) {
+		if v == nil do return
+		switch val in v {
+		case json.Null, json.Boolean, json.Integer, json.Float:
+		case json.String:
+			s := string(val)
+			if len(s) == 36 {
+				if id, err := uuid.read(s); err == nil {
+					g := Asset_GUID(id)
+					if !asset_guid_is_empty(g) do set^[g] = true
+				}
+			}
+		case json.Array:
+			for it in val {
+				collect_json_guids(set, it, false)
+			}
+		case json.Object:
+			for k, it in val {
+				if skip_type_key && k == EXT_TYPE_KEY do continue
+				collect_json_guids(set, it, false)
+			}
+		}
+	}
+	collect_raw_uuid_tokens :: proc(set: ^map[Asset_GUID]bool, text: string) {
+		for i := 0; i + 36 <= len(text); i += 1 {
+			if text[i + 8] == '-' && text[i + 13] == '-' && text[i + 18] == '-' && text[i + 23] == '-' {
+				if id, err := uuid.read(text[i:i + 36]); err == nil {
+					g := Asset_GUID(id)
+					if !asset_guid_is_empty(g) do set^[g] = true
+					i += 35
+				}
+			}
+		}
+	}
 	for &tr in sf.transforms {
 		add_dep(&deps_set, tr.parent.pptr.guid)
 		for ch in tr.children {
@@ -433,11 +478,23 @@ _build_scene_summary_text :: proc(sf: ^SceneFile, allocator := context.temp_allo
 	}
 	for &ns in sf.nested_scenes {
 		add_dep(&deps_set, ns.source_prefab)
-		for &ov in ns.overrides do add_dep(&deps_set, ov.target.guid)
+		for &ov in ns.overrides {
+			add_dep(&deps_set, ov.target.guid)
+			collect_json_guids(&deps_set, ov.value, false)
+		}
 		for &rc in ns.removed_components do add_dep(&deps_set, rc.target.guid)
-		for &ac in ns.added_components do add_dep(&deps_set, ac.owner.guid)
+		for &ac in ns.added_components {
+			add_dep(&deps_set, ac.owner.guid)
+			collect_raw_uuid_tokens(&deps_set, ac.json)
+		}
 		for &ro in ns.removed_objects do add_dep(&deps_set, ro.target.guid)
-		for &ao in ns.added_objects do add_dep(&deps_set, ao.parent.guid)
+		for &ao in ns.added_objects {
+			add_dep(&deps_set, ao.parent.guid)
+			collect_raw_uuid_tokens(&deps_set, ao.json)
+		}
+	}
+	for cv in sf.components {
+		collect_json_guids(&deps_set, cv, true)
 	}
 	if len(deps_set) > 0 {
 		dep_strs := make([dynamic]string, 0, len(deps_set), context.temp_allocator)
@@ -632,6 +689,12 @@ scene_binary_decode :: proc(data: []byte, sf: ^SceneFile, allocator := context.a
 	sf.root = Local_ID(root_lid)
 
 	// Section 1: Transforms
+	_transform_free_owned :: proc(tr: ^Transform, alloc := context.allocator) {
+		if tr.name != "" do delete(tr.name, alloc)
+		delete(tr.children)
+		delete(tr.components)
+		tr^ = {}
+	}
 	tr_cnt, tcok := _br_u32(&r)
 	if !tcok || tr_cnt > _SCENE_BIN_MAX_ITEMS || int(tr_cnt) > _br_rem(&r) do return fail_cleanup(sf)
 	sf.transforms = make([dynamic]Transform, 0, int(tr_cnt), allocator)
@@ -639,76 +702,78 @@ scene_binary_decode :: proc(data: []byte, sf: ^SceneFile, allocator := context.a
 		tr: Transform
 		for {
 			tag, tok := _br_u8(&r)
-			if !tok do return fail_cleanup(sf)
+			if !tok { _transform_free_owned(&tr, allocator); return fail_cleanup(sf) }
 			if tag == 0 do break
 			flen, lok := _br_u32(&r)
-			if !lok || int(flen) > _br_rem(&r) do return fail_cleanup(sf)
+			if !lok || int(flen) > _br_rem(&r) { _transform_free_owned(&tr, allocator); return fail_cleanup(sf) }
 			sub := _Bin_Reader{buf = r.buf[r.pos:r.pos + int(flen)], pos = 0}
 			r.pos += int(flen)
 
 			switch tag {
 			case 1:
 				v, ok := _br_i64(&sub)
-				if !ok do return fail_cleanup(sf)
+				if !ok { _transform_free_owned(&tr, allocator); return fail_cleanup(sf) }
 				tr.local_id = Local_ID(v)
 			case 2:
 				if tr.name != "" do delete(tr.name, allocator)
 				s, ok := _br_str(&sub, allocator)
-				if !ok do return fail_cleanup(sf)
+				if !ok { tr.name = ""; _transform_free_owned(&tr, allocator); return fail_cleanup(sf) }
 				tr.name = s
 			case 3:
 				b, ok := _br_u8(&sub)
-				if !ok do return fail_cleanup(sf)
+				if !ok { _transform_free_owned(&tr, allocator); return fail_cleanup(sf) }
 				tr.is_active = b != 0
 			case 4:
 				x, ok1 := _br_f32(&sub)
 				y, ok2 := _br_f32(&sub)
 				z, ok3 := _br_f32(&sub)
-				if !ok1 || !ok2 || !ok3 do return fail_cleanup(sf)
+				if !ok1 || !ok2 || !ok3 { _transform_free_owned(&tr, allocator); return fail_cleanup(sf) }
 				tr.position = {x, y, z}
 			case 5:
 				x, ok1 := _br_f32(&sub)
 				y, ok2 := _br_f32(&sub)
 				z, ok3 := _br_f32(&sub)
 				w, ok4 := _br_f32(&sub)
-				if !ok1 || !ok2 || !ok3 || !ok4 do return fail_cleanup(sf)
+				if !ok1 || !ok2 || !ok3 || !ok4 { _transform_free_owned(&tr, allocator); return fail_cleanup(sf) }
 				tr.rotation = {x, y, z, w}
 			case 6:
 				x, ok1 := _br_f32(&sub)
 				y, ok2 := _br_f32(&sub)
 				z, ok3 := _br_f32(&sub)
-				if !ok1 || !ok2 || !ok3 do return fail_cleanup(sf)
+				if !ok1 || !ok2 || !ok3 { _transform_free_owned(&tr, allocator); return fail_cleanup(sf) }
 				tr.scale = {x, y, z}
 			case 7:
 				rl, ok := _br_u32(&sub)
-				if !ok do return fail_cleanup(sf)
+				if !ok { _transform_free_owned(&tr, allocator); return fail_cleanup(sf) }
 				tr.render_layer = rl
 			case 8:
 				p, ok := _br_pptr(&sub)
-				if !ok do return fail_cleanup(sf)
+				if !ok { _transform_free_owned(&tr, allocator); return fail_cleanup(sf) }
 				tr.parent = Ref{pptr = p}
 			case 9:
+				delete(tr.children)
+				tr.children = nil
 				cn, cok := _br_u32(&sub)
-				if !cok || cn > _SCENE_BIN_MAX_ITEMS || int(cn) * 24 > _br_rem(&sub) do return fail_cleanup(sf)
+				if !cok || cn > _SCENE_BIN_MAX_ITEMS || int(cn) * 24 > _br_rem(&sub) { _transform_free_owned(&tr, allocator); return fail_cleanup(sf) }
 				tr.children = make([dynamic]Ref, 0, int(cn), allocator)
 				for _ in 0 ..< cn {
 					p, ok := _br_pptr(&sub)
 					if !ok {
-						delete(tr.children)
-						tr.children = nil
+						_transform_free_owned(&tr, allocator)
 						return fail_cleanup(sf)
 					}
 					append(&tr.children, Ref{pptr = p})
 				}
 			case 10:
+				delete(tr.components)
+				tr.components = nil
 				cn, cok := _br_u32(&sub)
-				if !cok || cn > _SCENE_BIN_MAX_ITEMS || int(cn) * 8 > _br_rem(&sub) do return fail_cleanup(sf)
+				if !cok || cn > _SCENE_BIN_MAX_ITEMS || int(cn) * 8 > _br_rem(&sub) { _transform_free_owned(&tr, allocator); return fail_cleanup(sf) }
 				tr.components = make([dynamic]Owned, 0, int(cn), allocator)
 				for _ in 0 ..< cn {
 					cid, ok := _br_i64(&sub)
 					if !ok {
-						delete(tr.components)
-						tr.components = nil
+						_transform_free_owned(&tr, allocator)
 						return fail_cleanup(sf)
 					}
 					append(&tr.components, Owned{local_id = Local_ID(cid)})
@@ -765,6 +830,12 @@ scene_binary_decode :: proc(data: []byte, sf: ^SceneFile, allocator := context.a
 				if !ok { nested_scene_free_owned(&ns); return fail_cleanup(sf) }
 				ns.sibling_index = int(v)
 			case 7:
+				for &ov in ns.overrides {
+					delete(ov.property_path, allocator)
+					json.destroy_value(ov.value, allocator)
+				}
+				delete(ns.overrides)
+				ns.overrides = nil
 				cnt, cok := _br_u32(&sub)
 				if !cok || cnt > _SCENE_BIN_MAX_ITEMS || int(cnt) * 29 > _br_rem(&sub) {
 					nested_scene_free_owned(&ns); return fail_cleanup(sf)
@@ -784,6 +855,8 @@ scene_binary_decode :: proc(data: []byte, sf: ^SceneFile, allocator := context.a
 					append(&ns.overrides, Override{target = tgt, property_path = pp, value = val})
 				}
 			case 8:
+				delete(ns.removed_components)
+				ns.removed_components = nil
 				cnt, cok := _br_u32(&sub)
 				if !cok || cnt > _SCENE_BIN_MAX_ITEMS || int(cnt) * 24 > _br_rem(&sub) {
 					nested_scene_free_owned(&ns); return fail_cleanup(sf)
@@ -795,6 +868,12 @@ scene_binary_decode :: proc(data: []byte, sf: ^SceneFile, allocator := context.a
 					append(&ns.removed_components, Removed_Component{target = tgt})
 				}
 			case 9:
+				for &ac in ns.added_components {
+					delete(ac.type_guid, allocator)
+					delete(ac.json, allocator)
+				}
+				delete(ns.added_components)
+				ns.added_components = nil
 				cnt, cok := _br_u32(&sub)
 				if !cok || cnt > _SCENE_BIN_MAX_ITEMS || int(cnt) * 40 > _br_rem(&sub) {
 					nested_scene_free_owned(&ns); return fail_cleanup(sf)
@@ -821,6 +900,8 @@ scene_binary_decode :: proc(data: []byte, sf: ^SceneFile, allocator := context.a
 					})
 				}
 			case 10:
+				delete(ns.removed_objects)
+				ns.removed_objects = nil
 				cnt, cok := _br_u32(&sub)
 				if !cok || cnt > _SCENE_BIN_MAX_ITEMS || int(cnt) * 24 > _br_rem(&sub) {
 					nested_scene_free_owned(&ns); return fail_cleanup(sf)
@@ -832,6 +913,11 @@ scene_binary_decode :: proc(data: []byte, sf: ^SceneFile, allocator := context.a
 					append(&ns.removed_objects, Removed_Object{target = tgt})
 				}
 			case 11:
+				for &ao in ns.added_objects {
+					delete(ao.json, allocator)
+				}
+				delete(ns.added_objects)
+				ns.added_objects = nil
 				cnt, cok := _br_u32(&sub)
 				if !cok || cnt > _SCENE_BIN_MAX_ITEMS || int(cnt) * 36 > _br_rem(&sub) {
 					nested_scene_free_owned(&ns); return fail_cleanup(sf)

@@ -2,11 +2,11 @@
 
 Welcome to **Haati** (*built on the MoonHug game engine*). This quick reference covers the core workflow for building levels, writing Odin / `.bodin` gameplay logic, debugging performance, and lighting your scenes.
 
-## 1. Workspace Panels (Void Workflow)
+## 1. Workspace Panels (Editor Workflow)
 
-- **Void Hierarchy** (`Ctrl+4`): Scene entity tree, nesting, prefab instances, visibility toggles, and drag-and-drop parenting.
-- **Void File Explorer** (`Ctrl+5`): Project & plugin asset browser (`assets/` and `plugins/*/assets/`) with live search, thumbnails, and context creation (`Assets/Create/*`).
-- **Void Inspector** (`Ctrl+3`): Live property editor for transforms, components, materials, and assets.
+- **Hierarchy** (`Ctrl+4`): Scene entity tree, nesting, prefab instances, visibility toggles, and drag-and-drop parenting.
+- **File Explorer** (`Ctrl+5`): Project & plugin asset browser (`assets/` and `plugins/*/assets/`) with live search, thumbnails, and context creation (`Assets/Create/*`).
+- **Inspector** (`Ctrl+3`): Live property editor for transforms, components, materials, and assets.
 - **Scene3D & Game** (`Ctrl+1` / `Ctrl+2`): 3D authoring viewport with CAD/CSG tools and `[Lit | Unlit]` inspection toggle, plus live Play preview.
 
 ## 2. How a Game Is Constructed

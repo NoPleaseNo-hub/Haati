@@ -185,7 +185,7 @@ settings_shutdown :: proc() {
 
 @(private = "file")
 _settings_sync_after_write :: proc(tab_name: string) {
-	if tab_name == "Editor & Appearance" || tab_name == "Code & Script IDE" || tab_name == "Void File Explorer" {
+	if tab_name == "Editor & Appearance" || tab_name == "Code & Script IDE" || tab_name == "File Explorer" {
 		editor_defaults_sync_from_settings(tab_name == "Code & Script IDE")
 	} else if tab_name == "MCP" {
 		mcp_bridge_set_enabled(engine.mcp_settings.enabled)
@@ -244,12 +244,12 @@ _settings_tab_group_and_icon :: proc(tab: ^_Settings_Tab) -> (grp: _Settings_Nav
 	switch tab.name {
 	case "Editor & Appearance": return .Editor, icons.ICON_MD_PALETTE
 	case "Code & Script IDE":   return .Editor, icons.ICON_MD_CODE
-	case "Void File Explorer":  return .Editor, icons.ICON_MD_FOLDER
+	case "File Explorer":       return .Editor, icons.ICON_MD_FOLDER
 	case "Editor Visuals":      return .Editor, icons.ICON_MD_TUNE
 	case "Plugins":             return .Editor, icons.ICON_MD_EXTENSION
 	}
 	low_ori := strings.to_lower(tab.origin, context.temp_allocator)
-	if strings.contains(low_ori, "void_odin") || strings.contains(low_ori, "plugins/") {
+	if strings.contains(low_ori, "plugins/") || strings.contains(low_ori, "/projects/") {
 		return .Project, icons.ICON_MD_DEPLOYED_CODE
 	}
 	switch tab.name {

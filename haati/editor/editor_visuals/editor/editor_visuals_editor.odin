@@ -345,11 +345,11 @@ editor_visuals_window_draw :: proc() {
 	// ─────────────────────────────────────────────────────────────
 	if im.CollapsingHeader("Folder Color Markings") {
 		im.Checkbox("Enable Custom Folder Colors in Project Browser", &ev.settings.enable_folder_colors)
-		im.TextDisabled("   Folders in Void File Explorer are tinted calmly using their assigned tag color.")
+		im.TextDisabled("   Folders in File Explorer are tinted calmly using their assigned tag color.")
 
 		im.Spacing()
 		im.TextColored(p.text_secondary, "Assign Color to Folder:")
-		im.InputTextWithHint("##NewFolderKey", "Folder keyword (e.g. 'void_odin', 'assets')", cstring(&_new_folder_buf[0]), len(_new_folder_buf))
+		im.InputTextWithHint("##NewFolderKey", "Folder keyword (e.g. 'scripts', 'assets')", cstring(&_new_folder_buf[0]), len(_new_folder_buf))
 		im.SameLine()
 		im.ColorEdit4("##NewFolderCol", &_new_folder_color, {.NoInputs})
 		im.SameLine()

@@ -92,7 +92,10 @@ _folder_dialog_cb :: proc "c" (userdata: rawptr, filelist: [^]cstring, filter: c
 				_picker.path = ""
 			}
 			trimmed := strings.trim_right(raw_s, "/\\")
-			norm, _ := strings.replace_all(trimmed, "\\", "/", runtime.default_allocator())
+			norm, was_alloc := strings.replace_all(trimmed, "\\", "/", runtime.default_allocator())
+			if !was_alloc {
+				norm = strings.clone(trimmed, runtime.default_allocator())
+			}
 			_picker.path = norm
 			_picker.ready = true
 		}

@@ -129,6 +129,7 @@ _Surface_IDE_State :: struct {
 	flash_until_sec:     f64,
 	qf_line:             int,
 	qf_anchor:           im.Vec2,
+	qf_just_opened:      bool,
 	req_open_imports_popup: bool,
 	read_only_surface:      bool,
 	conflict_line:          int,
@@ -145,6 +146,9 @@ _Surface_IDE_State :: struct {
 	cached_spans:               [dynamic]Syntax_Span,
 	cached_line_span_head:      [dynamic]int,
 	cached_unused_import_lines: [dynamic]int,
+	has_pending_scroll_y:       bool,
+	pending_scroll_y:           f32,
+	last_scroll_y:              f32,
 }
 
 CODE_UNDO_MAX                 :: 64
@@ -249,6 +253,7 @@ _Scoped_Popup_State :: struct {
 
 	buf:                []byte,
 	dirty:              bool,
+	pending_close_confirm: bool,
 	focused:            bool,
 	status_note:        string,
 	status_is_err:      bool,
@@ -304,6 +309,9 @@ _Studio_State :: struct {
 	emb_full_focused:       bool,
 	last_undo_redo_frame:   i32,
 	ide:                    _Surface_IDE_State,
+	embedded_ide:           _Surface_IDE_State,
+	pending_close_tab_uid:  int,
+	pending_emb_tab_uid:    int,
 	relaunch_cb:            proc(),
 	open_ide_cb:            proc(abs_path: string, line: int) -> bool,
 	switch_to_bp_cb:        proc(script_path: string),
@@ -974,6 +982,8 @@ shutdown_studio :: proc() {
 	if _studio.last_emb_norm != "" do delete(_studio.last_emb_norm)
 	_clear_ide_pending_restore(&_studio.ide)
 	_free_ide_surface_cache(&_studio.ide)
+	_clear_ide_pending_restore(&_studio.embedded_ide)
+	_free_ide_surface_cache(&_studio.embedded_ide)
 	if _studio.outline_arena_init {
 		mem.dynamic_arena_destroy(&_studio.outline_arena)
 	}
@@ -1582,10 +1592,19 @@ open_file_in_studio :: proc(abs_or_rel_path: string, jump_line: int = 0) -> bool
 	for &t, idx in _studio.tabs {
 		if t.abs_path == norm_abs {
 			was_active := (_studio.active_tab == idx)
+			if !was_active && _studio.active_tab >= 0 && _studio.active_tab < len(_studio.tabs) {
+				prev_t := &_studio.tabs[_studio.active_tab]
+				prev_t.cursor_pos = _studio.ide.cursor_pos
+				prev_t.scroll_y   = _studio.ide.last_scroll_y
+			}
 			_studio.active_tab = idx
 			_studio.request_tab_select = idx
 			if jump_line > 0 {
 				_jump_to_tab_line(&t, jump_line)
+			} else if !was_active {
+				_studio.ide.cmd_jump_offset      = _clamp_utf8_boundary(_c_buf_string(t.buf), t.cursor_pos)
+				_studio.ide.pending_scroll_y     = t.scroll_y
+				_studio.ide.has_pending_scroll_y = true
 			}
 			if !was_active {
 				if im.GetCurrentContext() != nil do im.ClearActiveID()
@@ -1633,6 +1652,11 @@ open_file_in_studio :: proc(abs_or_rel_path: string, jump_line: int = 0) -> bool
 		scroll_line    = jump_line,
 	}
 	code_undo_reset(&new_tab.undo, s, 0)
+	if _studio.active_tab >= 0 && _studio.active_tab < len(_studio.tabs) {
+		prev_t := &_studio.tabs[_studio.active_tab]
+		prev_t.cursor_pos = _studio.ide.cursor_pos
+		prev_t.scroll_y   = _studio.ide.last_scroll_y
+	}
 	append(&_studio.tabs, new_tab)
 	_studio.active_tab = len(_studio.tabs) - 1
 	_studio.request_tab_select = _studio.active_tab
@@ -1642,6 +1666,9 @@ open_file_in_studio :: proc(abs_or_rel_path: string, jump_line: int = 0) -> bool
 	_studio.ide = {ac_dismissed_pos = -1, cmd_jump_offset = -1}
 	if jump_line > 0 {
 		_jump_to_tab_line(&_studio.tabs[_studio.active_tab], jump_line)
+	} else {
+		_studio.ide.has_pending_scroll_y = true
+		_studio.ide.pending_scroll_y     = 0.0
 	}
 	_notify_buffer_edited(s, false, pkg_dir, false, _studio.tabs[_studio.active_tab].abs_path)
 	return true
@@ -1730,42 +1757,7 @@ odin_ident_unsafe_warning :: proc(ident: string) -> cstring {
 
 @(private = "file")
 _find_matching_bracket :: proc(src: string, pos: int) -> (p1, p2: int, ok: bool) {
-	n := len(src)
-	if n == 0 do return 0, 0, false
-
-	check_at :: proc(s: string, idx: int) -> (open_c, close_c: byte, dir: int, valid: bool) {
-		if idx < 0 || idx >= len(s) do return 0, 0, 0, false
-		switch s[idx] {
-		case '{': return '{', '}', +1, true
-		case '(': return '(', ')', +1, true
-		case '[': return '[', ']', +1, true
-		case '}': return '{', '}', -1, true
-		case ')': return '(', ')', -1, true
-		case ']': return '[', ']', -1, true
-		}
-		return 0, 0, 0, false
-	}
-
-	idx := clamp(pos, 0, n - 1)
-	oc, cc, dir, valid := check_at(src, idx)
-	if !valid && pos > 0 {
-		idx = clamp(pos - 1, 0, n - 1)
-		oc, cc, dir, valid = check_at(src, idx)
-	}
-	if !valid do return 0, 0, false
-
-	depth := 0
-	i := idx
-	for i >= 0 && i < n {
-		ch := src[i]
-		if ch == oc do depth += dir
-		else if ch == cc do depth -= dir
-		if depth == 0 {
-			return idx, i, true
-		}
-		i += dir
-	}
-	return 0, 0, false
+	return find_matching_bracket_tokenized(src, pos)
 }
 
 @(private = "file")
@@ -2750,7 +2742,7 @@ _draw_syntax_code_surface :: proc(
 	// so line heights, gutter numbers, caret, selection, and colored syntax tokens match 1:1!
 	// Popped right after `im.EndChild()` so popups/tooltips stay cleanly readable even at 240% code zoom.
 	scaled_font_px := im.GetStyle().FontSizeBase * _studio_zoom_val()
-	im.PushFontFloat(nil, scaled_font_px)
+	im.PushFontFloat(widgets.mono_font, scaled_font_px)
 
 	im.PushStyleColorImVec4(.ChildBg, st.code_child_bg)
 	im.PushStyleVarImVec2(.WindowPadding, {0, 0})
@@ -2861,7 +2853,9 @@ _draw_syntax_code_surface :: proc(
 	line_starts := ide.cached_line_starts[:]
 	num_lines   := max(len(line_starts), 1)
 	line_h      := im.GetTextLineHeight()
-	gutter_w    := max(im.CalcTextSize("9999").x + 22.0, 46.0)
+	lb_slot_w   := max(line_h * 1.55, 24.0)
+	num_slot_w  := max(im.CalcTextSize("99999").x, line_h * 2.5)
+	gutter_w    := lb_slot_w + num_slot_w + 10.0
 	pad_x       := f32(8.0)
 	pad_y       := f32(6.0)
 
@@ -2882,7 +2876,6 @@ _draw_syntax_code_surface :: proc(
 	win_pos := im.GetWindowPos()
 	win_h   := im.GetWindowHeight()
 	win_w   := im.GetWindowWidth()
-	vis_right_x := win_pos.x + max(win_w - 16.0, gutter_w + 80.0)
 
 	if ide.cmd_jump_line > 0 && len(line_starts) > 0 {
 		clamped_jmp := clamp(ide.cmd_jump_line, 1, len(line_starts))
@@ -2900,6 +2893,10 @@ _draw_syntax_code_surface :: proc(
 		center_y := max(f32(scroll_to_line^ - 1) * line_h + pad_y - max(win_h * 0.35, 48.0), 0.0)
 		im.SetScrollY(center_y)
 		scroll_to_line^ = 0
+		ide.has_pending_scroll_y = false
+	} else if ide.has_pending_scroll_y {
+		im.SetScrollY(max(ide.pending_scroll_y, 0.0))
+		ide.has_pending_scroll_y = false
 	}
 
 	flash_alpha := f32(0.0)
@@ -2913,11 +2910,18 @@ _draw_syntax_code_surface :: proc(
 		}
 	}
 
-	diag_by_line := make(map[int]Studio_Diagnostic, context.temp_allocator)
+	diags_on_line := make(map[int][dynamic]Studio_Diagnostic, context.temp_allocator)
+	diag_by_line  := make(map[int]Studio_Diagnostic, context.temp_allocator)
 	for d in diags {
 		if !diagnostic_matches_active_file(d.file, active_file) do continue
+		arr, has_arr := diags_on_line[d.line]
+		if !has_arr {
+			arr = make([dynamic]Studio_Diagnostic, 0, 2, context.temp_allocator)
+		}
+		append(&arr, d)
+		diags_on_line[d.line] = arr
 		prev_d, existed := diag_by_line[d.line]
-		if !existed || (prev_d.is_warning && !d.is_warning) {
+		if !existed || (prev_d.is_warning && !d.is_warning) || (prev_d.is_stale && !d.is_stale) {
 			diag_by_line[d.line] = d
 		}
 	}
@@ -2928,7 +2932,8 @@ _draw_syntax_code_surface :: proc(
 	total_h := max(f32(num_lines + 5) * line_h + pad_y * 2.0, avail.y)
 
 	char_adv_est := max(im.CalcTextSize("M").x, 7.0)
-	max_line_px  := max(avail.x - gutter_w, f32(ide.cache_max_cols) * char_adv_est + 64.0)
+	extra_lens_w := (_studio.show_error_lens && len(diags) > 0) ? f32(280.0) : f32(64.0)
+	max_line_px  := max(avail.x - gutter_w, f32(ide.cache_max_cols) * char_adv_est + extra_lens_w)
 	first_ln_i   := clamp(int(math.floor((win_pos.y - origin.y - pad_y) / max(line_h, 1.0))) - 2, 0, num_lines - 1)
 	last_ln_i    := clamp(int(math.ceil((win_pos.y + win_h - origin.y - pad_y) / max(line_h, 1.0))) + 2, first_ln_i, num_lines - 1)
 
@@ -2948,25 +2953,40 @@ _draw_syntax_code_surface :: proc(
 		if ln == ide.flash_line && flash_alpha > 0.001 {
 			im.DrawList_AddRectFilled(dl, {origin.x + gutter_w + 1, ly}, {origin.x + gutter_w + max_line_px, ly + line_h}, im.GetColorU32ImVec4(thm.with_alpha(p.accent, flash_alpha)))
 		}
-		if d, has_d := diag_by_line[ln]; has_d {
+		d, has_d := diag_by_line[ln]
+		is_unused_imp_gutter := !is_scoped_body && _is_unused_import_line(ide, ln)
+		if has_d {
 			row_tint := d.is_warning ? st.diag_warn_row : st.diag_err_row
+			if d.is_stale do row_tint = thm.with_alpha(row_tint, row_tint.w * 0.45)
 			im.DrawList_AddRectFilled(dl, {origin.x + gutter_w + 1, ly}, {origin.x + gutter_w + max_line_px, ly + line_h}, im.GetColorU32ImVec4(row_tint))
-			dot_col := d.is_warning ? st.diag_warn_fg : st.diag_err_fg
-			im.DrawList_AddCircleFilled(dl, {origin.x + 8.0, ly + line_h * 0.5}, 3.5, im.GetColorU32ImVec4(dot_col))
+		}
+		if has_d || is_unused_imp_gutter {
+			lb_base := has_d ? (d.is_warning ? st.diag_warn_fg : st.diag_err_fg) : p.text_muted
+			lb_col  := thm.with_alpha(lb_base, (has_d && d.is_stale) ? 0.50 : 0.96)
+			im.DrawList_AddText(dl, {origin.x + 4.0, ly}, im.GetColorU32ImVec4(lb_col), icons.ICON_MD_LIGHTBULB)
+			drop_x := origin.x + 4.0 + max(line_h * 0.85, 11.0)
+			im.DrawList_AddText(dl, {drop_x, ly}, im.GetColorU32ImVec4(thm.with_alpha(lb_col, 0.85)), icons.ICON_MD_ARROW_DROP_DOWN)
 
 			im.SetCursorScreenPos({origin.x, ly})
 			if im.InvisibleButton(fmt.ctprintf("##ln_err_%d", ln), {gutter_w, line_h}) {
 				qf_clicked_line   = ln
-				qf_clicked_anchor = {origin.x + gutter_w + 4.0, ly + line_h + 2.0}
+				qf_clicked_anchor = {origin.x + lb_slot_w + 4.0, ly + line_h + 2.0}
 			}
 			if im.IsItemHovered() {
 				gutter_tooltip_shown = true
+				im.SetMouseCursor(.Hand)
 			}
-			widgets.tooltip(fmt.ctprintf("Line %d:%d — %s\n(Click gutter marker for Quick Fixes)", d.line, d.column, d.message))
+			if has_d {
+				widgets.tooltip(fmt.ctprintf("Line %d:%d — %s\n(Click lightbulb or press Alt+Enter for Quick Fixes)", d.line, d.column, d.message))
+			} else {
+				widgets.tooltip(fmt.ctprintf("Line %d — Unused import\n(Click lightbulb or press Alt+Enter for Quick Fixes)", ln))
+			}
 		}
 		num_col := ln == caret_ln ? p.accent : p.text_muted
-		num_txt := fmt.ctprintf("%3d", ln)
-		im.DrawList_AddText(dl, {origin.x + 14.0, ly}, im.GetColorU32ImVec4(num_col), num_txt)
+		num_txt := fmt.ctprintf("%5d", ln)
+		num_sz  := im.CalcTextSize(num_txt)
+		num_x   := origin.x + lb_slot_w + 4.0 + max(num_slot_w - num_sz.x, 0.0)
+		im.DrawList_AddText(dl, {num_x, ly}, im.GetColorU32ImVec4(num_col), num_txt)
 	}
 
 	// 2. Matching Bracket Highlight (`{}` / `()` / `[]`)
@@ -3001,7 +3021,7 @@ _draw_syntax_code_surface :: proc(
 	im.PushStyleColorImVec4(.InputTextCursor, p.accent)
 	im.PushStyleColorImVec4(.TextSelectedBg, thm.with_alpha(p.accent, 0.28))
 
-	in_flags: im.InputTextFlags = {.NoUndoRedo, .CallbackResize, .CallbackAlways, .CallbackCompletion, .CallbackCharFilter}
+	in_flags: im.InputTextFlags = {.NoUndoRedo, .NoHorizontalScroll, .CallbackResize, .CallbackAlways, .CallbackCompletion, .CallbackCharFilter}
 	if read_only {
 		in_flags += {.ReadOnly}
 	}
@@ -3016,7 +3036,7 @@ _draw_syntax_code_surface :: proc(
 		"##odin_code_input",
 		cstring(raw_data(buf^)),
 		uint(len(buf^)),
-		{max_line_px, total_h},
+		{max_line_px + 96.0, total_h},
 		in_flags,
 		_code_input_callback,
 		ide,
@@ -3135,101 +3155,56 @@ _draw_syntax_code_surface :: proc(
 			}
 		}
 
-		d, has_d := diag_by_line[ln]
-		if has_d {
-			c0 := _clamp_utf8_boundary(line_str, clamp(d.column - 1, 0, len(line_str)))
-			c1 := _clamp_utf8_boundary(line_str, clamp(max(d.end_column - 1, c0 + 4), 0, len(line_str)))
-			x0 := c0 > 0 ? im.CalcTextSize(fmt.ctprintf("%s", line_str[:c0])).x : 0.0
-			x1 := c1 > c0 ? im.CalcTextSize(fmt.ctprintf("%s", line_str[:c1])).x : (x0 + 28.0)
-			u_col := d.is_warning ? thm.with_alpha(st.diag_warn_fg, 0.95) : thm.with_alpha(st.diag_err_fg, 0.95)
-			im.DrawList_AddLine(dl, {base_x + x0, ly + line_h - 1.0}, {base_x + max(x1, x0 + 18.0), ly + line_h - 1.0}, im.GetColorU32ImVec4(u_col), 2.0)
+		line_diags, has_line_diags := diags_on_line[ln]
+		if has_line_diags {
+			zoom := _studio_zoom_val()
+			for ld in line_diags {
+				c0 := _clamp_utf8_boundary(line_str, clamp(ld.column - 1, 0, len(line_str)))
+				end_c := ld.end_column > ld.column ? ld.end_column - 1 : c0 + 1
+				c1 := _clamp_utf8_boundary(line_str, clamp(end_c, c0, len(line_str)))
+				x0 := c0 > 0 ? im.CalcTextSize(fmt.ctprintf("%s", line_str[:c0])).x : 0.0
+				x1 := c1 > c0 ? im.CalcTextSize(fmt.ctprintf("%s", line_str[:c1])).x : (x0 + max(char_adv_est, 8.0))
+				base_fg := ld.is_warning ? st.diag_warn_fg : st.diag_err_fg
+				u_col := thm.with_alpha(base_fg, ld.is_stale ? 0.42 : 0.96)
+				_draw_wavy_squiggle(dl, base_x + x0, base_x + max(x1, x0 + max(char_adv_est * 0.8, 6.0)), ly + line_h - 1.5, im.GetColorU32ImVec4(u_col), zoom)
+			}
 		}
 
 		// Rider call-site conflict highlight (`ide.conflict_line / conflict_col_start..end`)
 		if ide.conflict_line == ln && len(line_str) > 0 {
 			c0 := _clamp_utf8_boundary(line_str, clamp(ide.conflict_col_start - 1, 0, len(line_str)))
-			c1 := _clamp_utf8_boundary(line_str, clamp(max(ide.conflict_col_end - 1, c0 + 4), 0, len(line_str)))
+			end_c := ide.conflict_col_end > ide.conflict_col_start ? ide.conflict_col_end - 1 : c0 + 1
+			c1 := _clamp_utf8_boundary(line_str, clamp(end_c, c0, len(line_str)))
 			x0 := c0 > 0 ? im.CalcTextSize(fmt.ctprintf("%s", line_str[:c0])).x : 0.0
-			x1 := c1 > c0 ? im.CalcTextSize(fmt.ctprintf("%s", line_str[:c1])).x : (x0 + 36.0)
+			x1 := c1 > c0 ? im.CalcTextSize(fmt.ctprintf("%s", line_str[:c1])).x : (x0 + max(char_adv_est, 12.0))
 			red_col := thm.with_alpha(st.diag_err_fg, 0.98)
-			im.DrawList_AddRectFilled(dl, {base_x + x0, ly}, {base_x + max(x1, x0 + 24.0), ly + line_h}, im.GetColorU32ImVec4(thm.with_alpha(st.diag_err_fg, 0.14)), 2.0)
-			im.DrawList_AddLine(dl, {base_x + x0, ly + line_h - 1.0}, {base_x + max(x1, x0 + 24.0), ly + line_h - 1.0}, im.GetColorU32ImVec4(red_col), 2.5)
+			im.DrawList_AddRectFilled(dl, {base_x + x0, ly}, {base_x + max(x1, x0 + 12.0), ly + line_h}, im.GetColorU32ImVec4(thm.with_alpha(st.diag_err_fg, 0.14)), 2.0)
+			_draw_wavy_squiggle(dl, base_x + x0, base_x + max(x1, x0 + 12.0), ly + line_h - 1.5, im.GetColorU32ImVec4(red_col), _studio_zoom_val())
 		}
 
-		if has_d || (is_unused_imp && len(line_str) > 0) {
-			d_msg := has_d ? d.message : "Unused import"
-			fixes := build_line_quick_fixes(src_now, ln, d_msg, is_unused_imp, context.temp_allocator)
+		d, has_d := diag_by_line[ln]
+		if _studio.show_error_lens && (has_d || (is_unused_imp && len(line_str) > 0)) {
+			d_msg := has_d ? d.message : "Unused import (press Alt+Enter to remove)"
 			line_end_x := len(line_str) > 0 ? im.CalcTextSize(fmt.ctprintf("%s", line_str)).x : 0.0
-			pill_col := !has_d ? p.text_muted : (d.is_warning ? st.diag_warn_fg : st.diag_err_fg)
-			tag_lbl  := !has_d ? "// [Unused]" : (d.is_warning ? "// [Warn]" : "// [Error]")
+			base_col := !has_d ? p.text_muted : (d.is_warning ? st.diag_warn_fg : st.diag_err_fg)
+			ghost_col := thm.with_alpha(base_col, (has_d && d.is_stale) ? 0.42 : 0.80)
+			icon_glyph := !has_d ? icons.ICON_MD_LIGHTBULB : (d.is_warning ? icons.ICON_MD_WARNING : icons.ICON_MD_ERROR)
 
-			chip_lbl := fmt.ctprintf("%s Fix", icons.ICON_MD_BOLT)
-			chip_pad := f32(6.0)
-			chip_w   := len(fixes) > 0 ? (im.CalcTextSize(chip_lbl).x + chip_pad * 2.0) : f32(0.0)
-			gap_w    := len(fixes) > 0 ? f32(6.0) : f32(0.0)
-			max_badge_span := max(vis_right_x - (code_x + pad_x + 28.0) - chip_w - gap_w, 96.0)
+			lens_pref := widgets.utf8_safe_prefix(d_msg, 88)
+			lens_msg  := len(lens_pref) < len(d_msg) ? fmt.tprintf("%s...", lens_pref) : d_msg
+			ghost_txt := fmt.ctprintf("// %s %s", icon_glyph, lens_msg)
+			ghost_x   := base_x + line_end_x + 16.0 * _studio_zoom_val()
+			im.DrawList_AddText(dl, {ghost_x, ly}, im.GetColorU32ImVec4(ghost_col), ghost_txt)
 
-			pill_txt: cstring
-			if _studio.show_error_lens && d_msg != "" {
-				lens_pref := widgets.utf8_safe_prefix(d_msg, 64)
-				lens_msg  := len(lens_pref) < len(d_msg) ? fmt.tprintf("%s...", lens_pref) : d_msg
-				cand_txt  := fmt.ctprintf("%s %s", tag_lbl, lens_msg)
-				if im.CalcTextSize(cand_txt).x + 12.0 > max_badge_span {
-					short_pref := widgets.utf8_safe_prefix(d_msg, 24)
-					short_msg  := len(short_pref) < len(d_msg) ? fmt.tprintf("%s...", short_pref) : d_msg
-					cand_txt = fmt.ctprintf("%s %s", tag_lbl, short_msg)
-					if im.CalcTextSize(cand_txt).x + 12.0 > max_badge_span {
-						cand_txt = fmt.ctprintf("%s", tag_lbl)
-					}
-				}
-				pill_txt = cand_txt
-			} else {
-				pill_txt = fmt.ctprintf("%s", tag_lbl)
-			}
-
-			pad_px   := f32(6.0)
-			txt_sz   := im.CalcTextSize(pill_txt)
-			pill_w   := txt_sz.x + pad_px * 2.0
-			total_w  := pill_w + gap_w + chip_w
-			ideal_x  := base_x + line_end_x + 14.0 * _studio_zoom_val()
-			clamp_x  := max(vis_right_x - total_w - 8.0, code_x + pad_x + 24.0)
-			pill_x   := min(ideal_x, clamp_x)
-
-			pill_min := im.Vec2{pill_x, ly + 1.0}
-			pill_max := im.Vec2{pill_x + pill_w, ly + line_h - 1.0}
-			pill_bg  := thm.with_alpha(thm.lerp_col(st.code_child_bg, pill_col, p.is_light ? 0.18 : 0.24), 0.96)
-			im.DrawList_AddRectFilled(dl, pill_min, pill_max, im.GetColorU32ImVec4(pill_bg), 4.0)
-			im.DrawList_AddRect(dl, pill_min, pill_max, im.GetColorU32ImVec4(thm.with_alpha(pill_col, 0.70)), 4.0)
-			im.DrawList_AddText(dl, {pill_x + pad_px, ly + 1.0}, im.GetColorU32ImVec4(pill_col), pill_txt)
-
-			pill_hov := allow_chip_hover && mpos_chip.x >= pill_min.x && mpos_chip.x <= pill_max.x && mpos_chip.y >= pill_min.y && mpos_chip.y <= pill_max.y
-			if pill_hov {
+			ghost_sz  := im.CalcTextSize(ghost_txt)
+			ghost_hov := allow_chip_hover && mpos_chip.x >= ghost_x && mpos_chip.x <= ghost_x + ghost_sz.x && mpos_chip.y >= ly && mpos_chip.y <= ly + line_h
+			if ghost_hov {
 				gutter_tooltip_shown = true
 				im.SetMouseCursor(.Hand)
-				widgets.tooltip(fmt.ctprintf("Line %d:%d — %s\n(Click for Quick Fixes / `Alt+Enter`)", ln, has_d ? max(d.column, 1) : 1, d_msg))
-				if im.IsMouseClicked(.Left) && len(fixes) > 0 {
+				widgets.tooltip(fmt.ctprintf("Line %d:%d — %s\n(Click or press Alt+Enter for Quick Fixes)", ln, has_d ? max(d.column, 1) : 1, d_msg))
+				if im.IsMouseClicked(.Left) {
 					qf_clicked_line   = ln
-					qf_clicked_anchor = {pill_min.x, pill_max.y + 3.0}
-				}
-			}
-
-			if len(fixes) > 0 {
-				chip_x   := pill_max.x + gap_w
-				chip_min := im.Vec2{chip_x, ly + 1.0}
-				chip_max := im.Vec2{chip_x + chip_w, ly + line_h - 1.0}
-				chip_hov := allow_chip_hover && mpos_chip.x >= chip_min.x && mpos_chip.x <= chip_max.x && mpos_chip.y >= chip_min.y && mpos_chip.y <= chip_max.y
-				chip_bg  := thm.with_alpha(thm.lerp_col(st.code_child_bg, p.accent, chip_hov ? 0.36 : 0.22), 0.96)
-				im.DrawList_AddRectFilled(dl, chip_min, chip_max, im.GetColorU32ImVec4(chip_bg), 4.0)
-				im.DrawList_AddRect(dl, chip_min, chip_max, im.GetColorU32ImVec4(thm.with_alpha(p.accent, 0.78)), 4.0)
-				im.DrawList_AddText(dl, {chip_min.x + chip_pad, ly + 1.0}, im.GetColorU32ImVec4(p.accent), chip_lbl)
-				if chip_hov {
-					gutter_tooltip_shown = true
-					im.SetMouseCursor(.Hand)
-					widgets.tooltip("Quick Fix (`Alt+Enter`) — click for suggested actions")
-					if im.IsMouseClicked(.Left) {
-						qf_clicked_line   = ln
-						qf_clicked_anchor = {chip_min.x, chip_max.y + 3.0}
-					}
+					qf_clicked_anchor = {ghost_x, ly + line_h + 2.0}
 				}
 			}
 		}
@@ -3423,12 +3398,14 @@ _draw_syntax_code_surface :: proc(
 		im.EndPopup()
 	}
 
+	ide.last_scroll_y = im.GetScrollY()
 	im.EndChild()
 	im.PopFont()
 
 	if qf_clicked_line > 0 {
-		ide.qf_line   = qf_clicked_line
-		ide.qf_anchor = qf_clicked_anchor
+		ide.qf_line        = qf_clicked_line
+		ide.qf_anchor      = qf_clicked_anchor
+		ide.qf_just_opened = true
 		im.OpenPopup("##ide_quickfix_popup")
 	}
 	if ide.qf_line > 0 {
@@ -3436,40 +3413,66 @@ _draw_syntax_code_surface :: proc(
 		im.PushFontFloat(nil, im.GetStyle().FontSizeBase * qf_scale)
 		im.SetNextWindowPos(ide.qf_anchor, .Appearing)
 		if im.BeginPopup("##ide_quickfix_popup") {
-			widgets.popup_header(icons.ICON_MD_BOLT, fmt.tprintf("Quick Fixes — Line %d", ide.qf_line))
+			just_opened := ide.qf_just_opened
+			ide.qf_just_opened = false
+			widgets.popup_header(icons.ICON_MD_LIGHTBULB, fmt.tprintf("Quick Fixes — Line %d", ide.qf_line))
 			d_qf, has_dqf := diag_by_line[ide.qf_line]
 			un_qf := !is_scoped_body && _is_unused_import_line(ide, ide.qf_line)
 			d_msg := has_dqf ? d_qf.message : (un_qf ? "Unused import" : "")
 			qf_list := build_line_quick_fixes(src_now, ide.qf_line, d_msg, un_qf, context.temp_allocator)
-			if len(qf_list) == 0 {
+			valid_qfs := make([dynamic]Quick_Fix_Action, 0, len(qf_list), context.temp_allocator)
+			for qf in qf_list {
+				if (qf.kind == .Inject_Import || qf.kind == .Open_Imports_Popup) && is_scoped_body {
+					continue
+				}
+				append(&valid_qfs, qf)
+			}
+			chosen_qf: Quick_Fix_Action
+			has_chosen := false
+			if len(valid_qfs) == 0 {
 				im.TextDisabled("No automatic Quick-Fix available for this diagnostic.")
 			} else {
-				for qf in qf_list {
-					if (qf.kind == .Inject_Import || qf.kind == .Open_Imports_Popup) && is_scoped_body {
-						continue
+				for qf, q_idx in valid_qfs {
+					if q_idx == 0 && just_opened {
+						im.SetKeyboardFocusHere()
 					}
-					if im.MenuItem(fmt.ctprintf("%s  %s", icons.ICON_MD_BOLT, qf.label)) {
-						updated, c_jump_raw, req_imp, aok := _apply_quick_fix(src_now, qf)
-						if req_imp {
-							ide.req_open_imports_popup = true
-						} else if aok {
-							c_jump := qf.kind == .Inject_Import \
-								? _clamp_utf8_boundary(updated, ide.cursor_pos + (len(updated) - len(src_now))) \
-								: _clamp_utf8_boundary(updated, c_jump_raw)
-							_copy_to_c_buf_grow(buf, updated, is_scoped_body ? SCOPED_MIN_BUF_CAP : STUDIO_MIN_BUF_CAP)
-							_arm_ide_restore(ide, updated, c_jump)
-							if undo != nil {
-								code_undo_record_edit(undo, updated, c_jump, im.GetTime(), true)
-							}
-							if dirty != nil do dirty^ = true
-							_notify_buffer_edited(updated, is_scoped_body, pkg_dir)
-							edited = true
+					if im.MenuItem(fmt.ctprintf("%s  %s", icons.ICON_MD_LIGHTBULB, qf.label)) {
+						chosen_qf  = qf
+						has_chosen = true
+					}
+					if q_idx == 0 {
+						im.SetItemDefaultFocus()
+					}
+				}
+				if !has_chosen && !just_opened && im.IsWindowFocused({.RootWindow, .ChildWindows}) && (im.IsKeyPressed(.Enter, false) || im.IsKeyPressed(.KeypadEnter, false)) {
+					chosen_qf  = valid_qfs[0]
+					has_chosen = true
+				}
+				if has_chosen {
+					updated, c_jump_raw, req_imp, aok := _apply_quick_fix(src_now, chosen_qf)
+					if req_imp {
+						ide.req_open_imports_popup = true
+					} else if aok {
+						c_jump := chosen_qf.kind == .Inject_Import \
+							? _clamp_utf8_boundary(updated, ide.cursor_pos + (len(updated) - len(src_now))) \
+							: _clamp_utf8_boundary(updated, c_jump_raw)
+						_copy_to_c_buf_grow(buf, updated, is_scoped_body ? SCOPED_MIN_BUF_CAP : STUDIO_MIN_BUF_CAP)
+						_arm_ide_restore(ide, updated, c_jump)
+						if undo != nil {
+							code_undo_record_edit(undo, updated, c_jump, im.GetTime(), true)
 						}
-						ide.ac_refocus_input = true
+						if dirty != nil do dirty^ = true
+						_notify_buffer_edited(updated, is_scoped_body, pkg_dir)
+						edited = true
 					}
+					ide.ac_refocus_input = true
+					ide.qf_line          = 0
+					im.CloseCurrentPopup()
 				}
 			}
 			im.EndPopup()
+		} else if qf_clicked_line == 0 {
+			ide.qf_line = 0
 		}
 		im.PopFont()
 	}
@@ -3523,6 +3526,24 @@ _draw_syntax_code_surface :: proc(
 	}
 
 	return edited
+}
+
+@(private = "file")
+_draw_wavy_squiggle :: proc(dl: ^im.DrawList, x0, x1, baseline_y: f32, col: u32, zoom: f32 = 1.0) {
+	step    := max(f32(3.0) * zoom, 2.5)
+	amp     := max(f32(1.8) * zoom, 1.4)
+	span_x1 := max(x1, x0 + step * 2.0)
+	x       := x0
+	dir     := f32(1.0)
+	im.DrawList_PathLineTo(dl, {x, baseline_y})
+	for x < span_x1 {
+		next_x := min(x + step, span_x1)
+		frac   := (next_x - x) / step
+		im.DrawList_PathLineTo(dl, {next_x, baseline_y + dir * amp * frac})
+		x   = next_x
+		dir = -dir
+	}
+	im.DrawList_PathStroke(dl, col, max(f32(1.25) * zoom, 1.1))
 }
 
 @(private = "file")
@@ -4558,7 +4579,7 @@ draw_scoped_node_popup :: proc() {
 			if im.Button(fmt.ctprintf("%s Snippets v", icons.ICON_MD_CODE)) {
 				im.OpenPopup("##scoped_snippets_pop")
 			}
-			widgets.tooltip("Insert common Haati Odin hot-script snippets at the buffer end")
+			widgets.tooltip("Insert common Haati Odin hot-script snippets at cursor")
 			if im.BeginPopup("##scoped_snippets_pop") {
 				snippets := [5]struct{ lbl, code: string }{
 					{"pos_ref^ (Mutate Entity Position)", "if p := hot.pos_ref(api, self); p != nil { p.y += dt }\n"},
@@ -4570,11 +4591,13 @@ draw_scoped_node_popup :: proc() {
 				for sn, si in snippets {
 					if im.MenuItem(fmt.ctprintf("%s##snip_m_%d", sn.lbl, si)) {
 						cur := _c_buf_string(_scoped.buf)
-						sep := len(cur) > 0 && !strings.has_suffix(cur, "\n") ? "\n" : ""
-						_copy_to_c_buf_grow(&_scoped.buf, strings.concatenate({cur, sep, sn.code}, context.temp_allocator), SCOPED_MIN_BUF_CAP)
+						ins := _clamp_utf8_boundary(cur, _scoped.ide.cursor_pos)
+						s_after := strings.concatenate({cur[:ins], sn.code, cur[ins:]}, context.temp_allocator)
+						_copy_to_c_buf_grow(&_scoped.buf, s_after, SCOPED_MIN_BUF_CAP)
+						new_c := _clamp_utf8_boundary(s_after, ins + len(sn.code))
+						_arm_ide_restore(&_scoped.ide, s_after, new_c)
 						_scoped.dirty = true
-						s_after := _c_buf_string(_scoped.buf)
-						code_undo_record_edit(&_scoped.undo, s_after, len(s_after), im.GetTime(), true)
+						code_undo_record_edit(&_scoped.undo, s_after, new_c, im.GetTime(), true)
 						_notify_scoped_popup_edited(false)
 					}
 				}
@@ -4649,12 +4672,32 @@ draw_scoped_node_popup :: proc() {
 		}
 
 		// Main Editable / Read-Only Declaration Surface + Optional Rider Call-Site Review Split
-		err_panel_h: f32 = len(snap.diagnostics) > 0 ? 104.0 : 28.0
+		surf_diags := snap.diagnostics
+		if _scoped.is_full_decl && !_scoped.is_graph_node && _scoped.orig_decl_s_line > 1 && _scoped.full_file_cache != "" && len(snap.diagnostics) > 0 {
+			body_txt := _c_buf_string(_scoped.buf)
+			scoped_lines := 1
+			for bi := 0; bi < len(body_txt); bi += 1 {
+				if body_txt[bi] == '\n' do scoped_lines += 1
+			}
+			lo_line := _scoped.orig_decl_s_line
+			hi_line := lo_line + scoped_lines + 1
+			mapped := make([dynamic]Studio_Diagnostic, 0, len(snap.diagnostics), context.temp_allocator)
+			for d in snap.diagnostics {
+				if !diagnostic_matches_active_file(d.file, _scoped.backing_file_abs) do continue
+				if d.line < lo_line || d.line > hi_line do continue
+				md := d
+				md.line = max(d.line - (lo_line - 1), 1)
+				append(&mapped, md)
+			}
+			surf_diags = mapped[:]
+		}
+
+		err_panel_h: f32 = len(surf_diags) > 0 ? 104.0 : 28.0
 		avail_body := im.GetContentRegionAvail()
 		ref_panel_h: f32 = _scoped.refactor_active ? clamp(avail_body.y * 0.44, 180.0, 320.0) : 0.0
 		code_h := max(avail_body.y - err_panel_h - ref_panel_h - 10.0, 120.0)
 
-		if _draw_syntax_code_surface("##scoped_node_code", &_scoped.buf, {0, code_h}, snap.diagnostics, &_scoped.ide, _scoped.pins[:], !_scoped.is_full_decl, nil, &_scoped.undo, &_scoped.dirty, _scoped.backing_pkg_dir, _scoped.backing_file_abs, _scoped.read_only) {
+		if _draw_syntax_code_surface("##scoped_node_code", &_scoped.buf, {0, code_h}, surf_diags, &_scoped.ide, _scoped.pins[:], !_scoped.is_full_decl, nil, &_scoped.undo, &_scoped.dirty, _scoped.backing_pkg_dir, _scoped.backing_file_abs, _scoped.read_only) {
 			_scoped.dirty = true
 			_notify_scoped_popup_edited(false)
 		}
@@ -4755,16 +4798,85 @@ draw_scoped_node_popup :: proc() {
 			im.PopStyleColor()
 		}
 
-		if len(snap.diagnostics) > 0 && !_scoped.is_snippet_preview {
+		if len(surf_diags) > 0 && !_scoped.is_snippet_preview {
 			if im.BeginChild("##scoped_node_diags", {0, 0}, {.Borders}) {
-				_draw_surface_diagnostics_panel("scoped_diag", snap.diagnostics, &_scoped.ide)
+				_draw_surface_diagnostics_panel("scoped_diag", surf_diags, &_scoped.ide)
 			}
 			im.EndChild()
+		}
+
+		if !open_flag && _scoped.dirty && !_scoped.read_only && !_scoped.is_snippet_preview {
+			open_flag = true
+			_scoped.pending_close_confirm = true
+		}
+		if _scoped.pending_close_confirm {
+			im.OpenPopup("Unsaved Node Changes##scoped_dirty_close_modal")
+		}
+		if im.BeginPopupModal("Unsaved Node Changes##scoped_dirty_close_modal", nil, {.AlwaysAutoResize}) {
+			im.Text("This node has unsaved Odin changes. Apply before closing?")
+			im.Spacing()
+			if im.Button("Apply & Close##sc_mod_apply") {
+				_scoped.pending_close_confirm = false
+				_commit_scoped_popup(false)
+				if !_scoped.refactor_active {
+					open_flag = false
+				}
+				im.CloseCurrentPopup()
+			}
+			im.SameLine()
+			if im.Button("Discard Changes##sc_mod_disc") {
+				_scoped.pending_close_confirm = false
+				_scoped.dirty = false
+				open_flag = false
+				im.CloseCurrentPopup()
+			}
+			im.SameLine()
+			if im.Button("Cancel##sc_mod_can") {
+				_scoped.pending_close_confirm = false
+				im.CloseCurrentPopup()
+			}
+			im.EndPopup()
 		}
 	}
 	im.End()
 	if !_scoped.just_opened {
 		_scoped.open = open_flag
+	}
+}
+
+@(private = "file")
+_close_studio_tab_immediate :: proc(remove_idx: int) {
+	if remove_idx < 0 || remove_idx >= len(_studio.tabs) do return
+	prev_alloc := context.allocator
+	context.allocator = runtime.default_allocator()
+	old := _studio.tabs[remove_idx]
+	if _studio.last_emb_norm != "" && strings.equal_fold(old.abs_path, _studio.last_emb_norm) {
+		_studio.emb_user_closed = true
+	}
+	delete(old.title)
+	delete(old.abs_path)
+	delete(old.pkg_dir)
+	if old.paired_bodin != "" do delete(old.paired_bodin)
+	delete(old.buf)
+	code_undo_free(&old.undo)
+	im.ClearActiveID()
+	_clear_ide_pending_restore(&_studio.ide)
+	_free_ide_surface_cache(&_studio.ide)
+	ordered_remove(&_studio.tabs, remove_idx)
+	context.allocator = prev_alloc
+	if _studio.active_tab >= len(_studio.tabs) {
+		_studio.active_tab = max(len(_studio.tabs) - 1, 0)
+	}
+	_studio.request_tab_select = _studio.active_tab
+	_studio.dirty_tabs_rev += 1
+	if _studio.active_tab >= 0 && _studio.active_tab < len(_studio.tabs) {
+		nt := &_studio.tabs[_studio.active_tab]
+		_studio.ide.cmd_jump_offset      = _clamp_utf8_boundary(_c_buf_string(nt.buf), nt.cursor_pos)
+		_studio.ide.pending_scroll_y     = nt.scroll_y
+		_studio.ide.has_pending_scroll_y = true
+		_notify_buffer_edited(_c_buf_string(nt.buf), false, nt.pkg_dir, false, nt.abs_path)
+	} else {
+		set_checker_dirty_overlays(nil)
 	}
 }
 
@@ -5189,7 +5301,7 @@ draw_micro_studio_window :: proc() {
 		im.BeginDisabled()
 		im.Button(fmt.ctprintf("%s Blueprint Studio", icons.ICON_MD_ACCOUNT_TREE))
 		im.EndDisabled()
-		widgets.tooltip("Open a `.bodin` file or create one from Void File Explorer to edit a visual Blueprint graph")
+		widgets.tooltip("Open a `.bodin` file or create one from File Explorer to edit a visual Blueprint graph")
 	}
 
 	if _studio.active_tab >= 0 && _studio.active_tab < len(_studio.tabs) {
@@ -5426,10 +5538,18 @@ draw_micro_studio_window :: proc() {
 				if im.BeginTabItem(lbl, &tab_open, t_flags) {
 					if _studio.request_tab_select == ti do _studio.request_tab_select = -1
 					if _studio.active_tab != ti {
+						if _studio.active_tab >= 0 && _studio.active_tab < len(_studio.tabs) {
+							prev_t := &_studio.tabs[_studio.active_tab]
+							prev_t.cursor_pos = _studio.ide.cursor_pos
+							prev_t.scroll_y   = _studio.ide.last_scroll_y
+						}
 						_studio.active_tab = ti
 						im.ClearActiveID()
 						_clear_ide_pending_restore(&_studio.ide)
-						_notify_buffer_edited(_c_buf_string(tab.buf), false, tab.pkg_dir)
+						_studio.ide.cmd_jump_offset      = _clamp_utf8_boundary(_c_buf_string(tab.buf), tab.cursor_pos)
+						_studio.ide.pending_scroll_y     = tab.scroll_y
+						_studio.ide.has_pending_scroll_y = true
+						_notify_buffer_edited(_c_buf_string(tab.buf), false, tab.pkg_dir, false, tab.abs_path)
 					}
 					im.EndTabItem()
 				}
@@ -5437,35 +5557,55 @@ draw_micro_studio_window :: proc() {
 			}
 			im.EndTabBar()
 
-			if remove_idx >= 0 {
-				prev_alloc := context.allocator
-				context.allocator = runtime.default_allocator()
-				old := _studio.tabs[remove_idx]
-				if _studio.last_emb_norm != "" && strings.equal_fold(old.abs_path, _studio.last_emb_norm) {
-					_studio.emb_user_closed = true
-				}
-				delete(old.title)
-				delete(old.abs_path)
-				delete(old.pkg_dir)
-				if old.paired_bodin != "" do delete(old.paired_bodin)
-				delete(old.buf)
-				code_undo_free(&old.undo)
-				im.ClearActiveID()
-				_clear_ide_pending_restore(&_studio.ide)
-				_free_ide_surface_cache(&_studio.ide)
-				ordered_remove(&_studio.tabs, remove_idx)
-				context.allocator = prev_alloc
-				if _studio.active_tab >= len(_studio.tabs) {
-					_studio.active_tab = max(len(_studio.tabs) - 1, 0)
-				}
-				_studio.request_tab_select = _studio.active_tab
-				_studio.dirty_tabs_rev += 1
-				if _studio.active_tab >= 0 && _studio.active_tab < len(_studio.tabs) {
-					nt := &_studio.tabs[_studio.active_tab]
-					_notify_buffer_edited(_c_buf_string(nt.buf), false, nt.pkg_dir, false, nt.abs_path)
+			if remove_idx >= 0 && remove_idx < len(_studio.tabs) {
+				if _studio.tabs[remove_idx].dirty {
+					_studio.pending_close_tab_uid = _studio.tabs[remove_idx].uid
+					im.OpenPopup("Unsaved Script Changes##dirty_tab_close_modal")
 				} else {
-					set_checker_dirty_overlays(nil)
+					_close_studio_tab_immediate(remove_idx)
 				}
+			}
+			if im.BeginPopupModal("Unsaved Script Changes##dirty_tab_close_modal", nil, {.AlwaysAutoResize}) {
+				close_idx := -1
+				for tb, bi in _studio.tabs {
+					if tb.uid == _studio.pending_close_tab_uid {
+						close_idx = bi
+						break
+					}
+				}
+				if close_idx < 0 {
+					_studio.pending_close_tab_uid = 0
+					im.CloseCurrentPopup()
+				} else {
+					ct := &_studio.tabs[close_idx]
+					im.Text("%s", fmt.ctprintf("Save changes to \"%s\" before closing?", ct.title))
+					im.Spacing()
+					if im.Button("Save & Close##tab_mod_save") {
+						is_bodin_tab := strings.has_suffix(strings.to_lower(ct.abs_path, context.temp_allocator), ".bodin")
+						disk_src := format_studio_buffer_for_disk(_c_buf_string(ct.buf), ct.uses_tabs, context.temp_allocator)
+						if os.write_entire_file(ct.abs_path, transmute([]u8)disk_src) == nil {
+							ct.dirty = false
+							if is_bodin_tab && _studio.bodin_saved_cb != nil {
+								_studio.bodin_saved_cb(ct.abs_path, false)
+							}
+						}
+						_studio.pending_close_tab_uid = 0
+						_close_studio_tab_immediate(close_idx)
+						im.CloseCurrentPopup()
+					}
+					im.SameLine()
+					if im.Button("Discard Changes##tab_mod_disc") {
+						_studio.pending_close_tab_uid = 0
+						_close_studio_tab_immediate(close_idx)
+						im.CloseCurrentPopup()
+					}
+					im.SameLine()
+					if im.Button("Cancel##tab_mod_can") {
+						_studio.pending_close_tab_uid = 0
+						im.CloseCurrentPopup()
+					}
+				}
+				im.EndPopup()
 			}
 		}
 
@@ -5575,6 +5715,8 @@ draw_micro_studio_window :: proc() {
 			im.PushIDInt(i32(act.uid))
 			main_surf_edited := _draw_syntax_code_surface("##main_studio_code", &act.buf, {0, ed_h}, snap.diagnostics, &_studio.ide, nil, false, &act.scroll_line, &act.undo, &act.dirty, act.pkg_dir, act.abs_path)
 			im.PopID()
+			act.cursor_pos = _studio.ide.cursor_pos
+			act.scroll_y   = _studio.ide.last_scroll_y
 			if main_surf_edited {
 				act.dirty = true
 				_notify_buffer_edited(_c_buf_string(act.buf), false, act.pkg_dir)
@@ -5618,7 +5760,7 @@ draw_micro_studio_window :: proc() {
 		} else {
 			im.Spacing()
 			widgets.text_coloredf(p.text_secondary, "%s No Script Open", icons.ICON_MD_CODE)
-			im.TextDisabled("Select a `.odin` or `.bodin` file on the left explorer or open one from Void File Explorer.")
+			im.TextDisabled("Select a `.odin` or `.bodin` file on the left explorer or open one from File Explorer.")
 			im.Spacing()
 			if im.Button(fmt.ctprintf("%s Open Built-in Hot Scripts", icons.ICON_MD_BOLT)) {
 				_ = open_file_in_studio("haati/hot_scripts/builtin_hot_scripts.odin")
@@ -6016,14 +6158,27 @@ draw_embedded_script_panel :: proc(abs_or_rel_path: string, size: im.Vec2 = {0, 
 
 		if has_emb {
 			act_emb := &_studio.tabs[emb_tab_idx]
+			if act_emb.uid != _studio.pending_emb_tab_uid {
+				_clear_ide_pending_restore(&_studio.embedded_ide)
+				_free_ide_surface_cache(&_studio.embedded_ide)
+				_studio.embedded_ide = {
+					ac_dismissed_pos     = -1,
+					cmd_jump_offset      = _clamp_utf8_boundary(_c_buf_string(act_emb.buf), act_emb.cursor_pos),
+					pending_scroll_y     = act_emb.scroll_y,
+					has_pending_scroll_y = true,
+				}
+				_studio.pending_emb_tab_uid = act_emb.uid
+			}
 			im.SameLine()
-			_draw_undo_redo_buttons(&act_emb.undo, &act_emb.buf, &_studio.ide, &act_emb.dirty, act_emb.pkg_dir, false, "emb_full")
+			_draw_undo_redo_buttons(&act_emb.undo, &act_emb.buf, &_studio.embedded_ide, &act_emb.dirty, act_emb.pkg_dir, false, "emb_full")
+		} else {
+			_studio.pending_emb_tab_uid = 0
 		}
 
 		im.SameLine()
 		if im.Button(fmt.ctprintf("%s Find (Ctrl+F)", icons.ICON_MD_SEARCH)) {
-			_studio.ide.find_open       = !_studio.ide.find_open
-			_studio.ide.find_focus_next = _studio.ide.find_open
+			_studio.embedded_ide.find_open       = !_studio.embedded_ide.find_open
+			_studio.embedded_ide.find_focus_next = _studio.embedded_ide.find_open
 		}
 		im.SameLine()
 		_draw_zoom_pill_controls("emb_full")
@@ -6037,7 +6192,7 @@ draw_embedded_script_panel :: proc(abs_or_rel_path: string, size: im.Vec2 = {0, 
 			// Compact Symbol Jump strip
 			im.TextColored(p.text_muted, "%s", fmt.ctprintf("%s%s:", act.title, act.dirty ? " *" : ""))
 			im.SameLine()
-			widgets.text_disabledf("Ln %d, Col %d", max(_studio.ide.caret_line, 1), max(_studio.ide.caret_col, 1))
+			widgets.text_disabledf("Ln %d, Col %d", max(_studio.embedded_ide.caret_line, 1), max(_studio.embedded_ide.caret_col, 1))
 			if len(outline_syms) > 0 {
 				im.SameLine()
 				im.TextDisabled("| Procs:")
@@ -6058,14 +6213,16 @@ draw_embedded_script_panel :: proc(abs_or_rel_path: string, size: im.Vec2 = {0, 
 			err_h: f32 = has_err_area ? 116.0 : 28.0
 			ed_h := max(im.GetContentRegionAvail().y - err_h - 6.0, 120.0)
 			im.PushIDInt(i32(act.uid + 100000))
-			emb_surf_edited := _draw_syntax_code_surface("##emb_full_code_surf", &act.buf, {0, ed_h}, snap.diagnostics, &_studio.ide, nil, false, &act.scroll_line, &act.undo, &act.dirty, act.pkg_dir, act.abs_path)
+			emb_surf_edited := _draw_syntax_code_surface("##emb_full_code_surf", &act.buf, {0, ed_h}, snap.diagnostics, &_studio.embedded_ide, nil, false, &act.scroll_line, &act.undo, &act.dirty, act.pkg_dir, act.abs_path)
 			im.PopID()
+			act.cursor_pos = _studio.embedded_ide.cursor_pos
+			act.scroll_y   = _studio.embedded_ide.last_scroll_y
 			if emb_surf_edited {
 				act.dirty = true
 				_notify_buffer_edited(_c_buf_string(act.buf), false, act.pkg_dir)
 			}
-			if _studio.ide.req_jump_ident != "" {
-				_jump_to_definition_by_ident(act, _studio.ide.req_jump_ident, outline_syms)
+			if _studio.embedded_ide.req_jump_ident != "" {
+				_jump_to_definition_by_ident(act, _studio.embedded_ide.req_jump_ident, outline_syms)
 				// _jump_to_definition_by_ident may open a new tab and reallocate _studio.tabs.
 				if target_norm != "" {
 					act = nil
@@ -6085,7 +6242,7 @@ draw_embedded_script_panel :: proc(abs_or_rel_path: string, size: im.Vec2 = {0, 
 			} else {
 				if im.BeginChild("##emb_full_diags", {0, 0}, {.Borders}) {
 					if act != nil {
-						_draw_surface_diagnostics_panel("emb_full_diag", snap.diagnostics, &_studio.ide, act, hot_stderr, 68.0, true, true)
+						_draw_surface_diagnostics_panel("emb_full_diag", snap.diagnostics, &_studio.embedded_ide, act, hot_stderr, 68.0, true, true)
 					}
 				}
 				im.EndChild()

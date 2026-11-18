@@ -67,6 +67,7 @@ Studio_Diagnostic :: struct {
 	column:     int,
 	end_column: int,
 	is_warning: bool,
+	is_stale:   bool,
 	message:    string,
 }
 
@@ -136,6 +137,8 @@ _Checker_Worker_State :: struct {
 	pub_syntax_ms:     f32,
 	pub_compiler_ms:   f32,
 	pub_diags:         [dynamic]Studio_Diagnostic,
+	pub_stage_b_diags: [dynamic]Studio_Diagnostic,
+	pub_stage_b_file:  string,
 	pub_summary:       string,
 }
 
@@ -408,6 +411,27 @@ check_odin_syntax_in_ram :: proc(code: string, is_scoped_body: bool, allocator :
 	}
 
 	ms := f32(time.duration_milliseconds(time.tick_since(t0)))
+	delim_errs := check_odin_delimiter_balance(code, context.temp_allocator)
+	for de in delim_errs {
+		has_dup := false
+		for d in local_out {
+			if d.line == de.line && abs(d.column - de.column) <= 1 {
+				has_dup = true
+				break
+			}
+		}
+		if !has_dup {
+			append(&local_out, Studio_Diagnostic{
+				file       = strings.clone("in_ram_buffer.odin", allocator),
+				line       = de.line,
+				column     = de.column,
+				end_column = de.end_column,
+				is_warning = false,
+				message    = strings.clone(de.message, allocator),
+			})
+		}
+	}
+	_refine_diag_end_columns(local_out[:], "", code)
 	if len(local_out) == 0 {
 		hazards := predict_unsafe_odin_hazards(code, "in_ram_buffer.odin", allocator)
 		defer delete(hazards, allocator)
@@ -420,6 +444,91 @@ check_odin_syntax_in_ram :: proc(code: string, is_scoped_body: bool, allocator :
 		_merge_diagnostics_no_dup_line(&local_out, leg, allocator)
 	}
 	return local_out[:], ms
+}
+
+@(private = "file")
+_line_slice_1based :: proc(src: string, line_1based: int) -> (ln: string, ok: bool) {
+	if line_1based < 1 || len(src) == 0 do return "", false
+	cur_line := 1
+	i := 0
+	for i <= len(src) {
+		nl := strings.index_byte(src[i:], '\n')
+		line_end := nl >= 0 ? i + nl : len(src)
+		if cur_line == line_1based {
+			s := src[i:line_end]
+			if len(s) > 0 && s[len(s) - 1] == '\r' {
+				s = s[:len(s) - 1]
+			}
+			return s, true
+		}
+		if nl < 0 do break
+		cur_line += 1
+		i = line_end + 1
+	}
+	return "", false
+}
+
+@(private = "file")
+_exact_token_end_col :: proc(src: string, line_1based: int, col_1based: int) -> int {
+	ln, ok := _line_slice_1based(src, line_1based)
+	if !ok do return max(col_1based + 1, 2)
+	c0 := clamp(col_1based - 1, 0, len(ln))
+	if c0 >= len(ln) do return c0 + 1
+
+	is_word :: #force_inline proc(c: byte) -> bool {
+		return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+	}
+	ch := ln[c0]
+	if is_word(ch) {
+		e := c0 + 1
+		for e < len(ln) && is_word(ln[e]) do e += 1
+		return e + 1
+	}
+	if ch == '"' || ch == '\'' || ch == '`' {
+		e := c0 + 1
+		for e < len(ln) {
+			if ch != '`' && ln[e] == '\\' && e + 1 < len(ln) {
+				e += 2
+				continue
+			}
+			if ln[e] == ch {
+				e += 1
+				break
+			}
+			e += 1
+		}
+		return e + 1
+	}
+	if c0 + 3 <= len(ln) {
+		tri := ln[c0 : c0 + 3]
+		if tri == "..=" || tri == "..<" || tri == "---" {
+			return c0 + 4
+		}
+	}
+	if c0 + 2 <= len(ln) {
+		two := ln[c0 : c0 + 2]
+		if two == ":=" || two == "::" || two == "==" || two == "!=" || two == "<=" || two == ">=" ||
+		   two == "+=" || two == "-=" || two == "*=" || two == "/=" || two == "%=" ||
+		   two == "&=" || two == "|=" || two == "^=" || two == "&&" || two == "||" ||
+		   two == "<<" || two == ">>" || two == "->" || two == ".." {
+			return c0 + 3
+		}
+	}
+	return c0 + 2
+}
+
+@(private = "file")
+_refine_diag_end_columns :: proc(diags: []Studio_Diagnostic, target_file: string, src: string) {
+	if len(diags) == 0 || len(src) == 0 do return
+	target_key := target_file != "" ? _norm_path_key(target_file, context.temp_allocator) : ""
+	for &d in diags {
+		if d.line < 1 || d.end_column > d.column + 1 do continue
+		matches := target_key == "" || d.file == "in_ram_buffer.odin" || d.file == "buffer.odin" ||
+			_norm_path_key(d.file, context.temp_allocator) == target_key
+		if matches {
+			d.end_column = max(d.end_column, _exact_token_end_col(src, d.line, d.column))
+		}
+	}
 }
 
 // Proactive lightweight static failure predictor scanning Odin code for common crash & dangling-memory hazards
@@ -656,6 +765,22 @@ _clear_pub_diags_locked :: proc() {
 		delete(d.message)
 	}
 	clear(&_chk.pub_diags)
+}
+
+@(private = "file")
+_clear_stage_b_diags_locked :: proc() {
+	prev_alloc := context.allocator
+	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev_alloc
+	for d in _chk.pub_stage_b_diags {
+		delete(d.file)
+		delete(d.message)
+	}
+	clear(&_chk.pub_stage_b_diags)
+	if _chk.pub_stage_b_file != "" {
+		delete(_chk.pub_stage_b_file)
+		_chk.pub_stage_b_file = ""
+	}
 }
 
 @(private = "file")
@@ -954,6 +1079,7 @@ _write_overlay_file :: proc(
 _stage_check_environment :: proc(
 	repo_root, abs_pkg_dir, pkg_dir, file_abs, ram_code: string,
 	is_bodin: bool,
+	is_scoped: bool,
 	overlays: []Dirty_File_Overlay,
 	prev_overlaid: ^map[string]bool,
 	allocator := context.temp_allocator,
@@ -965,6 +1091,8 @@ _stage_check_environment :: proc(
 	proj_slug: string,
 	staged_map: map[string]string,
 	new_overlaid: map[string]bool,
+	staged_target_file: string,
+	synthetic_header_lines: int,
 	ok: bool,
 ) {
 	staged_map = make(map[string]string, 32, allocator)
@@ -1008,7 +1136,7 @@ _stage_check_environment :: proc(
 
 		// If the currently focused buffer is inside the active project, check its mirrored dir!
 		file_key := _norm_path_key(file_abs, context.temp_allocator)
-		if file_abs != "" && strings.has_prefix(file_key, norm_proj_key) {
+		if !is_scoped && file_abs != "" && strings.has_prefix(file_key, norm_proj_key) {
 			rel_sub := strings.trim_prefix(_norm_path(file_abs, context.temp_allocator)[len(norm_proj_key):], "/")
 			rel_dir := _dir_of_temp(rel_sub)
 			dst_active: string
@@ -1020,7 +1148,7 @@ _stage_check_environment :: proc(
 			}
 			if _write_overlay_file(dst_active, file_abs, ram_code, is_bodin, &staged_map, &new_overlaid) {
 				check_target = (rel_dir == "." || rel_dir == "") ? strings.clone(proj_mirror_slug, allocator) : _join_path({proj_mirror_slug, rel_dir}, allocator)
-				return check_target, haati_col_dir, proj_mirror_slug, proj_root, proj_slug, staged_map, new_overlaid, true
+				return check_target, haati_col_dir, proj_mirror_slug, proj_root, proj_slug, staged_map, new_overlaid, strings.clone(file_abs, allocator), 0, true
 			}
 		}
 	}
@@ -1028,8 +1156,8 @@ _stage_check_environment :: proc(
 	// Packages using relative `"../..."` imports (like `haati/editor`) check their real pkg_dir
 	// against `haati_col` so relative paths resolve naturally.
 	uses_rel_parent := pkg_dir == "haati/editor" || strings.contains(ram_code, "\"../")
-	if uses_rel_parent && abs_pkg_dir != "" && os.is_dir(abs_pkg_dir) && !is_bodin {
-		return strings.clone(pkg_dir, allocator), haati_col_dir, proj_mirror_slug, proj_root, proj_slug, staged_map, new_overlaid, true
+	if !is_scoped && uses_rel_parent && abs_pkg_dir != "" && os.is_dir(abs_pkg_dir) && !is_bodin {
+		return strings.clone(pkg_dir, allocator), haati_col_dir, proj_mirror_slug, proj_root, proj_slug, staged_map, new_overlaid, "", 0, true
 	}
 
 	// Stage any other workspace/plugin/sandbox `.odin`/`.bodin` package in `pkg_sandbox/`
@@ -1037,6 +1165,7 @@ _stage_check_environment :: proc(
 	_ = os.make_directory_all(sandbox_dir)
 	_clean_dir_regular_files(sandbox_dir)
 
+	sandbox_pkg := "hot_scripts"
 	active_is_test := file_abs != "" && strings.has_suffix(file_abs, "_test.odin")
 	if abs_pkg_dir != "" && os.is_dir(abs_pkg_dir) {
 		if dh, derr := os.open(abs_pkg_dir); derr == nil {
@@ -1047,6 +1176,11 @@ _stage_check_environment :: proc(
 					src_f, _ := filepath.join({abs_pkg_dir, e.name}, context.temp_allocator)
 					dst_f, _ := filepath.join({sandbox_dir, e.name}, context.temp_allocator)
 					if raw, rerr2 := os.read_entire_file(src_f, context.temp_allocator); rerr2 == nil {
+						raw_txt := string(raw)
+						if odin_source_has_package_decl(raw_txt) {
+							pn := extract_odin_package_name(raw_txt)
+							if pn != "" do sandbox_pkg = pn
+						}
 						if os.write_entire_file(dst_f, raw) == nil {
 							staged_map[_norm_path_key(dst_f, context.temp_allocator)] = _norm_path(src_f, context.temp_allocator)
 						}
@@ -1069,16 +1203,34 @@ _stage_check_environment :: proc(
 	}
 
 	if strings.trim_space(ram_code) != "" {
+		write_code := ram_code
 		ov_name := is_bodin ? _staged_bodin_odin_filename(file_abs, context.temp_allocator) : (file_abs != "" ? filepath.base(file_abs) : "in_ram_script.odin")
-		orig_label := file_abs != "" ? file_abs : ov_name
+		orig_label := file_abs != "" ? file_abs : "in_ram_buffer.odin"
+		if is_scoped {
+			ov_name = "__mh_scoped_body_sandbox.odin"
+			header := fmt.tprintf("package %s\nimport \"core:math\"\nimport \"core:math/linalg\"\nimport hot \"haati:engine/hot_api\"\n_mh_stage_b_scoped :: proc(api: ^hot.Engine_Hot_API, self: hot.Hot_Entity, dt: f32) {\n", sandbox_pkg)
+			write_code = strings.concatenate({header, ram_code, "\n}\n"}, context.temp_allocator)
+			synthetic_header_lines = 5
+		} else if !is_bodin && !odin_source_has_package_decl(ram_code) {
+			if strings.contains(ram_code, "import ") {
+				header := fmt.tprintf("package %s\n", sandbox_pkg)
+				write_code = strings.concatenate({header, ram_code}, context.temp_allocator)
+				synthetic_header_lines = 1
+			} else {
+				header := fmt.tprintf("package %s\nimport \"core:math\"\nimport \"core:math/linalg\"\nimport hot \"haati:engine/hot_api\"\n", sandbox_pkg)
+				write_code = strings.concatenate({header, ram_code}, context.temp_allocator)
+				synthetic_header_lines = 4
+			}
+		}
+		staged_target_file = strings.clone(orig_label, allocator)
 		dst_ov, _ := filepath.join({sandbox_dir, ov_name}, context.temp_allocator)
 		tmp_overlaid := make(map[string]bool, 4, context.temp_allocator)
-		if !_write_overlay_file(dst_ov, orig_label, ram_code, is_bodin, &staged_map, &tmp_overlaid) {
-			return "", "", "", "", "", staged_map, new_overlaid, false
+		if !_write_overlay_file(dst_ov, orig_label, write_code, is_bodin, &staged_map, &tmp_overlaid) {
+			return "", "", "", "", "", staged_map, new_overlaid, "", 0, false
 		}
 	}
 
-	return strings.clone("builds/_studio_check_env/pkg_sandbox", allocator), haati_col_dir, proj_mirror_slug, proj_root, proj_slug, staged_map, new_overlaid, true
+	return strings.clone("builds/_studio_check_env/pkg_sandbox", allocator), haati_col_dir, proj_mirror_slug, proj_root, proj_slug, staged_map, new_overlaid, staged_target_file, synthetic_header_lines, true
 }
 
 @(private = "file")
@@ -1149,7 +1301,7 @@ _worker_proc :: proc(_t: ^thread.Thread) {
 		sync.mutex_lock(&_chk.mu)
 		for !_chk.stop_requested {
 			need_syntax := _chk.req_revision > last_syntax_rev
-			has_stage_b_target := !_chk.req_is_scoped && (_chk.req_pkg_dir != "" || _req_file_valid_for_stage_b(_chk.req_file_abs, _chk.req_code))
+			has_stage_b_target := strings.trim_space(_chk.req_code) != "" && (_chk.req_is_scoped || _chk.req_pkg_dir != "" || _req_file_valid_for_stage_b(_chk.req_file_abs, _chk.req_code))
 			need_comp := last_syntax_ok && has_stage_b_target && (_chk.req_force_stage_b || _chk.req_revision > last_compiler_rev)
 			if need_syntax || need_comp do break
 			sync.cond_wait(&_chk.cv, &_chk.mu)
@@ -1163,7 +1315,7 @@ _worker_proc :: proc(_t: ^thread.Thread) {
 		edit_tick    := _chk.req_edit_tick
 		force_now    := _chk.req_force_stage_b
 		cur_is_bodin := !_chk.req_is_scoped && _is_bodin_ram_source(_chk.req_file_abs, _chk.req_code)
-		has_pkg      := !_chk.req_is_scoped && (_chk.req_pkg_dir != "" || _req_file_valid_for_stage_b(_chk.req_file_abs, _chk.req_code))
+		has_pkg      := strings.trim_space(_chk.req_code) != "" && (_chk.req_is_scoped || _chk.req_pkg_dir != "" || _req_file_valid_for_stage_b(_chk.req_file_abs, _chk.req_code))
 		elapsed_ms   := time.duration_milliseconds(time.tick_since(edit_tick))
 		delay_ms     := _get_problem_delay_ms()
 
@@ -1206,8 +1358,31 @@ _worker_proc :: proc(_t: ^thread.Thread) {
 						column     = d.column,
 						end_column = d.end_column,
 						is_warning = d.is_warning,
+						is_stale   = d.is_stale,
 						message    = strings.clone(d.message),
 					})
+				}
+				if has_pkg && _chk.pub_stage_b_file != "" && _norm_path_key(file_copy, context.temp_allocator) == _norm_path_key(_chk.pub_stage_b_file, context.temp_allocator) {
+					for sd in _chk.pub_stage_b_diags {
+						dup := false
+						for pd in _chk.pub_diags {
+							if pd.line == sd.line && (pd.message == sd.message || (!pd.is_warning && !sd.is_warning)) {
+								dup = true
+								break
+							}
+						}
+						if !dup {
+							append(&_chk.pub_diags, Studio_Diagnostic{
+								file       = strings.clone(sd.file),
+								line       = sd.line,
+								column     = sd.column,
+								end_column = sd.end_column,
+								is_warning = sd.is_warning,
+								is_stale   = true,
+								message    = strings.clone(sd.message),
+							})
+						}
+					}
 				}
 				_chk.pub_revision  = cur_rev
 				_chk.pub_syntax_ms = syn_ms
@@ -1234,6 +1409,7 @@ _worker_proc :: proc(_t: ^thread.Thread) {
 				continue
 			}
 
+			comp_is_scoped := _chk.req_is_scoped
 			pkg_dir  := strings.clone(_chk.req_pkg_dir, context.temp_allocator)
 			file_abs := strings.clone(_chk.req_file_abs, context.temp_allocator)
 			ram_code := strings.clone(_chk.req_code, context.temp_allocator)
@@ -1268,8 +1444,8 @@ _worker_proc :: proc(_t: ^thread.Thread) {
 			_ = os.make_directory_all(builds_d)
 			json_out_path, _ := filepath.join({repo_root, fmt.tprintf("builds/_studio_check_%d_%d.tmp", os.get_pid(), run_seq)}, context.temp_allocator)
 
-			check_target, haati_col_dir, proj_mirror_slug, proj_root, proj_slug, staged_map, new_overlaid, stage_ok :=
-				_stage_check_environment(repo_root, abs_pkg_dir, pkg_dir, file_abs, ram_code, cur_is_bodin, overlays_copy, &prev_overlaid_mirrors, context.temp_allocator)
+			check_target, haati_col_dir, proj_mirror_slug, proj_root, proj_slug, staged_map, new_overlaid, staged_target_file, synthetic_header_lines, stage_ok :=
+				_stage_check_environment(repo_root, abs_pkg_dir, pkg_dir, file_abs, ram_code, cur_is_bodin, comp_is_scoped, overlays_copy, &prev_overlaid_mirrors, context.temp_allocator)
 
 			for k in prev_overlaid_mirrors do delete(k, runtime.default_allocator())
 			clear(&prev_overlaid_mirrors)
@@ -1329,16 +1505,31 @@ _worker_proc :: proc(_t: ^thread.Thread) {
 			comp_ms := f32(time.duration_milliseconds(time.tick_since(t_comp)))
 			last_compiler_rev = cur_rev
 
-			display_file := file_abs != "" ? file_abs : "buffer.odin"
+			display_file := file_abs != "" ? file_abs : "in_ram_buffer.odin"
 			hazards_b := predict_unsafe_odin_hazards(ram_code, display_file, context.temp_allocator)
 			legacy_b  := strings.contains(ram_code, "moonhug:") ? lint_legacy_moonhug_imports(ram_code, display_file, proj_slug, context.temp_allocator) : nil
 
 			// Map staged compiler diagnostics back to exact workspace/project file paths and count real errors.
 			final_diags := make([dynamic]Studio_Diagnostic, 0, len(comp_diags) + len(hazards_b) + len(legacy_b), context.temp_allocator)
+			staged_target_key := staged_target_file != "" ? _norm_path_key(staged_target_file, context.temp_allocator) : ""
+			ram_lines := 1
+			for bi := 0; bi < len(ram_code); bi += 1 {
+				if ram_code[bi] == '\n' do ram_lines += 1
+			}
 			hard_err_count := 0
 			warn_count := 0
 			for d in comp_diags {
 				df := _remap_checker_diag_path(d.file, repo_root, proj_root, proj_slug, &staged_map, context.temp_allocator)
+				adj_line := d.line
+				if synthetic_header_lines > 0 && staged_target_key != "" && _norm_path_key(df, context.temp_allocator) == staged_target_key {
+					if d.line <= synthetic_header_lines && (strings.contains(d.message, "imported") || strings.contains(d.message, "not used")) {
+						continue
+					}
+					adj_line = max(d.line - synthetic_header_lines, 1)
+					if comp_is_scoped && adj_line > ram_lines {
+						adj_line = ram_lines
+					}
+				}
 				if !d.is_warning {
 					hard_err_count += 1
 				} else {
@@ -1346,7 +1537,7 @@ _worker_proc :: proc(_t: ^thread.Thread) {
 				}
 				append(&final_diags, Studio_Diagnostic{
 					file       = df,
-					line       = d.line,
+					line       = adj_line,
 					column     = d.column,
 					end_column = d.end_column,
 					is_warning = d.is_warning,
@@ -1357,12 +1548,15 @@ _worker_proc :: proc(_t: ^thread.Thread) {
 			if len(legacy_b) > 0 {
 				_merge_diagnostics_no_dup_line(&final_diags, legacy_b, context.temp_allocator)
 			}
+			_refine_diag_end_columns(final_diags[:], display_file, ram_code)
 
 			sync.mutex_lock(&_chk.mu)
 			if _chk.req_revision == cur_rev {
 				_clear_pub_diags_locked()
+				_clear_stage_b_diags_locked()
 				prev_a := context.allocator
 				context.allocator = runtime.default_allocator()
+				_chk.pub_stage_b_file = strings.clone(display_file)
 				for d in final_diags {
 					append(&_chk.pub_diags, Studio_Diagnostic{
 						file       = strings.clone(d.file),
@@ -1370,11 +1564,21 @@ _worker_proc :: proc(_t: ^thread.Thread) {
 						column     = d.column,
 						end_column = d.end_column,
 						is_warning = d.is_warning,
+						is_stale   = false,
+						message    = strings.clone(d.message),
+					})
+					append(&_chk.pub_stage_b_diags, Studio_Diagnostic{
+						file       = strings.clone(d.file),
+						line       = d.line,
+						column     = d.column,
+						end_column = d.end_column,
+						is_warning = d.is_warning,
+						is_stale   = false,
 						message    = strings.clone(d.message),
 					})
 				}
 				_chk.pub_compiler_ms = comp_ms
-				if hard_err_count > 0 || comp_exit != 0 {
+				if hard_err_count > 0 || (comp_exit != 0 && !(synthetic_header_lines > 0 && warn_count == 0 && len(final_diags) == 0)) {
 					_chk.pub_stage = .Compiler_Error
 					_set_pub_summary_locked(fmt.tprintf("%d Typecheck Error(s) (%.0f ms)", max(hard_err_count, 1), comp_ms))
 				} else if warn_count > 0 || len(final_diags) > 0 {
@@ -1461,6 +1665,8 @@ shutdown_checker :: proc() {
 	context.allocator = runtime.default_allocator()
 	_clear_pub_diags_locked()
 	delete(_chk.pub_diags)
+	_clear_stage_b_diags_locked()
+	delete(_chk.pub_stage_b_diags)
 	_clear_req_overlays_locked()
 	delete(_chk.req_overlays)
 	if _chk.linked_proj_slug != "" do delete(_chk.linked_proj_slug)
@@ -1490,6 +1696,15 @@ submit_async_check :: proc(code: string, is_scoped_body: bool, pkg_dir: string =
 	prev_alloc := context.allocator
 	context.allocator = runtime.default_allocator()
 	defer context.allocator = prev_alloc
+	file_changed := is_scoped_body != _chk.req_is_scoped || _norm_path_key(norm_in, context.temp_allocator) != _norm_path_key(_chk.req_file_abs, context.temp_allocator)
+	if file_changed {
+		_clear_pub_diags_locked()
+		_clear_stage_b_diags_locked()
+	} else {
+		for &d in _chk.pub_diags {
+			d.is_stale = true
+		}
+	}
 	if _chk.req_code     != "" do delete(_chk.req_code)
 	if _chk.req_pkg_dir  != "" do delete(_chk.req_pkg_dir)
 	if _chk.req_file_abs != "" do delete(_chk.req_file_abs)
@@ -1514,12 +1729,24 @@ read_checker_snapshot :: proc(allocator := context.temp_allocator) -> Checker_Sn
 	defer sync.mutex_unlock(&_chk.mu)
 
 	if _chk.pub_stage == .Pending_Syntax {
+		stale_out := make([]Studio_Diagnostic, len(_chk.pub_diags), allocator)
+		for d, i in _chk.pub_diags {
+			stale_out[i] = Studio_Diagnostic{
+				file       = strings.clone(d.file, allocator),
+				line       = d.line,
+				column     = d.column,
+				end_column = d.end_column,
+				is_warning = d.is_warning,
+				is_stale   = true,
+				message    = strings.clone(d.message, allocator),
+			}
+		}
 		return Checker_Snapshot{
 			stage         = .Pending_Syntax,
 			revision      = _chk.pub_revision,
 			syntax_ms     = _chk.pub_syntax_ms,
 			compiler_ms   = _chk.pub_compiler_ms,
-			diagnostics   = nil,
+			diagnostics   = stale_out,
 			summary_label = strings.clone("Typing... (waiting to check)", allocator),
 		}
 	}
@@ -1532,6 +1759,7 @@ read_checker_snapshot :: proc(allocator := context.temp_allocator) -> Checker_Sn
 			column     = d.column,
 			end_column = d.end_column,
 			is_warning = d.is_warning,
+			is_stale   = d.is_stale,
 			message    = strings.clone(d.message, allocator),
 		}
 	}

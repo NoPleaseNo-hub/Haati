@@ -24,6 +24,7 @@ import "haati:editor/icons"
 import thm "haati:editor/theme"
 import "haati:editor/widgets"
 import wnd "haati:editor/window"
+import sim "./simulate"
 import "undo"
 
 @(private = "file")
@@ -53,6 +54,10 @@ _wd: struct {
 	restored_scene_bytes:     int,
 	restored_tabs_count:      int,
 	safe_hub_triggered:       bool,
+	has_play_fault:           bool,
+	play_fault:               crash_journal.Sandbox_Fault_Info,
+	last_scene_path_buf:      [256]byte,
+	last_scene_path_len:      int,
 }
 
 // Intercepts `--watchdog-guardian <pid> <vault_name> [restart_args...]` before GPU/SDL init
@@ -283,6 +288,12 @@ watchdog_tick :: proc(frames_presented: int, dt: f32) {
 		_wd.has_pending_restore = false
 	}
 
+	if pf, pf_ok := sim.take_last_play_fault(); pf_ok {
+		_wd.play_fault     = pf
+		_wd.has_play_fault = true
+		_wd.show_banner    = true
+	}
+
 	// Startup crash-loop circuit breaker: only arm the Guardian after surviving 120 frames AND 3s of interactive uptime.
 	if _wd.want_enabled && _wd.vault == nil && frames_presented >= 120 && _wd.uptime_sec >= 3.0 {
 		_watchdog_start_guardian()
@@ -290,9 +301,14 @@ watchdog_tick :: proc(frames_presented: int, dt: f32) {
 
 	if _wd.vault == nil || frames_presented < 5 do return
 
-	// Zone 0: Camera, selection & active scene path/GUID (~200 ns, only when changed)
+	// Zone 0: Camera, selection & active scene path/GUID (~200 ns, only when changed, immediate on scene switch)
+	active_sc_z0 := engine.sm_scene_get_active()
+	cur_sc_path := active_sc_z0 != nil ? active_sc_z0.path : ""
+	prev_sc_path := _wd.last_scene_path_len > 0 ? string(_wd.last_scene_path_buf[:_wd.last_scene_path_len]) : ""
+	scene_switched := cur_sc_path != prev_sc_path
+
 	_wd.meta_timer += dt_c
-	if _wd.meta_timer >= 0.5 && !sim_is_active() {
+	if (_wd.meta_timer >= 0.5 || scene_switched) && !sim_is_active() {
 		_wd.meta_timer = 0
 		lids := make([dynamic]u64, 0, 8, context.temp_allocator)
 		if w := engine.ctx_world(); w != nil {
@@ -302,8 +318,7 @@ watchdog_tick :: proc(frames_presented: int, dt: f32) {
 				}
 			}
 		}
-		active_sc := engine.sm_scene_get_active()
-		sc_path := active_sc != nil ? active_sc.path : ""
+		sc_path := cur_sc_path
 		sc_guid: [16]u8 = {}
 		if sc_path != "" {
 			if g, gok := engine.asset_db_get_guid(sc_path); gok {
@@ -326,15 +341,18 @@ watchdog_tick :: proc(frames_presented: int, dt: f32) {
 		if mh != _wd.last_meta_hash {
 			if engine.watchdog_vault_write_meta(_wd.vault, meta_snap) {
 				_wd.last_meta_hash = mh
+				n := min(len(sc_path), len(_wd.last_scene_path_buf))
+				copy(_wd.last_scene_path_buf[:n], sc_path[:n])
+				_wd.last_scene_path_len = n
 			}
 		}
 	}
 
-	// Zone 1: Dirty Code Studio tabs (`0.00 ms` unless an actual tab edit happened, debounced 1.2s)
+	// Zone 1: Dirty Code Studio tabs (`0.00 ms` unless an actual tab edit happened, debounced 0.25s)
 	cur_tabs_rev := cs.dirty_tabs_revision()
 	if cur_tabs_rev != _wd.last_tabs_rev {
 		_wd.tabs_idle_sec += dt_c
-		if _wd.tabs_idle_sec >= 1.2 {
+		if _wd.tabs_idle_sec >= 0.25 {
 			_wd.tabs_idle_sec = 0
 			tabs_json := cs.export_dirty_tabs_json(context.temp_allocator)
 			if engine.watchdog_vault_write_tabs(_wd.vault, tabs_json) {
@@ -345,7 +363,7 @@ watchdog_tick :: proc(frames_presented: int, dt: f32) {
 		_wd.tabs_idle_sec = 0
 	}
 
-	// Zone 2: Unsaved Scene Bytes (`0.00 ms` unless scene actually mutated via Undo/Edit)
+	// Zone 2: Unsaved Scene Bytes (`0.00 ms` unless scene actually mutated via Undo/Edit, debounced 0.75s)
 	active_sc := engine.sm_scene_get_active()
 	cur_mut   := undo.current_scene_mutation_seq()
 	sc_dirty  := active_sc != nil && active_sc.dirty
@@ -361,7 +379,7 @@ watchdog_tick :: proc(frames_presented: int, dt: f32) {
 	} else if cur_mut != _wd.last_scene_mut_seq || sc_sid != _wd.last_scene_sid || !_wd.last_scene_dirty {
 		if !sim_is_active() && !im.IsMouseDown(.Left) && !im.IsMouseDown(.Right) {
 			_wd.scene_idle_sec += dt_c
-			if _wd.scene_idle_sec >= 2.5 {
+			if _wd.scene_idle_sec >= 0.75 {
 				_wd.scene_idle_sec = 0
 				prev_alloc := context.allocator
 				context.allocator = runtime.default_allocator()
@@ -413,24 +431,38 @@ watchdog_draw_recovery_banner :: proc() {
 		widgets.watch_wolf_draw(36.0, p.status_warning)
 		im.SameLine(0, 12)
 		im.BeginGroup()
-		widgets.text_coloredf(p.status_error, "%s Watch-Wolf Recovery -- Restored From Kernel RAM Vault", icons.ICON_MD_WARNING)
-		if _wd.safe_hub_triggered {
-			widgets.text_coloredf(p.status_warning, "Watch-Wolf Safe Mode: 2 rapid crashes detected (<90s) -- booted safely into Project Hub.")
-		}
-		if _wd.has_pending_tabs_restore && len(_wd.pending_tabs_json) > 0 {
-			widgets.textf("Unexpected exit (code %s): recovered %d scene byte(s) + staged %d unsaved script byte(s).", exit_str, _wd.restored_scene_bytes, _wd.staged_tabs_bytes)
+		if _wd.has_play_fault {
+			f_reason := crash_journal.sandbox_fault_reason(&_wd.play_fault)
+			f_file   := crash_journal.sandbox_fault_file(&_wd.play_fault)
+			f_proc   := crash_journal.sandbox_fault_proc(&_wd.play_fault)
+			widgets.text_coloredf(p.status_error, "%s Watch-Wolf Caught Play Runtime Fault -- Rolled Back Scene Safely", icons.ICON_MD_WARNING)
+			widgets.textf("%s (%s:%d in %s)", f_reason != "" ? f_reason : "Runtime fault", f_file != "" ? filepath.base(f_file) : "<script>", _wd.play_fault.line, f_proc != "" ? f_proc : "proc")
 		} else {
-			widgets.textf("Unexpected exit (code %s): recovered %d scene byte(s) and %d dirty script tab(s).", exit_str, _wd.restored_scene_bytes, _wd.restored_tabs_count)
-		}
-		if quarantined {
-			widgets.text_coloredf(p.status_warning, "Hot scripts are QUARANTINED to prevent repeat crashes. Fix/Recompile (F7) or Re-Arm manually.")
-		} else {
-			widgets.text_disabledf("Hot scripts re-armed.")
+			widgets.text_coloredf(p.status_error, "%s Watch-Wolf Recovery -- Restored From Kernel RAM Vault", icons.ICON_MD_WARNING)
+			if _wd.safe_hub_triggered {
+				widgets.text_coloredf(p.status_warning, "Watch-Wolf Safe Mode: 2 rapid crashes detected (<90s) -- booted safely into Project Hub.")
+			}
+			if _wd.has_pending_tabs_restore && len(_wd.pending_tabs_json) > 0 {
+				widgets.textf("Unexpected exit (code %s): recovered %d scene byte(s) + staged %d unsaved script byte(s).", exit_str, _wd.restored_scene_bytes, _wd.staged_tabs_bytes)
+			} else {
+				widgets.textf("Unexpected exit (code %s): recovered %d scene byte(s) and %d dirty script tab(s).", exit_str, _wd.restored_scene_bytes, _wd.restored_tabs_count)
+			}
+			if quarantined {
+				widgets.text_coloredf(p.status_warning, "Hot scripts are QUARANTINED to prevent repeat crashes. Fix/Recompile (F7) or Re-Arm manually.")
+			} else {
+				widgets.text_disabledf("Hot scripts re-armed.")
+			}
 		}
 		im.EndGroup()
 
 		im.Spacing()
-		if _wd.has_pending_tabs_restore && len(_wd.pending_tabs_json) > 0 {
+		if _wd.has_play_fault {
+			f_file := crash_journal.sandbox_fault_file(&_wd.play_fault)
+			if f_file != "" && im.Button("Jump to Fault") {
+				_ = cs.open_file_in_studio(f_file, int(_wd.play_fault.line))
+			}
+			if f_file != "" do im.SameLine(0, 8)
+		} else if _wd.has_pending_tabs_restore && len(_wd.pending_tabs_json) > 0 {
 			if im.Button("Restore Unsaved Script Tabs") {
 				_wd.restored_tabs_count = cs.restore_dirty_tabs_json(_wd.pending_tabs_json)
 				delete(_wd.pending_tabs_json, context.allocator)
@@ -471,7 +503,8 @@ watchdog_draw_recovery_banner :: proc() {
 		}
 		im.SameLine(0, 8)
 		if im.Button("Dismiss") {
-			_wd.show_banner = false
+			_wd.show_banner    = false
+			_wd.has_play_fault = false
 		}
 	}
 	im.End()

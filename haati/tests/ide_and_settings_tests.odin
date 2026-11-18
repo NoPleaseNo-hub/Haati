@@ -254,22 +254,23 @@ test_window_confirm_dialog_delegates_to_widgets_dialog :: proc(t: ^testing.T) {
 	}
 }
 
-// Verifies Studio/Browser windows (`void_file_explorer`, `void_material_editor`,
+// Verifies Studio/Browser windows (`file_explorer`, `material_editor`,
 // `odin_micro_studio`, `mh_visual_script`) opt out of whole-window DPI Ctrl+MouseWheel
 // scaling so their toolbars, buttons, and sidebars stay crisp.
 @(test)
 test_window_independent_pane_zoom_exemptions :: proc(t: ^testing.T) {
 	testing.expect(t, wnd.uses_independent_pane_zoom("odin_micro_studio"), "odin_micro_studio must use independent pane zoom")
 	testing.expect(t, wnd.uses_independent_pane_zoom("mh_visual_script"), "mh_visual_script must use independent pane zoom")
-	testing.expect(t, wnd.uses_independent_pane_zoom("void_file_explorer"), "void_file_explorer must use independent pane zoom")
-	testing.expect(t, wnd.uses_independent_pane_zoom("void_material_editor"), "void_material_editor must use independent pane zoom")
+	testing.expect(t, wnd.uses_independent_pane_zoom("file_explorer"), "file_explorer must use independent pane zoom")
+	testing.expect(t, wnd.uses_independent_pane_zoom("material_editor"), "material_editor must use independent pane zoom")
 	testing.expect(t, !wnd.uses_independent_pane_zoom("inspector"), "standard inspector window should allow whole-window scale")
+	testing.expect(t, !wnd.uses_independent_pane_zoom("hierarchy"), "standard hierarchy window should allow whole-window scale")
 }
 
-// Verifies Void File Explorer's expanded `48px..256px` tile zoom range, list density scale,
+// Verifies File Explorer's expanded `48px..256px` tile zoom range, list density scale,
 // and UTF-8-safe middle-ellipsis filename fitting for compact cards.
 @(test)
-test_void_file_explorer_zoom_range_and_middle_ellipsis :: proc(t: ^testing.T) {
+test_file_explorer_zoom_range_and_middle_ellipsis :: proc(t: ^testing.T) {
 	testing.expect_value(t, fe.CARD_SIZE_MIN, f32(48.0))
 	testing.expect_value(t, fe.CARD_SIZE_MAX, f32(256.0))
 
@@ -312,7 +313,7 @@ test_void_file_explorer_zoom_range_and_middle_ellipsis :: proc(t: ^testing.T) {
 	}
 }
 
-// Verifies Void File Explorer Left Tree zoom (`[0.75..2.00]`) is clamped & stepped independently
+// Verifies File Explorer Left Tree zoom (`[0.75..2.00]`) is clamped & stepped independently
 // from Folder Content List density zoom (`[0.75..2.00]`) and defaults legacy 0 values to 1.00.
 @(test)
 test_ux_independent_tree_vs_folder_zoom :: proc(t: ^testing.T) {
@@ -335,23 +336,23 @@ test_ux_menu_searchable_window_tools_and_explorer_name :: proc(t: ^testing.T) {
 
 	menu.init_menu()
 	defer menu.shutdown_menu()
-	menu.add_menu_item("Window/General/Void File Explorer", "Ctrl+5", proc() {})
+	menu.add_menu_item("Window/General/File Explorer", "Ctrl+5", proc() {})
 	menu.add_menu_item("Tools/Refresh AssetDB", "", proc() {})
 	paths := menu.collect_invokable_paths(context.temp_allocator)
 	has_fe   := false
 	has_ref  := false
 	for p in paths {
-		if p == "Window/General/Void File Explorer" do has_fe = true
+		if p == "Window/General/File Explorer" do has_fe = true
 		if p == "Tools/Refresh AssetDB" do has_ref = true
 	}
-	testing.expect(t, has_fe && has_ref, "menu tree must support searchable Window/General/Void File Explorer and Tools/Refresh AssetDB")
+	testing.expect(t, has_fe && has_ref, "menu tree must support searchable Window/General/File Explorer and Tools/Refresh AssetDB")
 
 	repo := engine.resolve_repo_root(context.temp_allocator)
 	gen_path, _ := filepath.join({repo, "haati/editor/menu_items_generated.odin"}, context.temp_allocator)
 	gen_bytes, gerr := os.read_entire_file(gen_path, context.temp_allocator)
 	testing.expect(t, gerr == nil, "menu_items_generated.odin must exist")
 	gen_src := string(gen_bytes)
-	testing.expect(t, strings.contains(gen_src, "\"Window/General/Void File Explorer\""), "generated menu items must expose Void File Explorer")
+	testing.expect(t, strings.contains(gen_src, "\"Window/General/File Explorer\""), "generated menu items must expose File Explorer")
 	testing.expect(t, strings.contains(gen_src, "\"Tools/Refresh AssetDB\""), "generated menu items must expose Tools/Refresh AssetDB")
 	testing.expect(t, !strings.contains(gen_src, "\"Assets/Refresh AssetDB\""), "Assets/Refresh AssetDB must no longer live under top Assets menu")
 }

@@ -1,6 +1,6 @@
 package input_manager
 
-// Unreal / Godot-style Input Action & Axis Router for MoonHug.
+// Unreal / Godot-style Input Action & Axis Router for Haati.
 // Provides prioritized event routing, vector binding (Movement & Look),
 // 3 binding slots per action (Primary PC, Secondary PC, Gamepad/Controller),
 // dynamic action creation, in-editor remapping, and project settings persistence.

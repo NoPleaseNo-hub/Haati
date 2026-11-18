@@ -553,6 +553,7 @@ physics_step :: proc(fixed_dt: f32) {
 	w := engine.ctx_world()
 	_ensure_world(w)
 	if !_state.world_ready do return
+	engine.world_scrub_non_finite_transforms(w)
 	_settings_sync()
 
 	// When called directly outside `engine.fixed_frame_ticks` (e.g. unit tests or custom steppers),
@@ -797,13 +798,38 @@ _physics3d_nav_geometry_provider :: proc(
 			pptr, ok := resolve_mesh_collider_pptr(w, c)
 			if !ok do continue
 			tmp_mf := engine.MeshFilter{mesh = pptr}
-			verts, inds, g_ok := engine.mesh_read_cpu_geometry(&tmp_mf, context.temp_allocator)
-			if !g_ok || len(verts) < 3 || len(inds) < 3 do continue
 			s := collider_scale(c.owner)
 			tw := engine.transform_world(c.owner)
 			cw_q := _world_quat(tw.rotation)
 			wc := tw.position + linalg.quaternion128_mul_vector3(cw_q, c.center * s)
 			wq := linalg.normalize(cw_q * _world_quat(c.rotation))
+
+			if part, part_ok := engine.mesh_filter_part(&tmp_mf); part_ok {
+				if bmin, bmax, b_ok := engine.mesh_local_bounds(pptr.guid, part); b_ok && bmin != bmax {
+					lo := bmin * s
+					hi := bmax * s
+					wmin := [3]f32{max(f32), max(f32), max(f32)}
+					wmax := [3]f32{min(f32), min(f32), min(f32)}
+					for ci in 0 ..< 8 {
+						corner := [3]f32{
+							(ci & 1) != 0 ? hi.x : lo.x,
+							(ci & 2) != 0 ? hi.y : lo.y,
+							(ci & 4) != 0 ? hi.z : lo.z,
+						}
+						wp := wc + linalg.quaternion128_mul_vector3(wq, corner)
+						wmin.x = min(wmin.x, wp.x); wmin.y = min(wmin.y, wp.y); wmin.z = min(wmin.z, wp.z)
+						wmax.x = max(wmax.x, wp.x); wmax.y = max(wmax.y, wp.y); wmax.z = max(wmax.z, wp.z)
+					}
+					if wmax.x < aabb_min.x || wmin.x > aabb_max.x ||
+					   wmax.y < aabb_min.y || wmin.y > aabb_max.y ||
+					   wmax.z < aabb_min.z || wmin.z > aabb_max.z {
+						continue
+					}
+				}
+			}
+
+			verts, inds, g_ok := engine.mesh_read_cpu_geometry(&tmp_mf, context.temp_allocator)
+			if !g_ok || len(verts) < 3 || len(inds) < 3 do continue
 			tri_count := len(inds) / 3
 			for ti in 0 ..< tri_count {
 				i0 := int(inds[ti * 3 + 0])
@@ -1309,77 +1335,72 @@ _collect_colliders_for_body :: proc(w: ^engine.World, body_owner: engine.Transfo
 // --- Sync Static Colliders -----------------------------------------------------
 
 _sync_static_colliders :: proc(w: ^engine.World) {
-	_sync_static_group :: proc(w: ^engine.World, owner: engine.Transform_Handle, static_body: ^jolt.BodyID, last_pos: ^[3]f32, last_rot: ^[4]f32) {
+	_sync_one_static :: proc(
+		w:           ^engine.World,
+		owner:       engine.Transform_Handle,
+		shape:       ^^jolt.Shape,
+		static_body: ^jolt.BodyID,
+		last_pos:    ^[3]f32,
+		last_rot:    ^[4]f32,
+		offset:      [3]f32,
+		local_q:     jolt.Quat,
+		channel:     Collision_Channel,
+		fric:        f32,
+		restit:      f32,
+		sensor:      bool,
+	) {
+		_, is_rb := _ancestor_body_owner(w, owner)
+		if is_rb {
+			if is_body_valid(static_body^) {
+				_destroy_body(static_body)
+			}
+			return
+		}
+		if !engine.transform_active_in_hierarchy(owner) do return
+		if shape^ == nil do return
+
 		if is_body_valid(static_body^) {
 			if _state.body_interface != nil {
-				// Fast path for root-level stationary static colliders: avoid recursive transform_world()
-				// and avoid Jolt C FFI BodyInterface_GetPositionAndRotation() when local transform is unchanged!
 				t := engine.pool_get(&w.transforms, engine.Handle(owner))
-				if t != nil && t.parent.handle == {} {
+				if t != nil && t.parent.handle == {} && offset == {} && local_q == jolt.Quat(1) {
 					if linalg.length2(t.position - last_pos^) <= 1e-6 && linalg.length2(t.rotation - last_rot^) <= 1e-5 {
 						return
 					}
 				}
 				tw := engine.transform_world(owner)
-				if linalg.length2(tw.position - last_pos^) <= 1e-6 && linalg.length2(tw.rotation - last_rot^) <= 1e-5 {
+				cw_q := _world_quat(tw.rotation)
+				target_pos := tw.position + linalg.quaternion128_mul_vector3(cw_q, offset)
+				target_rot := linalg.normalize(cw_q * local_q)
+				target_rot_arr := transmute([4]f32)target_rot
+				if linalg.length2(target_pos - last_pos^) <= 1e-6 && linalg.length2(target_rot_arr - last_rot^) <= 1e-5 {
 					return
 				}
 				if jolt.BodyInterface_IsAdded(_state.body_interface, static_body^) {
-					target_pos := tw.position
-					target_rot := _world_quat(tw.rotation)
 					jolt.BodyInterface_SetPositionAndRotation(_state.body_interface, static_body^, &target_pos, &target_rot, .Activate)
-					last_pos^ = tw.position
-					last_rot^ = tw.rotation
+					last_pos^ = target_pos
+					last_rot^ = target_rot_arr
 				}
 			}
 			return
 		}
-		if !engine.transform_active_in_hierarchy(owner) do return
-		_, is_rb := _ancestor_body_owner(w, owner)
-		if is_rb do return // attached to a dynamic/kinematic Rigidbody
-
-		subs := _collect_colliders_for_body(w, owner)
-		if len(subs) == 0 do return
-
-		shape: ^jolt.Shape
-		if len(subs) == 1 {
-			if subs[0].pos == {} && subs[0].rot == jolt.Quat(1) {
-				shape = subs[0].shape
-			} else {
-				pos := subs[0].pos
-				rot := subs[0].rot
-				shape = auto_cast jolt.RotatedTranslatedShape_Create(&pos, &rot, subs[0].shape)
-			}
-		} else {
-			settings := jolt.StaticCompoundShapeSettings_Create()
-			for sub in subs {
-				pos := sub.pos
-				rot := sub.rot
-				jolt.CompoundShapeSettings_AddShape2(auto_cast settings, &pos, &rot, sub.shape, 0)
-			}
-			shape = auto_cast jolt.StaticCompoundShape_Create(settings)
-		}
-		if shape == nil do return
 
 		tw := engine.transform_world(owner)
-		pos := tw.position
-		rot := _world_quat(tw.rotation)
-		static_layer := LAYER_TRIGGER_SENSOR if subs[0].sensor else jolt.ObjectLayer(min(u8(subs[0].channel), u8(NUM_LAYERS - 1)))
-		def := jolt.BodyCreationSettings_Create3(shape, &pos, &rot, .Static, static_layer)
+		cw_q := _world_quat(tw.rotation)
+		body_pos := tw.position + linalg.quaternion128_mul_vector3(cw_q, offset)
+		body_rot := linalg.normalize(cw_q * local_q)
+		static_layer := LAYER_TRIGGER_SENSOR if sensor else jolt.ObjectLayer(min(u8(channel), u8(NUM_LAYERS - 1)))
+		def := jolt.BodyCreationSettings_Create3(shape^, &body_pos, &body_rot, .Static, static_layer)
 		if def == nil do return
 		jolt.BodyCreationSettings_SetUserData(def, transmute(u64)engine.Handle(owner))
-		if subs[0].fric > 0 do jolt.BodyCreationSettings_SetFriction(def, subs[0].fric)
-		if subs[0].restit > 0 do jolt.BodyCreationSettings_SetRestitution(def, subs[0].restit)
-		if subs[0].sensor do jolt.BodyCreationSettings_SetIsSensor(def, true)
+		if fric > 0 do jolt.BodyCreationSettings_SetFriction(def, fric)
+		if restit > 0 do jolt.BodyCreationSettings_SetRestitution(def, restit)
+		if sensor do jolt.BodyCreationSettings_SetIsSensor(def, true)
 
 		static_body^ = jolt.BodyInterface_CreateAndAddBody(_state.body_interface, def, .DontActivate)
 		jolt.BodyCreationSettings_Destroy(def)
-		last_pos^ = tw.position
-		last_rot^ = tw.rotation
-
-		for sub in subs {
-			_state.shape_owner[transmute(uintptr)sub.shape] = sub.owner
-		}
+		last_pos^ = body_pos
+		last_rot^ = transmute([4]f32)body_rot
+		_state.shape_owner[transmute(uintptr)shape^] = owner
 	}
 
 	{
@@ -1387,10 +1408,17 @@ _sync_static_colliders :: proc(w: ^engine.World) {
 		for c, _ in engine.pool_next(&it) {
 			if !c.enabled do continue
 			if !engine.pool_valid(&w.transforms, engine.Handle(c.owner)) || !engine.transform_active_in_hierarchy(c.owner) do continue
-			if is_body_valid(c.static_body) && c.size != c.last_size {
+			s := collider_scale(c.owner)
+			if is_body_valid(c.static_body) && (c.size != c.last_size || linalg.length2(s - c.last_scale) > 1e-6) {
 				_destroy_shape(&c.shape, &c.static_body)
 			}
-			_sync_static_group(w, c.owner, &c.static_body, &c.last_sync_pos, &c.last_sync_rot)
+			if _, is_rb := _ancestor_body_owner(w, c.owner); !is_rb && c.shape == nil {
+				c.shape = _create_box_shape(c, s)
+				c.last_size = c.size
+				c.last_scale = s
+			}
+			_, center := box_scaled(c, s)
+			_sync_one_static(w, c.owner, &c.shape, &c.static_body, &c.last_sync_pos, &c.last_sync_rot, center, _world_quat(c.rotation), c.channel, c.friction, c.bounciness, c.is_trigger)
 		}
 	}
 	{
@@ -1398,10 +1426,17 @@ _sync_static_colliders :: proc(w: ^engine.World) {
 		for c, _ in engine.pool_next(&it) {
 			if !c.enabled do continue
 			if !engine.pool_valid(&w.transforms, engine.Handle(c.owner)) || !engine.transform_active_in_hierarchy(c.owner) do continue
-			if is_body_valid(c.static_body) && abs(c.radius - c.last_radius) > 1e-6 {
+			s := collider_scale(c.owner)
+			if is_body_valid(c.static_body) && (abs(c.radius - c.last_radius) > 1e-6 || linalg.length2(s - c.last_scale) > 1e-6) {
 				_destroy_shape(&c.shape, &c.static_body)
 			}
-			_sync_static_group(w, c.owner, &c.static_body, &c.last_sync_pos, &c.last_sync_rot)
+			if _, is_rb := _ancestor_body_owner(w, c.owner); !is_rb && c.shape == nil {
+				c.shape = _create_sphere_shape(c, s)
+				c.last_radius = c.radius
+				c.last_scale = s
+			}
+			_, center := sphere_scaled(c, s)
+			_sync_one_static(w, c.owner, &c.shape, &c.static_body, &c.last_sync_pos, &c.last_sync_rot, center, jolt.Quat(1), c.channel, c.friction, c.bounciness, c.is_trigger)
 		}
 	}
 	{
@@ -1409,10 +1444,20 @@ _sync_static_colliders :: proc(w: ^engine.World) {
 		for c, _ in engine.pool_next(&it) {
 			if !c.enabled do continue
 			if !engine.pool_valid(&w.transforms, engine.Handle(c.owner)) || !engine.transform_active_in_hierarchy(c.owner) do continue
-			if is_body_valid(c.static_body) && (abs(c.radius - c.last_radius) > 1e-6 || abs(c.height - c.last_height) > 1e-6 || c.direction != c.last_dir) {
+			s := collider_scale(c.owner)
+			if is_body_valid(c.static_body) && (abs(c.radius - c.last_radius) > 1e-6 || abs(c.height - c.last_height) > 1e-6 || c.direction != c.last_dir || linalg.length2(s - c.last_scale) > 1e-6) {
 				_destroy_shape(&c.shape, &c.static_body)
 			}
-			_sync_static_group(w, c.owner, &c.static_body, &c.last_sync_pos, &c.last_sync_rot)
+			if _, is_rb := _ancestor_body_owner(w, c.owner); !is_rb && c.shape == nil {
+				c.shape = _create_capsule_shape(c, s)
+				c.last_radius = c.radius
+				c.last_height = c.height
+				c.last_dir = c.direction
+				c.last_scale = s
+			}
+			_, _, center := capsule_scaled(c, s)
+			cap_q := _capsule_rot(c.direction) * _world_quat(c.rotation)
+			_sync_one_static(w, c.owner, &c.shape, &c.static_body, &c.last_sync_pos, &c.last_sync_rot, center, cap_q, c.channel, c.friction, c.bounciness, c.is_trigger)
 		}
 	}
 	{
@@ -1420,13 +1465,21 @@ _sync_static_colliders :: proc(w: ^engine.World) {
 		for c, _ in engine.pool_next(&it) {
 			if !c.enabled do continue
 			if !engine.pool_valid(&w.transforms, engine.Handle(c.owner)) || !engine.transform_active_in_hierarchy(c.owner) do continue
+			s := collider_scale(c.owner)
 			if is_body_valid(c.static_body) {
 				pptr, _ := resolve_mesh_collider_pptr(w, c)
-				if pptr.guid != c.last_mesh_guid || c.convex != c.last_convex {
+				if pptr.guid != c.last_mesh_guid || c.convex != c.last_convex || linalg.length2(s - c.last_scale) > 1e-6 {
 					_destroy_shape(&c.shape, &c.static_body)
 				}
 			}
-			_sync_static_group(w, c.owner, &c.static_body, &c.last_sync_pos, &c.last_sync_rot)
+			if _, is_rb := _ancestor_body_owner(w, c.owner); !is_rb && c.shape == nil {
+				pptr, _ := resolve_mesh_collider_pptr(w, c)
+				c.shape = _create_mesh_shape(w, c, s, false)
+				c.last_mesh_guid = pptr.guid
+				c.last_convex = c.convex
+				c.last_scale = s
+			}
+			_sync_one_static(w, c.owner, &c.shape, &c.static_body, &c.last_sync_pos, &c.last_sync_rot, c.center * s, _world_quat(c.rotation), c.channel, c.friction, c.bounciness, c.is_trigger)
 		}
 	}
 }

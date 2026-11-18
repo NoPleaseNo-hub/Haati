@@ -4,7 +4,7 @@ package cad_csg_editor
 // UV TOOL SUITE & 2D UV EDITOR WINDOW
 // ============================================================================
 // Complete UV Mapping, Unwrapping, Island Packing, Seams & 2D Visual UV Editor
-// for MoonHug CAD Polygon Meshes & Unreal Modeling Mode workflows.
+// for Haati CAD Polygon Meshes & Unreal Modeling Mode workflows.
 
 import "base:runtime"
 import "core:fmt"

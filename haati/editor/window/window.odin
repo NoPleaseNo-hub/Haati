@@ -437,8 +437,8 @@ uses_independent_pane_zoom :: proc(id: string) -> bool {
 	// so toolbars, headers, trees & buttons never distort or clip!
 	return id == "odin_micro_studio" ||
 	       id == "mh_visual_script" ||
-	       id == "void_file_explorer" ||
-	       id == "void_material_editor"
+	       id == "file_explorer" ||
+	       id == "material_editor"
 }
 
 // One call per editor frame, after the built-in views. Removal happens here,

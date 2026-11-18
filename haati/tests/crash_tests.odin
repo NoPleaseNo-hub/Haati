@@ -29,7 +29,7 @@ test_crash_journal_writes_reason_and_breadcrumb :: proc(t: ^testing.T) {
 	if rerr != nil do return
 	text := string(data)
 
-	testing.expect(t, strings.contains(text, "MoonHug crash"), "header")
+	testing.expect(t, strings.contains(text, "Haati crash"), "header")
 	testing.expect(t, strings.contains(text, "version: 1.2.3-test\n"), "version line, newline trimmed")
 	testing.expect(t, strings.contains(text, "time: 20"), "crash time line")
 	testing.expect(t, strings.contains(text, " UTC\n"), "time is UTC-stamped")

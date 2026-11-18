@@ -2839,7 +2839,7 @@ connect_material_editor_to_path :: proc(mat_path: string) {
 	}
 }
 
-@(editor_window={id="void_material_editor", title="Material Shader Graph", icon="PALETTE", width=980, height=700})
+@(editor_window={id="material_editor", title="Material Shader Graph", icon="PALETTE", width=980, height=700})
 void_material_editor_window_draw :: proc() {
 	_draw_void_material_editor_impl()
 }
@@ -3224,5 +3224,5 @@ _draw_void_material_editor_impl :: proc() {
 
 @(menu_item={path="Window/Material Shader Graph", shortcut=""})
 void_material_editor_window_open :: proc() {
-	wnd.open("void_material_editor")
+	wnd.open("material_editor")
 }

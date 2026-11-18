@@ -130,7 +130,7 @@ field_edit_begin :: proc(
 			field_ptr = field_ptr,
 			field_tid = field_tid,
 			before    = before_json,
-			after     = undo.capture_json(field_ptr, field_tid),
+			after     = undo.capture_json(field_ptr, field_tid, context.temp_allocator),
 		}
 		restore = _rollback_to_before
 		restore_after = _rollback_to_after
@@ -144,10 +144,8 @@ field_edit_begin :: proc(
 		active    = true,
 	}
 	// The rollback is live only for the duration of edit_session_begin, which has
-	// returned. Clearing is unconditional: `before` is the CALLER's buffer and is
-	// deleted when the row returns, so leaving it set here leaves a dangling
-	// pointer behind a proc that is still callable.
-	if _rollback.after != nil do delete(_rollback.after)
+	// returned. Clearing is unconditional: `before` is the CALLER's buffer on the
+	// temp allocator, so leaving it set here leaves a dangling reference after frame reset.
 	_rollback = {}
 
 	_field_edit_capture_start(field_ptr, field_tid, before_json)
@@ -347,9 +345,7 @@ field_edit_row :: proc(
 	// Pickers need it for a related reason: their value lands from a popup with
 	// no gesture at all, so this is the only "before" that exists.
 	picker := _is_picker_type(field_tid)
-	owns_before := pre_before == nil
-	before := owns_before ? undo.capture_json(field_ptr, field_tid) : pre_before
-	defer if owns_before && before != nil do delete(before)
+	before := pre_before != nil ? pre_before : undo.capture_json(field_ptr, field_tid, context.temp_allocator)
 
 	// The drawer runs inside a group. imgui's EndGroup forwards the active
 	// item, its deactivation and its edited flag to the group, so the item
@@ -431,9 +427,8 @@ field_edit_row :: proc(
 @(private = "file")
 _changed_since :: proc(field_ptr: rawptr, tid: typeid, before: []byte) -> bool {
 	if before == nil do return false
-	now := undo.capture_json(field_ptr, tid)
+	now := undo.capture_json(field_ptr, tid, context.temp_allocator)
 	if now == nil do return false
-	defer delete(now)
 	return !slice.equal(before, now)
 }
 

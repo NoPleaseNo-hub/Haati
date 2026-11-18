@@ -25,7 +25,7 @@ import "core:strings"
 import im "haati:external/odin-imgui"
 import engine "haati:engine"
 import tween "haati:packages/tween"
-import ng "haati:packages/node_graph"
+import nc "haati:editor/node_canvas"
 import "haati:editor/inspector"
 import "haati:editor/undo"
 import wnd "haati:editor/window"
@@ -33,7 +33,7 @@ import "haati:editor/widgets"
 
 @(private = "file")
 _state: struct {
-	view: ng.View,
+	view: nc.Tree_View,
 
 	target:     engine.Handle,
 	root_idx:   int,
@@ -87,8 +87,8 @@ tween_graph_window_draw :: proc() {
 	im.Separator()
 
 	walked := make([dynamic]_Walked, context.temp_allocator)
-	nodes := make([dynamic]ng.Node, context.temp_allocator)
-	links := make([dynamic]ng.Link, context.temp_allocator)
+	nodes := make([dynamic]nc.Tree_Node, context.temp_allocator)
+	links := make([dynamic]nc.Tree_Link, context.temp_allocator)
 	_walk(roots[_state.root_idx].value, -1, -1, &walked, &nodes, &links, 0)
 
 	parents := make([]int, len(walked), context.temp_allocator)
@@ -96,7 +96,7 @@ tween_graph_window_draw :: proc() {
 
 	sel_idx := -1
 	if _state.sel_active {
-		sel_idx = ng.tree_find_path(parents, 0, _state.sel_path[:_state.sel_depth])
+		sel_idx = nc.tree_find_path(parents, 0, _state.sel_path[:_state.sel_depth])
 	}
 	if sel_idx >= 0 {
 		nodes[sel_idx].selected = true
@@ -104,25 +104,25 @@ tween_graph_window_draw :: proc() {
 		_state.sel_active = false
 	}
 
-	ng.layout_tree(nodes[:], links[:])
+	nc.tree_layout(nodes[:], links[:])
 
 	PANEL_W :: 280
 	avail := im.GetContentRegionAvail()
 	canvas_w := max(120, avail.x - PANEL_W - 8)
 
 	if !_state.framed && len(nodes) > 0 {
-		ng.frame_all(&_state.view, nodes[:], {canvas_w, avail.y})
+		nc.tree_frame_all(&_state.view, nodes[:], {canvas_w, avail.y})
 		_state.framed = true
 	}
 
 	if im.BeginChild("##tween_canvas", im.Vec2{canvas_w, avail.y}, {.Borders}) {
-		result := ng.draw(&_state.view, nodes[:], links[:])
+		result := nc.tree_draw(&_state.view, nodes[:], links[:])
 		if result.clicked_valid {
 			// Node identity on the canvas is the walk index — stable within
 			// the frame, and the persisted selection is the path.
 			i := int(uintptr(result.clicked))
 			if i >= 0 && i < len(walked) {
-				_state.sel_depth = ng.tree_path_of(parents, i, _state.sel_path[:])
+				_state.sel_depth = nc.tree_path_of(parents, i, _state.sel_path[:])
 				_state.sel_active = true
 				sel_idx = i
 			}
@@ -297,8 +297,8 @@ _walk :: proc(
 	parent: int,
 	child_ord: int,
 	walked: ^[dynamic]_Walked,
-	nodes: ^[dynamic]ng.Node,
-	links: ^[dynamic]ng.Link,
+	nodes: ^[dynamic]nc.Tree_Node,
+	links: ^[dynamic]nc.Tree_Link,
 	depth: int,
 ) {
 	if depth > 64 do return
@@ -310,14 +310,14 @@ _walk :: proc(
 	skip, subtitle := _base_summary(v)
 
 	append(walked, _Walked{value = v, tid = tid, parent = parent, child_ord = child_ord})
-	append(nodes, ng.Node{
-		user_handle  = ng.User_Handle(uintptr(idx)),
+	append(nodes, nc.Tree_Node{
+		user_handle  = nc.Tree_User_Handle(uintptr(idx)),
 		title        = title,
 		subtitle     = subtitle,
 		header_color = _color_for(tid),
 		dimmed       = skip,
 	})
-	if parent >= 0 do append(links, ng.Link{from = parent, to = idx})
+	if parent >= 0 do append(links, nc.Tree_Link{from = parent, to = idx})
 
 	if children, kok := tween.authored_children(v); kok {
 		for child, i in children {

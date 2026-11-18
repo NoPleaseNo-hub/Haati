@@ -107,6 +107,7 @@ ICON_MD_DELETE             :: "\ue92e"   // delete
 ICON_MD_CHECK         :: "\ue668"   // check
 ICON_MD_EDIT          :: "\uf097"   // edit
 ICON_MD_CONTENT_COPY  :: "\ue14d"   // content_copy
+ICON_MD_CONTENT_CUT   :: "\ue14e"   // content_cut
 ICON_MD_CONTENT_PASTE :: "\ue14f"   // content_paste
 ICON_MD_MORE_HORIZ    :: "\ue5d3"   // more_horiz
 ICON_MD_MENU          :: "\ue5d4"   // menu ("..." dropdown / overflow menu)

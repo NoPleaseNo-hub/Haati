@@ -25,7 +25,7 @@ import control_rig "haati:packages/control_rig"
 import physics3d "haati:packages/physics3d"
 
 // ─────────────────────────────────────────────────────────────
-// VOID HIERARCHY — GODOT & UNREAL STYLE SCENE TREE DOCK
+// HIERARCHY — SCENE TREE DOCK
 // ─────────────────────────────────────────────────────────────
 // High-performance, zero-garbage, cache-friendly scene hierarchy.
 // Features:
@@ -33,11 +33,15 @@ import physics3d "haati:packages/physics3d"
 // 2. Component/Type Badges (Camera, Light, Mesh, Script, Physics, Audio, Rig)
 // 3. Full keyboard shortcuts: Delete, F2, Ctrl+C, Ctrl+V, Ctrl+D, Type-Ahead (A-Z)
 // 4. Unreal-style folder & node color coding
-// 5. Drag & Drop reparenting + dropping assets from Void File Explorer
+// 5. Drag & Drop reparenting + dropping assets from File Explorer
 // ─────────────────────────────────────────────────────────────
 
 @(private = "file") _vh_filter_buf:          [128]u8
 @(private = "file") _vh_selected_tH:         engine.Transform_Handle = {}
+@(private = "file") _vh_rename_target_tH:    engine.Transform_Handle = {}
+@(private = "file") _vh_ping_flash_tH:       engine.Transform_Handle = {}
+@(private = "file") _vh_ping_flash_timer:    f32 = 0.0
+@(private = "file") _vh_scroll_to_ping_tH:   engine.Transform_Handle = {}
 @(private = "file") _vh_scroll_to_selected:  bool = false
 @(private = "file") _vh_force_close_all:     bool = false
 
@@ -50,7 +54,7 @@ import physics3d "haati:packages/physics3d"
 @(private = "file") _vh_node_colors:         map[engine.Local_ID][4]f32
 
 // Scene tree state & selection persistence across editor sessions
-Void_Hierarchy_Scene_State :: struct {
+Hierarchy_Scene_State :: struct {
 	scene_path:          string,
 	active_local_id:     i64,
 	active_name:         string,
@@ -58,13 +62,13 @@ Void_Hierarchy_Scene_State :: struct {
 	collapsed_local_ids: [dynamic]i64,
 }
 
-Void_Hierarchy_Prefs :: struct {
+Hierarchy_Prefs :: struct {
 	last_scene_path: string,
-	scenes:          [dynamic]Void_Hierarchy_Scene_State,
+	scenes:          [dynamic]Hierarchy_Scene_State,
 }
 
-@(user_settings={name="Void Hierarchy"})
-void_hierarchy_prefs: Void_Hierarchy_Prefs
+@(user_settings={name="Hierarchy"})
+hierarchy_prefs: Hierarchy_Prefs
 
 @(private = "file") _vh_open_nodes:            map[engine.Local_ID]bool
 @(private = "file") _vh_pending_open_nodes:    map[engine.Transform_Handle]bool
@@ -424,15 +428,15 @@ _vh_restore_scene_state :: proc(scene: ^engine.Scene) {
 
 	// Find saved state entry
 	entry_idx := -1
-	for s, i in void_hierarchy_prefs.scenes {
-		if s.scene_path == path_key || (len(void_hierarchy_prefs.scenes) == 1 && (s.scene_path == "" || path_key == "default")) {
+	for s, i in hierarchy_prefs.scenes {
+		if s.scene_path == path_key || (len(hierarchy_prefs.scenes) == 1 && (s.scene_path == "" || path_key == "default")) {
 			entry_idx = i
 			break
 		}
 	}
 	if entry_idx == -1 do return
 
-	st := &void_hierarchy_prefs.scenes[entry_idx]
+	st := &hierarchy_prefs.scenes[entry_idx]
 
 	// Restore expansion states
 	for lid in st.expanded_local_ids {
@@ -460,7 +464,7 @@ _vh_restore_scene_state :: proc(scene: ^engine.Scene) {
 		_vh_reveal_ancestors(target_h)
 		_vh_select_node(target_h)
 		_vh_scroll_to_selected = true
-		fmt.printfln("[Void Hierarchy] Restored scene state for '%s': selected '%s' (local_id: %d)", path_key, st.active_name, st.active_local_id)
+		fmt.printfln("[Hierarchy] Restored scene state for '%s': selected '%s' (local_id: %d)", path_key, st.active_name, st.active_local_id)
 	}
 }
 
@@ -470,24 +474,24 @@ _vh_sync_scene_state :: proc(scene: ^engine.Scene) {
 	path_key := _vh_scene_key(scene)
 
 	entry_idx := -1
-	for s, i in void_hierarchy_prefs.scenes {
+	for s, i in hierarchy_prefs.scenes {
 		if s.scene_path == path_key {
 			entry_idx = i
 			break
 		}
 	}
 	if entry_idx == -1 {
-		new_state := Void_Hierarchy_Scene_State{
+		new_state := Hierarchy_Scene_State{
 			scene_path = strings.clone(path_key),
 		}
-		append(&void_hierarchy_prefs.scenes, new_state)
-		entry_idx = len(void_hierarchy_prefs.scenes) - 1
+		append(&hierarchy_prefs.scenes, new_state)
+		entry_idx = len(hierarchy_prefs.scenes) - 1
 	}
 
-	st := &void_hierarchy_prefs.scenes[entry_idx]
-	if void_hierarchy_prefs.last_scene_path != path_key {
-		if len(void_hierarchy_prefs.last_scene_path) > 0 do delete(void_hierarchy_prefs.last_scene_path)
-		void_hierarchy_prefs.last_scene_path = strings.clone(path_key)
+	st := &hierarchy_prefs.scenes[entry_idx]
+	if hierarchy_prefs.last_scene_path != path_key {
+		if len(hierarchy_prefs.last_scene_path) > 0 do delete(hierarchy_prefs.last_scene_path)
+		hierarchy_prefs.last_scene_path = strings.clone(path_key)
 	}
 
 	// Update active selection
@@ -520,7 +524,7 @@ _vh_save_prefs :: proc(scene: ^engine.Scene) {
 	if scene != nil {
 		_vh_sync_scene_state(scene)
 	}
-	engine.user_settings_save("Void Hierarchy", &void_hierarchy_prefs, typeid_of(Void_Hierarchy_Prefs))
+	engine.user_settings_save("Hierarchy", &hierarchy_prefs, typeid_of(Hierarchy_Prefs))
 }
 
 @(private = "file")
@@ -538,7 +542,7 @@ _vh_tick_save :: proc(scene: ^engine.Scene, dt: f32) {
 // OPERATIONS & KEYBOARD SHORTCUTS
 // ─────────────────────────────────────────────────────────────
 
-@(private = "file")
+@(private = "package")
 _vh_select_node :: proc(tH: engine.Transform_Handle, ping: bool = false) {
 	_vh_selected_tH = tH
 	_vh_anchor_tH = tH
@@ -639,37 +643,69 @@ _vh_range_select_node :: proc(target: engine.Transform_Handle) {
 }
 
 @(private = "file")
-_vh_delete_selected :: proc() {
-	all_sel := engine.inspector_selection_all()
+_vh_nested_removal_target :: proc(tH: engine.Transform_Handle) -> (host: engine.Transform_Handle, obj_lid: engine.Local_ID, scene: ^engine.Scene, ok: bool) {
 	w := engine.ctx_world()
-	if w == nil do return
+	if w == nil do return {}, 0, nil, false
+	t := engine.pool_get(&w.transforms, engine.Handle(tH))
+	if t == nil do return {}, 0, nil, false
+	parent_nested := false
+	if pt := engine.pool_get(&w.transforms, t.parent.handle); pt != nil {
+		parent_nested = pt.nested_owned || engine.scene_find_nested_scene_for_host(pt.scene, engine.Transform_Handle(t.parent.handle)) != nil
+	}
+	if !t.nested_owned && !parent_nested do return {}, 0, nil, false
+	h := engine.transform_immediate_nested_host(tH)
+	if h == {} do return {}, 0, nil, false
+	return h, t.local_id, t.scene, true
+}
+
+@(private = "package")
+_vh_delete_handles :: proc(raw_targets: []engine.Transform_Handle) {
+	w := engine.ctx_world()
+	if w == nil || len(raw_targets) == 0 do return
+
+	valid_raw := make([dynamic]engine.Transform_Handle, context.temp_allocator)
+	for h in raw_targets {
+		if h == {} || !engine.pool_valid(&w.transforms, engine.Handle(h)) do continue
+		t := engine.pool_get(&w.transforms, engine.Handle(h))
+		if t == nil || t.parent.handle == {} do continue
+		append(&valid_raw, h)
+	}
+	if len(valid_raw) == 0 do return
 
 	targets := make([dynamic]engine.Transform_Handle, context.temp_allocator)
-	if len(all_sel) > 0 {
-		for h in all_sel {
-			if !engine.pool_valid(&w.transforms, engine.Handle(h)) do continue
-			t := engine.pool_get(&w.transforms, engine.Handle(h))
-			if t == nil || t.parent.handle == {} do continue
+	for h in valid_raw {
+		has_sel_ancestor := false
+		for other in valid_raw {
+			if other != h && _vh_is_ancestor(other, h) {
+				has_sel_ancestor = true
+				break
+			}
+		}
+		if !has_sel_ancestor {
 			append(&targets, h)
 		}
-	} else if _vh_selected_tH != {} && engine.pool_valid(&w.transforms, engine.Handle(_vh_selected_tH)) {
-		t := engine.pool_get(&w.transforms, engine.Handle(_vh_selected_tH))
-		if t != nil && t.parent.handle != {} {
-			append(&targets, _vh_selected_tH)
-		}
 	}
-
 	if len(targets) == 0 do return
 
 	g := undo.group_begin("Delete Selected")
 	defer undo.group_end(&g)
 	undo.record_selection_snapshot()
 
+	deleted := 0
 	for h in targets {
 		if !engine.pool_valid(&w.transforms, engine.Handle(h)) do continue
+		nested_host, obj_lid, scene, is_prefab_content := _vh_nested_removal_target(h)
 		undo.record_delete(h)
+		if is_prefab_content {
+			if _, ok := engine.nested_scene_record_object_removed(scene, nested_host, obj_lid); ok {
+				undo.record_object_removed_on_instance(scene, nested_host, obj_lid)
+			}
+		}
+		deleted += 1
 	}
-	undo.group_commit(&g)
+	if deleted > 0 {
+		undo.group_commit(&g)
+	}
 
 	_vh_selected_tH = {}
 	_vh_anchor_tH = {}
@@ -680,25 +716,41 @@ _vh_delete_selected :: proc() {
 }
 
 @(private = "file")
+_vh_delete_selected :: proc() {
+	all_sel := engine.inspector_selection_all()
+	targets := make([dynamic]engine.Transform_Handle, context.temp_allocator)
+	if len(all_sel) > 0 {
+		for h in all_sel do append(&targets, h)
+	} else if _vh_selected_tH != {} {
+		append(&targets, _vh_selected_tH)
+	}
+	_vh_delete_handles(targets[:])
+}
+
+@(private = "file")
 _vh_begin_rename :: proc(tH: engine.Transform_Handle) {
 	if tH == {} do return
 	w := engine.ctx_world()
+	if w == nil do return
 	t := engine.pool_get(&w.transforms, engine.Handle(tH))
 	if t == nil do return
 
+	_vh_rename_target_tH = tH
 	wnd.show_rename_dialog("Rename Entity", t.name, proc(new_name: string) {
+		target := _vh_rename_target_tH
+		_vh_rename_target_tH = {}
 		trimmed := strings.trim_space(new_name)
-		if len(trimmed) == 0 do return
+		if len(trimmed) == 0 || target == {} do return
 		w := engine.ctx_world()
-		active := engine.inspector_active_selection()
-		if active != {} && engine.pool_valid(&w.transforms, engine.Handle(active)) {
-			t := engine.pool_get(&w.transforms, engine.Handle(active))
-			if t != nil {
-				delete(t.name)
-				t.name = strings.clone(trimmed)
-				engine.transform_ensure_unique_name(active)
-				if t.scene != nil do t.scene.dirty = true
-			}
+		if w == nil || !engine.pool_valid(&w.transforms, engine.Handle(target)) do return
+		t := engine.pool_get(&w.transforms, engine.Handle(target))
+		if t != nil && trimmed != t.name {
+			e := undo.edit_begin(target, &t.name, typeid_of(string), "Rename GameObject")
+			delete(t.name)
+			t.name = strings.clone(trimmed)
+			engine.transform_ensure_unique_name(target)
+			undo.edit_end(&e)
+			if t.scene != nil do t.scene.dirty = true
 		}
 	})
 }
@@ -711,7 +763,7 @@ _vh_copy_selected :: proc() {
 
 	data := engine.scene_copy_subtree(_vh_selected_tH)
 	clip.copy_hierarchy(data)
-	fmt.printfln("[Void Hierarchy] Copied entity to clipboard")
+	fmt.printfln("[Hierarchy] Copied entity to clipboard")
 }
 
 @(private = "file")
@@ -733,7 +785,7 @@ _vh_paste_under_selected :: proc() {
 		engine.transform_ensure_unique_name(result)
 		_vh_select_node(result, ping = true)
 		_vh_scroll_to_selected = true
-		fmt.printfln("[Void Hierarchy] Pasted entity")
+		fmt.printfln("[Hierarchy] Pasted entity")
 	}
 }
 
@@ -766,7 +818,7 @@ _vh_duplicate_selected :: proc() {
 			engine.inspector_request_selection_batch(new_handles[:])
 			_vh_selected_tH = new_handles[len(new_handles) - 1]
 			_vh_scroll_to_selected = true
-			fmt.printfln("[Void Hierarchy] Duplicated %d entities", len(new_handles))
+			fmt.printfln("[Hierarchy] Duplicated %d entities", len(new_handles))
 		}
 		return
 	}
@@ -789,7 +841,7 @@ _vh_duplicate_selected :: proc() {
 		undo.group_commit(&g)
 		_vh_select_node(result, ping = true)
 		_vh_scroll_to_selected = true
-		fmt.printfln("[Void Hierarchy] Duplicated entity")
+		fmt.printfln("[Hierarchy] Duplicated entity")
 	}
 }
 
@@ -918,10 +970,27 @@ _vh_attach_component_to_node :: proc(tH: engine.Transform_Handle, key: engine.Ty
 }
 
 @(private = "package")
+_vh_is_custom_script_path :: proc(src_path: string) -> bool {
+	if len(src_path) == 0 do return false
+	norm, _ := strings.replace_all(src_path, "\\", "/", context.temp_allocator)
+	p_lower := strings.to_lower(norm, context.temp_allocator)
+	if engine.has_active_project() {
+		proj_root, _ := strings.replace_all(engine.active_project_root(), "\\", "/", context.temp_allocator)
+		proj_lower := strings.to_lower(strings.trim_right(proj_root, "/"), context.temp_allocator)
+		if len(proj_lower) > 0 && strings.contains(p_lower, proj_lower) do return true
+		if slug := engine.active_project_slug(context.temp_allocator); len(slug) > 0 {
+			slug_lower := strings.to_lower(slug, context.temp_allocator)
+			if strings.contains(p_lower, slug_lower) do return true
+		}
+	}
+	return strings.contains(p_lower, "custom_scripts") || strings.contains(p_lower, "/projects/")
+}
+
+@(private = "package")
 _vh_classify_component_key :: proc(key: engine.TypeKey, src_path: string) -> (category: string, icon: cstring, col: im.Vec4) {
 	p_lower := strings.to_lower(src_path, context.temp_allocator)
-	if strings.contains(p_lower, "void_odin") {
-		return "Void / Custom Scripts", icons.ICON_MD_CODE, {0.20, 0.95, 0.55, 1.0}
+	if _vh_is_custom_script_path(src_path) {
+		return "Custom Scripts", icons.ICON_MD_CODE, {0.20, 0.95, 0.55, 1.0}
 	}
 	if key == .SpringArm3D {
 		return "Physics 3D", icons.ICON_MD_OPEN_WITH, {1.0, 0.72, 0.18, 1.0}
@@ -991,13 +1060,13 @@ _vh_sanitize_odin_subfolder :: proc(raw_folder: string) -> string {
 			}
 		}
 	}
-	for prefix in ([?]string{"../plugins/void_odin/", "plugins/void_odin/", "haati/packages/void_odin/", "packages/void_odin/", "void_odin/"}) {
+	for prefix in ([?]string{"assets/scripts/", "custom_scripts/", "haati/packages/", "packages/"}) {
 		if strings.has_prefix(norm, prefix) {
 			norm = strings.trim(norm[len(prefix):], "/")
 			break
 		}
 	}
-	if norm == "plugins/void_odin" || norm == "void_odin" || norm == "." {
+	if norm == "assets/scripts" || norm == "custom_scripts" || norm == "." {
 		return ""
 	}
 	if len(norm) == 0 do return ""
@@ -1027,7 +1096,7 @@ _vh_default_odin_component_folder :: proc() -> string {
 				return sub
 			}
 		}
-		for marker in ([?]string{"plugins/void_odin", "packages/void_odin"}) {
+		for marker in ([?]string{"assets/scripts", "custom_scripts"}) {
 			if idx := strings.index(dir_norm, marker); idx >= 0 {
 				sub := strings.trim(dir_norm[idx + len(marker):], "/")
 				return _vh_sanitize_odin_subfolder(sub)
@@ -1041,7 +1110,7 @@ _vh_default_odin_component_folder :: proc() -> string {
 _vh_compute_odin_package_name :: proc(rel_sub_folder: string) -> string {
 	clean_sub := _vh_sanitize_odin_subfolder(rel_sub_folder)
 	base_slug := engine.active_project_slug(context.temp_allocator)
-	if len(base_slug) == 0 do base_slug = "void_odin"
+	if len(base_slug) == 0 do base_slug = "custom_scripts"
 	if len(clean_sub) == 0 do return base_slug
 	flat_sub, _ := strings.replace_all(clean_sub, "/", "_", context.temp_allocator)
 	return fmt.tprintf("%s_%s", base_slug, flat_sub)
@@ -1096,7 +1165,7 @@ _vh_create_and_open_odin_component :: proc(struct_name: string, rel_sub_folder: 
 		base_dir = engine.active_project_root()
 	} else {
 		ws_root := file_exp.get_workspace_root()
-		base_dir, _ = filepath.join({ws_root, "plugins", "void_odin"}, context.temp_allocator)
+		base_dir, _ = filepath.join({ws_root, "assets", "scripts"}, context.temp_allocator)
 	}
 	target_dir := base_dir
 	if len(clean_sub) > 0 {
@@ -1324,13 +1393,13 @@ _vh_draw_add_node_menu_items :: proc(force_root: bool = false) {
 		im.EndMenu()
 	}
 
-	// Void / Gameplay Scripts (all components in plugins/void_odin/)
-	if im.BeginMenu(fmt.ctprintf("%s  Void / Custom Scripts", icons.ICON_MD_CODE)) {
+	// Custom Gameplay Scripts (components inside the active project or custom script directories)
+	if im.BeginMenu(fmt.ctprintf("%s  Custom Scripts", icons.ICON_MD_CODE)) {
 		im.PushStyleColorImVec4(.Text, {0.20, 0.95, 0.55, 1.0})
 		for key in engine.TypeKey {
 			if key == engine.INVALID_TYPE_KEY do continue
 			src_path, _, is_comp := inspector.component_source_location(key)
-			if !is_comp || !strings.contains(strings.to_lower(src_path, context.temp_allocator), "void_odin") do continue
+			if !is_comp || !_vh_is_custom_script_path(src_path) do continue
 			cname := fmt.tprintf("%v", key)
 			if im.MenuItem(fmt.ctprintf("%s  %s", icons.ICON_MD_CODE, cname)) {
 				keys := [1]engine.TypeKey{key}
@@ -1442,7 +1511,7 @@ _vh_draw_attach_component_menu :: proc(tH: engine.Transform_Handle, t: ^engine.T
 	im.Separator()
 
 	categories := []string{
-		"Void / Custom Scripts",
+		"Custom Scripts",
 		"Physics 3D",
 		"3D & Rendering",
 		"Animation & Control Rig",
@@ -1846,10 +1915,15 @@ _vh_handle_asset_drop_on_node :: proc(tH: engine.Transform_Handle, sc: ^engine.S
 		guid_id, ok := engine.asset_db_get_guid(db_path)
 		if !ok do guid_id, ok = engine.asset_db_get_guid(asset_path)
 		if ok {
+			g := undo.group_begin("Instantiate Nested Scene")
+			defer undo.group_end(&g)
+			undo.record_selection_snapshot()
 			inst_h := engine.scene_instantiate_guid_nested(engine.Asset_GUID(guid_id), tH)
 			if inst_h != {} {
+				undo.record_create(inst_h, tH)
 				engine.transform_ensure_unique_name(inst_h)
 				if sc != nil do sc.dirty = true
+				undo.group_commit(&g)
 				_vh_select_node(inst_h, ping = true)
 			}
 		}
@@ -1863,12 +1937,17 @@ _vh_handle_asset_drop_on_node :: proc(tH: engine.Transform_Handle, sc: ^engine.S
 			_vh_select_node(tH, ping = false)
 		}
 	} else if strings.has_suffix(lower_path, ".fmesh") {
+		g := undo.group_begin("Spawn Faker Mesh")
+		defer undo.group_end(&g)
+		undo.record_selection_snapshot()
 		new_tH := cad_csg.csg_spawn_faker_mesh_from_binary({0, 0, 0}, asset_path)
 		if new_tH != {} {
 			if tH != {} {
 				engine.transform_set_parent(new_tH, tH, -1, keep_world = false)
 			}
+			undo.record_create(new_tH, tH)
 			if sc != nil do sc.dirty = true
+			undo.group_commit(&g)
 			_vh_select_node(new_tH, ping = true)
 		}
 	} else if strings.has_suffix(lower_path, ".glb") || strings.has_suffix(lower_path, ".gltf") {
@@ -1895,9 +1974,14 @@ _vh_handle_asset_drop_on_node :: proc(tH: engine.Transform_Handle, sc: ^engine.S
 					_vh_select_node(tH, ping = false)
 				} else {
 					stem := filepath.stem(filepath.base(asset_path))
+					g := undo.group_begin("Instantiate glTF Model")
+					defer undo.group_end(&g)
+					undo.record_selection_snapshot()
 					new_tH, _ := control_rig.instantiate_gltf_model_auto(mesh_guid, stem, tH, {}, false)
 					if new_tH != {} {
+						undo.record_create(new_tH, tH)
 						if sc != nil do sc.dirty = true
+						undo.group_commit(&g)
 						_vh_select_node(new_tH, ping = true)
 					}
 				}
@@ -2005,6 +2089,18 @@ _vh_draw_node :: proc(tH: engine.Transform_Handle, sc: ^engine.Scene, filter: st
 		)
 	}
 
+	// Ping flash highlight (when Ping / Ref jump targets this transform)
+	if _vh_ping_flash_timer > 0.0 && tH == _vh_ping_flash_tH {
+		flash_alpha := 0.42 * clamp(_vh_ping_flash_timer / 1.4, 0.0, 1.0)
+		im.DrawList_AddRectFilled(
+			dl,
+			{row_cursor.x - 2.0, row_cursor.y},
+			{col0_max_x, row_cursor.y + row_h - 1.0},
+			im.GetColorU32ImVec4(thm.with_alpha(p.status_warning, flash_alpha)),
+			3.0,
+		)
+	}
+
 	flags := im.TreeNodeFlags{.OpenOnArrow, .SpanAllColumns, .AllowOverlap, .FramePadding}
 	if !has_children do flags += {.Leaf, .NoTreePushOnOpen}
 	if is_sel do flags += {.Selected}
@@ -2056,7 +2152,10 @@ _vh_draw_node :: proc(tH: engine.Transform_Handle, sc: ^engine.Scene, filter: st
 		}
 	}
 
-	if _vh_scroll_to_selected && is_sel {
+	if _vh_scroll_to_ping_tH == tH {
+		im.SetScrollHereY(0.5)
+		_vh_scroll_to_ping_tH = {}
+	} else if _vh_scroll_to_selected && is_sel {
 		im.SetScrollHereY()
 		_vh_scroll_to_selected = false
 	}
@@ -2123,25 +2222,25 @@ _vh_draw_node :: proc(tH: engine.Transform_Handle, sc: ^engine.Scene, filter: st
 			for i in 0 ..< drag_payload.count {
 				drag_payload.handles[i] = all_sel[i]
 			}
-			im.SetDragDropPayload("VOID_HIERARCHY_NODES", &drag_payload, size_of(VH_Drag_Payload))
+			im.SetDragDropPayload("HAATI_HIERARCHY_NODES", &drag_payload, size_of(VH_Drag_Payload))
 			im.TextColoredUnformatted(tag_col, fmt.ctprintf("%s  %s (+%d selected)", badge.icon, t.name, drag_payload.count - 1))
 			im.TextDisabled("-> Drop on another node to reparent all selected")
 		} else {
 			drag_payload.count = 1
 			drag_payload.handles[0] = tH
-			im.SetDragDropPayload("VOID_HIERARCHY_NODES", &drag_payload, size_of(VH_Drag_Payload))
+			im.SetDragDropPayload("HAATI_HIERARCHY_NODES", &drag_payload, size_of(VH_Drag_Payload))
 			single_handle := tH
-			im.SetDragDropPayload("VOID_HIERARCHY_NODE", &single_handle, size_of(engine.Transform_Handle))
+			im.SetDragDropPayload("HAATI_HIERARCHY_NODE", &single_handle, size_of(engine.Transform_Handle))
 			im.TextColoredUnformatted(tag_col, fmt.ctprintf("%s  %s", badge.icon, t.name))
 			im.TextDisabled("-> Drop on another node to reparent")
 		}
 		im.EndDragDropSource()
 	}
 
-	// Drag & Drop Target: Accept other nodes or assets from Void File Explorer
+	// Drag & Drop Target: Accept other nodes or assets from File Explorer
 	if im.BeginDragDropTarget() {
 		// 1. Reparenting (multi-node or single node, keeping world position)
-		if p_nodes := im.AcceptDragDropPayload("VOID_HIERARCHY_NODES", {}); p_nodes != nil && p_nodes.Data != nil {
+		if p_nodes := im.AcceptDragDropPayload("HAATI_HIERARCHY_NODES", {}); p_nodes != nil && p_nodes.Data != nil {
 			payload := (cast(^VH_Drag_Payload)p_nodes.Data)^
 			g := undo.group_begin("Reparent Objects")
 			defer undo.group_end(&g)
@@ -2164,7 +2263,7 @@ _vh_draw_node :: proc(tH: engine.Transform_Handle, sc: ^engine.Scene, filter: st
 				engine.inspector_request_selection_batch(reparented_handles[:])
 				_vh_selected_tH = reparented_handles[len(reparented_handles) - 1]
 			}
-		} else if p_node := im.AcceptDragDropPayload("VOID_HIERARCHY_NODE", {}); p_node != nil && p_node.Data != nil {
+		} else if p_node := im.AcceptDragDropPayload("HAATI_HIERARCHY_NODE", {}); p_node != nil && p_node.Data != nil {
 			dragged_tH := (cast(^engine.Transform_Handle)p_node.Data)^
 			if dragged_tH != tH && dragged_tH != {} && !_vh_is_ancestor(dragged_tH, tH) {
 				g := undo.group_begin("Reparent Object")
@@ -2178,7 +2277,7 @@ _vh_draw_node :: proc(tH: engine.Transform_Handle, sc: ^engine.Scene, filter: st
 			}
 		}
 
-		// 2. Drop asset from Void File Explorer (.scene, .mat, .png/.jpg, .fmesh, .glb/.gltf)
+		// 2. Drop asset from File Explorer (.scene, .mat, .png/.jpg, .fmesh, .glb/.gltf)
 		if p_asset := im.AcceptDragDropPayload("ASSET_PATH", {}); p_asset != nil && p_asset.Data != nil {
 			asset_path := string(([^]byte)(p_asset.Data)[:p_asset.DataSize])
 			_vh_handle_asset_drop_on_node(tH, sc, asset_path)
@@ -2311,8 +2410,15 @@ _vh_draw_node :: proc(tH: engine.Transform_Handle, sc: ^engine.Scene, filter: st
 // MAIN WINDOW ENTRY POINT
 // ─────────────────────────────────────────────────────────────
 
-@(editor_window={id="void_hierarchy", title="Void Hierarchy", icon="LAYERS", width=380, height=620})
-void_hierarchy_window_draw :: proc() {
+@(editor_window={id="hierarchy", title="Hierarchy", icon="LAYERS", width=380, height=620})
+hierarchy_window_draw :: proc() {
+	if _vh_ping_flash_timer > 0.0 {
+		_vh_ping_flash_timer = max(0.0, _vh_ping_flash_timer - im.GetIO().DeltaTime)
+		if _vh_ping_flash_timer <= 0.0 {
+			_vh_ping_flash_tH = {}
+		}
+	}
+
 	scene := engine.sm_scene_get_active()
 	if scene != nil {
 		if !engine.application_is_playing() {
@@ -2330,6 +2436,16 @@ void_hierarchy_window_draw :: proc() {
 			}
 		}
 		_vh_restore_scene_state(scene)
+	}
+
+	if ping_h, pok := engine.inspector_take_pending_ping(); pok {
+		_vh_reveal_ancestors(ping_h)
+		_vh_ping_flash_tH = ping_h
+		_vh_ping_flash_timer = 1.4
+		_vh_scroll_to_ping_tH = ping_h
+	}
+	if ren_h, rok := engine.hierarchy_take_pending_rename(); rok {
+		_vh_begin_rename(ren_h)
 	}
 
 	// Sync external selection from editor
@@ -2354,7 +2470,7 @@ void_hierarchy_window_draw :: proc() {
 	}
 
 	// Keyboard shortcuts (Del, F2, Ctrl+C, Ctrl+V, Ctrl+D, A-Z letter jump)
-	// Only active when the cursor is hovering Void Hierarchy so WASD in Scene3D never jumps between objects.
+	// Only active when the cursor is hovering Hierarchy so WASD in Scene3D never jumps between objects.
 	if im.IsWindowHovered(im.HoveredFlags_RootAndChildWindows) && !im.IsMouseDown(.Right) {
 		_vh_handle_keyboard_shortcuts()
 	}
@@ -2600,7 +2716,7 @@ void_hierarchy_window_draw :: proc() {
 	im.PushStyleColorImVec4(.HeaderHovered, thm.with_alpha(p.accent, p.is_light ? 0.20 : 0.26))
 	im.PushStyleColorImVec4(.HeaderActive, thm.with_alpha(p.accent, p.is_light ? 0.28 : 0.34))
 
-	if im.BeginTable("##VoidHierarchyTreeTable", 4, flags, {0, table_h}) {
+	if im.BeginTable("##HierarchyTreeTable", 4, flags, {0, table_h}) {
 		im.TableSetupColumn("Scene Hierarchy", {.WidthStretch}, 1.0)
 		im.TableSetupColumn(fmt.ctprintf(" %s ##ColCode", icons.ICON_MD_CODE), {.WidthFixed}, icon_col_w)
 		im.TableSetupColumn(fmt.ctprintf(" %s ##ColLock", icons.ICON_MD_LOCK), {.WidthFixed}, icon_col_w)
@@ -2651,7 +2767,7 @@ void_hierarchy_window_draw :: proc() {
 	}
 	_vh_force_close_all = false
 
-	// Guaranteed empty-space right-click anywhere in Void Hierarchy (inside table empty space or window background)
+	// Guaranteed empty-space right-click anywhere in Hierarchy (inside table empty space or window background)
 	// when not right-clicking on a node: selects Root and opens the Root Add Node popup!
 	if im.IsWindowHovered(im.HoveredFlags_RootAndChildWindows) &&
 	   im.IsMouseReleased(.Right) &&
@@ -2673,7 +2789,7 @@ void_hierarchy_window_draw :: proc() {
 
 	// Empty space drop target: reparent to scene root (keep_world = true)
 	if im.BeginDragDropTarget() {
-		if p_nodes := im.AcceptDragDropPayload("VOID_HIERARCHY_NODES", {}); p_nodes != nil && p_nodes.Data != nil {
+		if p_nodes := im.AcceptDragDropPayload("HAATI_HIERARCHY_NODES", {}); p_nodes != nil && p_nodes.Data != nil {
 			payload := (cast(^VH_Drag_Payload)p_nodes.Data)^
 			g := undo.group_begin("Reparent to Root")
 			defer undo.group_end(&g)
@@ -2696,7 +2812,7 @@ void_hierarchy_window_draw :: proc() {
 				engine.inspector_request_selection_batch(reparented_handles[:])
 				_vh_selected_tH = reparented_handles[len(reparented_handles) - 1]
 			}
-		} else if p_node := im.AcceptDragDropPayload("VOID_HIERARCHY_NODE", {}); p_node != nil && p_node.Data != nil {
+		} else if p_node := im.AcceptDragDropPayload("HAATI_HIERARCHY_NODE", {}); p_node != nil && p_node.Data != nil {
 			dragged_tH := (cast(^engine.Transform_Handle)p_node.Data)^
 			if dragged_tH != {} && dragged_tH != root_tH {
 				g := undo.group_begin("Reparent to Root")
@@ -2856,7 +2972,7 @@ _vh_record_recent_scene :: proc(path: string) {
 _vh_switch_to_scene_path :: proc(raw_path: string) -> bool {
 	disk_path := _vh_normalize_scene_disk_path(raw_path, context.temp_allocator)
 	if len(disk_path) == 0 || !os.exists(disk_path) {
-		fmt.printfln("[Void Hierarchy] Cannot switch to scene (file not found): '%s'", raw_path)
+		fmt.printfln("[Hierarchy] Cannot switch to scene (file not found): '%s'", raw_path)
 		return false
 	}
 
@@ -2885,19 +3001,19 @@ _vh_switch_to_scene_path :: proc(raw_path: string) -> bool {
 		undo.purge_scenes(undo.get())
 		loaded_sc := engine.scene_load_single_path(load_path)
 		if loaded_sc == nil {
-			fmt.printfln("[Void Hierarchy] Failed to load scene: '%s'", disk_path)
+			fmt.printfln("[Hierarchy] Failed to load scene: '%s'", disk_path)
 			return false
 		}
 		engine.sm_scene_set_active(loaded_sc)
 	} else if engine.sm_scene_get_active() == nil {
-		fmt.printfln("[Void Hierarchy] Failed to load scene: '%s'", disk_path)
+		fmt.printfln("[Hierarchy] Failed to load scene: '%s'", disk_path)
 		return false
 	}
 
 	_vh_selected_tH = {}
 	_vh_anchor_tH = {}
 
-	// Sync Void File Explorer to the switched scene's folder so the user can see it immediately
+	// Sync File Explorer to the switched scene's folder so the user can see it immediately
 	// NOTE: filepath.dir returns a slice into disk_path — never delete it!
 	sc_dir := filepath.dir(disk_path)
 	norm_dir, _ := strings.replace_all(sc_dir, "\\", "/", context.temp_allocator)
@@ -2986,7 +3102,7 @@ _vh_collect_all_project_folders :: proc(alloc := context.temp_allocator) -> [dyn
 		add_folder(d, &seen, &out, alloc)
 	}
 
-	// Priority 2: Current Void File Explorer directory (if inside a specific subfolder)
+	// Priority 2: Current File Explorer directory (if inside a specific subfolder)
 	if exp_dir := _get_current_dir(); len(exp_dir) > 0 && exp_dir != "." && exp_dir != ".." {
 		add_folder(exp_dir, &seen, &out, alloc)
 	}
@@ -3004,8 +3120,7 @@ _vh_collect_all_project_folders :: proc(alloc := context.temp_allocator) -> [dyn
 		add_folder("assets", &seen, &out, alloc)
 		add_folder("assets/scenes", &seen, &out, alloc)
 	} else {
-		add_folder("../plugins/void_odin/Levels", &seen, &out, alloc)
-		add_folder("../plugins/void_odin/assets", &seen, &out, alloc)
+		add_folder("assets", &seen, &out, alloc)
 		add_folder("assets/scenes", &seen, &out, alloc)
 	}
 
@@ -3084,7 +3199,7 @@ _vh_draw_scene_navigator_popup :: proc(cur_sc: ^engine.Scene) {
 			}
 			im.CloseCurrentPopup()
 		}
-		widgets.tooltip(fmt.ctprintf("Highlight '%s' in Void File Explorer", cur_norm))
+		widgets.tooltip(fmt.ctprintf("Highlight '%s' in File Explorer", cur_norm))
 	}
 
 	sep_targets := _vh_collect_top_level_selected_for_separate(context.temp_allocator)
@@ -3275,7 +3390,7 @@ _vh_draw_scene_navigator_popup :: proc(cur_sc: ^engine.Scene) {
 					_set_selection_by_path(sc_entry.disk_path)
 				}
 			}
-			widgets.tooltip(fmt.ctprintf("Reveal '%s' in Void File Explorer", sc_entry.disk_path))
+			widgets.tooltip(fmt.ctprintf("Reveal '%s' in File Explorer", sc_entry.disk_path))
 
 			im.SameLine(0, 4)
 			can_nest := !is_active && sc_entry.guid != {} && cur_sc != nil
@@ -3283,10 +3398,15 @@ _vh_draw_scene_navigator_popup :: proc(cur_sc: ^engine.Scene) {
 			if im.SmallButton("+Child##Nest") {
 				parent_tH := engine.Transform_Handle(cur_sc.root.handle)
 				if _vh_selected_tH != {} do parent_tH = _vh_selected_tH
+				g := undo.group_begin("Instantiate Nested Scene")
+				defer undo.group_end(&g)
+				undo.record_selection_snapshot()
 				inst_h := engine.scene_instantiate_guid_nested(sc_entry.guid, parent_tH)
 				if inst_h != {} {
+					undo.record_create(inst_h, parent_tH)
 					engine.transform_ensure_unique_name(inst_h)
 					cur_sc.dirty = true
+					undo.group_commit(&g)
 					_vh_select_node(inst_h, ping = true)
 					im.CloseCurrentPopup()
 				}
@@ -3424,7 +3544,7 @@ _vh_execute_separate_to_new_scene :: proc(open_new_scene_after: bool) -> bool {
 		append_mode,
 	)
 	if !saved_ok {
-		fmt.printfln("[Void Hierarchy] Failed to save separated scene to '%s'", out_path)
+		fmt.printfln("[Hierarchy] Failed to save separated scene to '%s'", out_path)
 		return false
 	}
 	engine.asset_db_request_refresh()
@@ -3489,7 +3609,7 @@ _vh_execute_separate_to_new_scene :: proc(open_new_scene_after: bool) -> bool {
 	if open_new_scene_after {
 		_vh_switch_to_scene_path(out_path)
 	} else {
-		// Even when staying in current scene, reveal the target folder in Void Explorer so it's 1 click away
+		// Even when staying in current scene, reveal the target folder in File Explorer so it's 1 click away
 		out_dir := filepath.dir(out_path) // slice into out_path — do NOT delete!
 		norm_out_dir, _ := strings.replace_all(out_dir, "\\", "/", context.temp_allocator)
 		if os.is_dir(norm_out_dir) {
@@ -3498,7 +3618,7 @@ _vh_execute_separate_to_new_scene :: proc(open_new_scene_after: bool) -> bool {
 		}
 	}
 
-	fmt.printfln("[Void Hierarchy] Separated %d object(s) into scene '%s' (append=%v)", len(valid_targets), out_path, append_mode)
+	fmt.printfln("[Hierarchy] Separated %d object(s) into scene '%s' (append=%v)", len(valid_targets), out_path, append_mode)
 	return true
 }
 
@@ -3884,7 +4004,7 @@ _vh_draw_odin_folder_selector_and_preview :: proc(
 	raw_folder := strings.trim_space(string(cstring(raw_data(folder_buf[:]))))
 	clean_sub = _vh_sanitize_odin_subfolder(raw_folder)
 
-	root_label := engine.has_active_project() ? engine.active_project_name() : "plugins/void_odin"
+	root_label := engine.has_active_project() ? engine.active_project_name() : "assets/scripts"
 	im.TextDisabled("%s", fmt.ctprintf("Target Folder inside %s/ (leave empty for root):", root_label))
 	if len(scene_folder) > 0 {
 		is_scene_sel := clean_sub == scene_folder
@@ -3930,7 +4050,7 @@ _vh_draw_odin_folder_selector_and_preview :: proc(
 			? fmt.tprintf("%s/%s/component_%s.odin", root_label, clean_sub, struct_name) \
 			: fmt.tprintf("%s/component_%s.odin", root_label, struct_name)
 		im.TextColoredUnformatted({0.65, 0.82, 1.0, 1.0}, fmt.ctprintf("Target File:  %s", file_rel))
-		im.TextColoredUnformatted({0.55, 0.90, 0.70, 1.0}, fmt.ctprintf("Odin Package: package %s   |   Menu: Void/%s", pkg_name, struct_name))
+		im.TextColoredUnformatted({0.55, 0.90, 0.70, 1.0}, fmt.ctprintf("Odin Package: package %s   |   Menu: Custom/%s", pkg_name, struct_name))
 	} else {
 		im.TextDisabled("Enter a valid Odin struct identifier.")
 	}
@@ -3949,7 +4069,7 @@ _draw_new_odin_component_modal :: proc() {
 	im.SetNextWindowSize({500, 340}, .Appearing)
 
 	if im.BeginPopupModal("Create New Odin Component (.odin)", &_vh_show_new_comp_modal, {}) {
-		root_label := engine.has_active_project() ? engine.active_project_name() : "plugins/void_odin"
+		root_label := engine.has_active_project() ? engine.active_project_name() : "assets/scripts"
 		im.TextColoredUnformatted({0.25, 0.95, 0.58, 1.0}, fmt.ctprintf("%s  Create New Odin Gameplay Component", icons.ICON_MD_CODE))
 		im.TextDisabled("%s", fmt.ctprintf("Creates a new @(component) struct in %s/ and opens it in your IDE.", root_label))
 		im.Separator()

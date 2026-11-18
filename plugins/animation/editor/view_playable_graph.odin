@@ -54,6 +54,7 @@ shutdown_playable_graph_view :: proc() {
 	defer context.allocator = prev
 	delete(_pg.pos)
 	_pg.pos = nil
+	nc.canvas_destroy(&_pg.cv)
 }
 
 draw_playable_graph_view :: proc() {

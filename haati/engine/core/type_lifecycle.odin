@@ -522,6 +522,9 @@ _unmarshal_plain :: proc(
 	spec: json.Specification,
 	allocator: runtime.Allocator,
 ) -> json.Unmarshal_Error {
+	if !json.is_valid(data, spec, true) {
+		return json.Unmarshal_Data_Error.Invalid_Data
+	}
 	ptr_tid, ptr_ok := get_pointer_typeid_by_typeid(tid)
 	fmt.assertf(ptr_ok, "%v has no pointer type (register_pointer_type)", tid)
 	pp := ptr

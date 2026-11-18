@@ -97,6 +97,8 @@ setup :: proc(tc: ^TestCtx, path: string = "") {
 }
 
 teardown :: proc(tc: ^TestCtx) {
+	if tc == nil do return
+	context.user_ptr = &tc.uc
 	// Destroy every scene still registered with the scene manager — NOT
 	// tc.scene by pointer: scene_load_single_path destroys all loaded scenes
 	// (tc.scene included), so that pointer may be stale, and the scenes the

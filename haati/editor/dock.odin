@@ -75,12 +75,12 @@ _dock_build_default_layout :: proc(dockspace_id: im.ID, size: im.Vec2) {
 	im.DockBuilderSplitNode(center, .Right, 0.26, &right, &center)
 	im.DockBuilderSplitNode(center, .Down, 0.28, &bottom, &center)
 
-	if t := wnd.title_of("void_hierarchy"); t != nil do im.DockBuilderDockWindow(t, left)
-	if t := wnd.title_of("void_inspector"); t != nil do im.DockBuilderDockWindow(t, right)
+	if t := wnd.title_of("hierarchy"); t != nil do im.DockBuilderDockWindow(t, left)
+	if t := wnd.title_of("inspector"); t != nil do im.DockBuilderDockWindow(t, right)
 	im.DockBuilderDockWindow(icons.TITLE_SCENE, center)
 	im.DockBuilderDockWindow(icons.TITLE_SCENE_2D, center)
 	im.DockBuilderDockWindow(icons.TITLE_GAME, center)
-	if t := wnd.title_of("void_file_explorer"); t != nil do im.DockBuilderDockWindow(t, bottom)
+	if t := wnd.title_of("file_explorer"); t != nil do im.DockBuilderDockWindow(t, bottom)
 	im.DockBuilderDockWindow(icons.TITLE_CONSOLE, bottom)
 	im.DockBuilderDockWindow(icons.TITLE_OUTPUT, bottom)
 	im.DockBuilderDockWindow(icons.TITLE_HISTORY, bottom)
@@ -102,9 +102,9 @@ view_reset_layout_menu :: proc() {
 	menu.show_history = true
 	menu.show_animation = true
 	menu.show_playable_graph = true
-	wnd.open("void_hierarchy")
-	wnd.open("void_inspector")
-	wnd.open("void_file_explorer")
+	wnd.open("hierarchy")
+	wnd.open("inspector")
+	wnd.open("file_explorer")
 }
 
 // ---------------------------------------------------------------------------

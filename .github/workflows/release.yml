@@ -51,9 +51,9 @@ jobs:
               ],
               ["@semantic-release/release-notes-generator", { preset: "conventionalcommits" }],
               ["@semantic-release/changelog", { changelogFile: "CHANGELOG.md" }],
-              ["@semantic-release/exec", { prepareCmd: "echo ${nextRelease.version} > moonhug/version" }],
+              ["@semantic-release/exec", { prepareCmd: "echo ${nextRelease.version} > haati/version" }],
               ["@semantic-release/git", {
-                assets: ["moonhug/version", "CHANGELOG.md"],
+                assets: ["haati/version", "CHANGELOG.md"],
                 message: "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
               }]
             ]

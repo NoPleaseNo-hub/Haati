@@ -26,6 +26,9 @@ editor_icon_font_lg: ^im.Font
 // draw buttons via `widgets.phosphor_icon_button()`.
 editor_phosphor_font: ^im.Font
 
+// Scalable monospace vector font (ProggyVector + Material Symbols icons) for Code Studio.
+editor_mono_font: ^im.Font
+
 // Embedded Material Symbols & Phosphor glyph ranges; MUST outlive ImFontAtlas because ImGui v1.92
 // lazily rasterizes scaled glyph sizes (`PushFontFloat`) from `ImFontConfig.GlyphRanges`.
 @(private = "file")
@@ -141,4 +144,25 @@ editor_fonts_init :: proc() {
 		&_phosphor_icon_ranges[0],
 	)
 	widgets.phosphor_font = editor_phosphor_font
+
+	// Scalable vector monospace font (ProggyVector + Material Symbols icons) for Code Studio.
+	mono_cfg := _font_config(FONT_SIZE)
+	mono_cfg.FontDataOwnedByAtlas = false
+	editor_mono_font = im.FontAtlas_AddFontDefaultVector(fonts, &mono_cfg)
+
+	mono_icon_cfg := _font_config(FONT_SIZE)
+	mono_icon_cfg.MergeMode = true
+	mono_icon_cfg.PixelSnapH = true
+	mono_icon_cfg.GlyphMinAdvanceX = FONT_SIZE
+	mono_icon_cfg.GlyphOffset = im.Vec2{0, 2}
+	mono_icon_cfg.FontDataOwnedByAtlas = false
+	im.FontAtlas_AddFontFromMemoryTTF(
+		fonts,
+		raw_data(MATERIAL_FONT_DATA),
+		i32(len(MATERIAL_FONT_DATA)),
+		FONT_SIZE,
+		&mono_icon_cfg,
+		&_editor_icon_ranges[0],
+	)
+	widgets.mono_font = editor_mono_font
 }

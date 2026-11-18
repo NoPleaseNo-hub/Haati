@@ -22,6 +22,7 @@ package visual_script
 
 import "base:runtime"
 import "core:fmt"
+import "core:hash"
 import "core:mem"
 import "core:odin/ast"
 import "core:os"
@@ -200,6 +201,12 @@ VS_Undo_Entry :: struct {
 }
 
 @(private)
+_VS_Node_Syntax_Err_Cache :: struct {
+	hash:    u64,
+	has_err: bool,
+}
+
+@(private)
 _VS_Editor_State :: struct {
 	initialized:            bool,
 	canvas:                 nc.Node_Canvas,
@@ -209,6 +216,7 @@ _VS_Editor_State :: struct {
 	last_baked_odin:        string,
 	dirty_unbaked:          bool,
 	auto_bake_on_save:      bool,
+	node_err_cache:         map[int]_VS_Node_Syntax_Err_Cache,
 
 	// Hybrid View & Sub-Graph Navigation State
 	view_mode:              Studio_View_Mode,
@@ -502,11 +510,122 @@ _vs_apply_undo_stack :: proc(src: ^[dynamic]VS_Undo_Entry, dst: ^[dynamic]VS_Und
 			break
 		}
 	}
+	clear(&_vs.node_err_cache)
+	_sync_graph_to_canvas_comments()
 	_sync_ide_blueprint_context()
 	if im.GetCurrentContext() != nil {
 		_vs.last_undo_redo_frame = im.GetFrameCount()
 	}
 	return true
+}
+
+@(private)
+_sync_graph_to_canvas_comments :: proc() {
+	_vs.canvas.comments = {}
+	limit := min(len(_vs.graph.comments), len(_vs.canvas.comments))
+	for i in 0 ..< limit {
+		sc := &_vs.graph.comments[i]
+		dst := &_vs.canvas.comments[i]
+		dst.active = true
+		dst.pos    = {sc.pos[0], sc.pos[1]}
+		dst.size   = {max(sc.size[0], 140.0), max(sc.size[1], 90.0)}
+		dst.color  = {sc.color[0], sc.color[1], sc.color[2], sc.color[3]}
+		dst.title_buf = {}
+		if len(sc.title) > 0 {
+			n := min(len(sc.title), len(dst.title_buf) - 1)
+			copy(dst.title_buf[:n], sc.title[:n])
+		}
+	}
+}
+
+@(private)
+_sync_canvas_to_graph_comments :: proc(g: ^engine.Visual_Graph) -> bool {
+	if g == nil do return false
+	active_indices: [8]int
+	active_cnt := 0
+	for &c, i in _vs.canvas.comments {
+		if c.active {
+			active_indices[active_cnt] = i
+			active_cnt += 1
+		}
+	}
+	changed := len(g.comments) != active_cnt
+	if !changed {
+		for k in 0 ..< active_cnt {
+			cb := &_vs.canvas.comments[active_indices[k]]
+			gb := &g.comments[k]
+			t_str := string(cstring(&cb.title_buf[0]))
+			if gb.title != t_str ||
+			   abs(gb.pos[0] - cb.pos.x) > 0.01 || abs(gb.pos[1] - cb.pos.y) > 0.01 ||
+			   abs(gb.size[0] - cb.size.x) > 0.01 || abs(gb.size[1] - cb.size.y) > 0.01 ||
+			   abs(gb.color[0] - cb.color.x) > 0.001 || abs(gb.color[1] - cb.color.y) > 0.001 ||
+			   abs(gb.color[2] - cb.color.z) > 0.001 || abs(gb.color[3] - cb.color.w) > 0.001 {
+				changed = true
+				break
+			}
+		}
+	}
+	if !changed do return false
+
+	prev := context.allocator
+	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev
+	for &old in g.comments do delete(old.title)
+	clear(&g.comments)
+	for k in 0 ..< active_cnt {
+		cb := &_vs.canvas.comments[active_indices[k]]
+		t_str := string(cstring(&cb.title_buf[0]))
+		append(&g.comments, engine.VG_Comment_Box{
+			title = t_str != "" ? strings.clone(t_str) : "",
+			pos   = {cb.pos.x, cb.pos.y},
+			size  = {cb.size.x, cb.size.y},
+			color = {cb.color.x, cb.color.y, cb.color.z, cb.color.w},
+		})
+	}
+	return true
+}
+
+@(private)
+_vs_node_has_error :: proc(n: ^engine.VG_Node, hot_st: engine.Hot_Reload_Status, hot_stderr: string) -> bool {
+	if n == nil do return false
+	if hot_st == .Compile_Failed && hot_stderr != "" {
+		if n.hot_proc_target != "" && strings.contains(hot_stderr, n.hot_proc_target) {
+			return true
+		}
+		if n.owner_proc != "" && strings.contains(hot_stderr, n.owner_proc) {
+			return true
+		}
+		if len(n.title) >= 4 && strings.contains(hot_stderr, n.title) {
+			return true
+		}
+		clean_t := sanitize_odin_ident(n.title, context.temp_allocator)
+		if len(clean_t) >= 4 && strings.contains(hot_stderr, clean_t) {
+			return true
+		}
+	}
+	if n.kind == .Odin_Function_Node && strings.trim_space(n.odin_body) != "" {
+		h := hash.fnv64a(transmute([]u8)n.odin_body)
+		if _vs.node_err_cache != nil {
+			if cached, ok := _vs.node_err_cache[n.uid]; ok && cached.hash == h {
+				return cached.has_err
+			}
+		}
+		is_scoped := !cs.odin_source_has_package_decl(n.odin_body) && !strings.contains(n.odin_body, ":: proc")
+		diags, _ := cs.check_odin_syntax_in_ram(n.odin_body, is_scoped, context.temp_allocator)
+		has_err := false
+		for d in diags {
+			if !d.is_warning {
+				has_err = true
+				break
+			}
+		}
+		if _vs.node_err_cache == nil {
+			_vs.node_err_cache = make(map[int]_VS_Node_Syntax_Err_Cache, 16, runtime.default_allocator())
+		}
+		_vs.node_err_cache[n.uid] = _VS_Node_Syntax_Err_Cache{hash = h, has_err = has_err}
+		return has_err
+	}
+	return false
 }
 
 vs_undo :: proc() -> bool {
@@ -560,7 +679,7 @@ configure_graph_studio_defaults :: proc(electronic_wires: bool, auto_bake_on_sav
 open_unified_graph_domain :: proc(domain: engine.VG_Graph_Domain, asset_path: string = "") {
 	ensure_visual_script_init()
 	if domain == .Material_Shader {
-		wnd.open("void_material_editor")
+		wnd.open("material_editor")
 		return
 	}
 	_vs.active_domain = domain
@@ -1338,6 +1457,7 @@ ensure_visual_script_init :: proc() {
 	nc.canvas_init(&_vs.canvas)
 	_vs.canvas.wire_style = nc.global_wire_style
 	engine.vg_init_default_demo_graph(&_vs.graph, "hover_oscillator")
+	_sync_graph_to_canvas_comments()
 	_vs.graph_rel_path = strings.clone("assets/scripts/hover_oscillator.bodin")
 	_vs.new_var_type   = i32(hot.Hot_Pin_Type.Float)
 	_vs.new_pin_type   = i32(hot.Hot_Pin_Type.Float)
@@ -1364,6 +1484,8 @@ shutdown_visual_script_studio :: proc() {
 	delete(_vs.undo_stack)
 	delete(_vs.redo_stack)
 	engine.vg_destroy_graph(&_vs.graph)
+	nc.canvas_destroy(&_vs.canvas)
+	delete(_vs.node_err_cache)
 	delete(_vs.preview_bb.last_exec_path)
 	if _vs.graph_rel_path        != "" do delete(_vs.graph_rel_path)
 	if _vs.last_baked_odin       != "" do delete(_vs.last_baked_odin)
@@ -1405,6 +1527,8 @@ open_blueprint_in_studio :: proc(graph_rel_path: string) -> bool {
 			_vs.del_rename_idx         = -1
 			nc.canvas_clear_selection(&_vs.canvas)
 			if len(_vs.graph.nodes) > 0 do nc.canvas_set_selected(&_vs.canvas, 0, true)
+			clear(&_vs.node_err_cache)
+			_sync_graph_to_canvas_comments()
 			vs_clear_undo()
 			if raw_b, rerr := os.read_entire_file(abs_p, context.temp_allocator); rerr == nil {
 				if z1, has_z1 := engine.vg_extract_bodin_user_zone(string(raw_b), context.temp_allocator); has_z1 {
@@ -1504,6 +1628,8 @@ create_new_blueprint_asset :: proc(blueprint_name: string, target_dir: string = 
 		_vs.del_rename_idx         = -1
 		nc.canvas_clear_selection(&_vs.canvas)
 		nc.canvas_set_selected(&_vs.canvas, 1, true)
+		clear(&_vs.node_err_cache)
+		_sync_graph_to_canvas_comments()
 		vs_clear_undo()
 	}
 
@@ -3222,11 +3348,24 @@ draw_runner_perf_and_fuse_status :: proc(
 	widgets.tooltip("Omitting `Event: On Tick` makes this graph 100% Event-Driven (`0.00 ns` per-frame CPU cost when idle)!")
 
 	if inline {
-		hot_st, _, _, hot_msg, _ := engine.hot_cartridge_status()
-		if _vs.dirty_unbaked {
+		hot_st, _, _, hot_msg, hot_stderr := engine.hot_cartridge_status()
+		if hot_st == .Compile_Failed {
+			im.SameLine()
+			im.TextColored(p.status_error, "%s", fmt.ctprintf("| %s Compile Failed", icons.ICON_MD_ERROR))
+			err_tip := hot_stderr != "" ? hot_stderr : (hot_msg != "" ? hot_msg : "Hot-swap compilation failed")
+			widgets.tooltip(fmt.ctprintf("%s", err_tip))
+		} else if hot_st == .Schema_Changed {
+			im.SameLine()
+			im.TextColored(p.status_warning, "%s", fmt.ctprintf("| %s Schema Changed (Relaunch)", icons.ICON_MD_WARNING))
+			if hot_msg != "" do widgets.tooltip(fmt.ctprintf("%s", hot_msg))
+		} else if hot_st == .Compiling {
+			im.SameLine()
+			im.TextColored(p.accent, "%s", fmt.ctprintf("| %s Compiling...", icons.ICON_MD_SYNC))
+			if hot_msg != "" do widgets.tooltip(fmt.ctprintf("%s", hot_msg))
+		} else if _vs.dirty_unbaked {
 			im.SameLine()
 			im.TextColored(p.status_warning, "%s", fmt.ctprintf("| %s Live Preview (F7 to Bake)", icons.ICON_MD_CIRCLE))
-		} else if hot_st != .Idle && hot_msg != "" {
+		} else if hot_st == .Swapped_OK && hot_msg != "" {
 			im.SameLine()
 			im.TextColored(p.status_success, "%s", fmt.ctprintf("| %s %s", icons.ICON_MD_CHECK, hot_msg))
 		}

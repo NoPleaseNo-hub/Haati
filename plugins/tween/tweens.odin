@@ -1,6 +1,6 @@
 package tween
 
-// MoonHug's tween surface: the base vocabulary every node embeds, blob
+// Haati's tween surface: the base vocabulary every node embeds, blob
 // serialization, and registration of the stock node types. The runtime
 // (registry, pools, run list) lives in runtime.odin, leaf nodes in
 // leaves.odin, composites in composites.odin.

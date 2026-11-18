@@ -379,5 +379,5 @@ test_file_explorer_component_scaffold_deterministic :: proc(t: ^testing.T) {
 	a := file_exp.format_new_component_scaffold("game", "Hero", context.temp_allocator)
 	b := file_exp.format_new_component_scaffold("game", "Hero", context.temp_allocator)
 	testing.expect(t, a == b && len(a) > 0, "format_new_component_scaffold must be deterministic")
-	testing.expect(t, strings.contains(a, "package game") && strings.contains(a, `@(component={menu="Void/Hero"})`) && strings.contains(a, "reset_Hero :: proc(c: ^Hero)"), "scaffold missing expected declarations")
+	testing.expect(t, strings.contains(a, "package game") && strings.contains(a, `@(component={menu="Custom/Hero"})`) && strings.contains(a, "reset_Hero :: proc(c: ^Hero)"), "scaffold missing expected declarations")
 }

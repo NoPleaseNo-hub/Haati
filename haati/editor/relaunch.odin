@@ -556,6 +556,17 @@ relaunch_apply_snapshot :: proc(snap: ^engine.Relaunch_SHM_Snapshot) {
 		} else {
 			var_sc = engine.scene_load_single_bytes(snap.scene_bytes, guid, snap.scene_path)
 		}
+		if var_sc != nil {
+			var_sc.dirty = true
+		}
+	} else if snap.scene_path != "" {
+		if var_sc == nil || var_sc.path != snap.scene_path {
+			if var_sc != nil {
+				var_sc = engine.scene_reload_in_place_path(var_sc, snap.scene_path)
+			} else {
+				var_sc = engine.scene_load_single_path(snap.scene_path)
+			}
+		}
 	}
 
 	if var_sc != nil && len(snap.selected_lids) > 0 {

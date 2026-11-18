@@ -27,6 +27,13 @@ _crash: struct {
 	version_len:    int,
 	out_buf:        [16384]byte,
 	out_len:        int,
+	fatal_hook:     proc "contextless" (),
+	fatal_hook_busy: bool,
+}
+
+// Registers a contextless last-chance hook invoked right before native fatal crash termination.
+set_fatal_flush_hook :: proc "contextless" (fn: proc "contextless" ()) {
+	_crash.fatal_hook = fn
 }
 
 @(private = "package")
@@ -206,7 +213,7 @@ _w_utc :: proc "contextless" (epoch: i64) {
 
 @(private = "package")
 _crash_write_header :: proc "contextless" () {
-	_w("=== MoonHug crash ===\n")
+	_w("=== Haati crash ===\n")
 	if _crash.version_len > 0 {
 		_w("version: ")
 		_w(string(_crash.version[:_crash.version_len]))
@@ -229,6 +236,11 @@ _crash_write_breadcrumb :: proc "contextless" () {
 
 @(private = "package")
 _crash_write :: proc "contextless" (reason: string, addr: rawptr, fault_pc: rawptr = nil, fault_lr: rawptr = nil) {
+	if _crash.fatal_hook != nil && !_crash.fatal_hook_busy && reason != "EXCEPTION_STACK_OVERFLOW (stack overflow)" {
+		_crash.fatal_hook_busy = true
+		_crash.fatal_hook()
+		_crash.fatal_hook_busy = false
+	}
 	_buf_reset()
 	_crash_write_header()
 	_w("reason: ")
@@ -245,6 +257,11 @@ _crash_write :: proc "contextless" (reason: string, addr: rawptr, fault_pc: rawp
 
 @(private = "package")
 _crash_write_assert :: proc "contextless" (prefix, message: string, loc: runtime.Source_Code_Location) {
+	if _crash.fatal_hook != nil && !_crash.fatal_hook_busy {
+		_crash.fatal_hook_busy = true
+		_crash.fatal_hook()
+		_crash.fatal_hook_busy = false
+	}
 	_buf_reset()
 	_crash_write_header()
 	_w("reason: ")
@@ -407,6 +424,37 @@ sandbox_record_assertion_fault :: proc "c" (msg, file, proc_name: cstring, line:
 	_sandbox_fault.proc_len   = _sandbox_copy_cstr(_sandbox_fault.proc_name[:], proc_name)
 	_sandbox_active = false
 	libc.longjmp(&_sandbox_jmp_buf, 1)
+}
+
+sandbox_is_active :: proc "contextless" () -> bool {
+	return _sandbox_active
+}
+
+// Assertion failure handler usable inside `sandbox_exec` blocks: records fault location into fixed
+// static storage with zero heap allocations and unwinds cleanly back to `sandbox_exec`.
+sandbox_assertion_failure_proc :: proc(prefix, message: string, loc: runtime.Source_Code_Location) -> ! {
+	if _sandbox_active {
+		_sandbox_fault = {
+			occurred = true,
+			code     = 1,
+			line     = loc.line,
+		}
+		n := _sandbox_copy_str(_sandbox_fault.reason[:], prefix)
+		if message != "" && n < len(_sandbox_fault.reason) - 3 {
+			if n > 0 {
+				_sandbox_fault.reason[n] = ':'
+				_sandbox_fault.reason[n + 1] = ' '
+				n += 2
+			}
+			n += _sandbox_copy_str(_sandbox_fault.reason[n:], message)
+		}
+		_sandbox_fault.reason_len = n
+		_sandbox_fault.file_len   = _sandbox_copy_str(_sandbox_fault.file[:], loc.file_path)
+		_sandbox_fault.proc_len   = _sandbox_copy_str(_sandbox_fault.proc_name[:], loc.procedure)
+		_sandbox_active = false
+		libc.longjmp(&_sandbox_jmp_buf, 1)
+	}
+	runtime.default_assertion_failure_proc(prefix, message, loc)
 }
 
 @(optimization_mode = "none")

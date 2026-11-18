@@ -86,6 +86,7 @@ sm_scene_set_active :: proc(s: ^Scene) {
 
 sm_find_free_slot :: proc() -> Scene_ID {
     scene_manager := ctx_scene_manager()
+    if scene_manager == nil do return -1
     for i in 0..<MAX_SCENES {
         if scene_manager.loaded[i] == nil {
             return Scene_ID(i)
@@ -98,6 +99,7 @@ sm_scene_unload :: proc(scene: ^Scene) {
     if scene == nil do return
     if !sm_scene_is_valid(scene) do return
     scene_manager := ctx_scene_manager()
+    if scene_manager == nil do return
     w := scene.world
 
     found := false
@@ -137,10 +139,12 @@ sm_scene_unload :: proc(scene: ^Scene) {
 sm_scene_destroy_or_unload :: proc(scene: ^Scene) {
 	if scene == nil do return
 	scene_manager := ctx_scene_manager()
-	for i in 0 ..< scene_manager.count {
-		if scene_manager.loaded[i] == scene {
-			sm_scene_unload(scene)
-			return
+	if scene_manager != nil {
+		for i in 0 ..< scene_manager.count {
+			if scene_manager.loaded[i] == scene {
+				sm_scene_unload(scene)
+				return
+			}
 		}
 	}
 	scene_destroy(scene)
@@ -156,6 +160,7 @@ sm_scene_is_valid :: proc(scene: ^Scene) -> bool {
 sm_scene_is_loaded :: proc(scene: ^Scene) -> bool {
     if scene == nil do return false
     scene_manager := ctx_scene_manager()
+    if scene_manager == nil do return false
     for i in 0..<scene_manager.count {
         if scene_manager.loaded[i] == scene do return sm_scene_is_valid(scene)
     }
@@ -191,6 +196,7 @@ sm_scene_invalidate :: proc(scene: ^Scene) {
 
 _scene_load_single :: proc(scene_file: ^SceneFile, scene_asset_guid: Asset_GUID = {}) -> ^Scene {
     scene_manager := ctx_scene_manager()
+    if scene_manager == nil do return nil
     for i in 0..<scene_manager.count {
         if scene_manager.loaded[i] != nil {
             sm_scene_unload(scene_manager.loaded[i])
@@ -212,6 +218,7 @@ _scene_load_single :: proc(scene_file: ^SceneFile, scene_asset_guid: Asset_GUID 
 scene_reload_in_place :: proc(target: ^Scene, scene_file: ^SceneFile, scene_asset_guid: Asset_GUID = {}) -> ^Scene {
     if target == nil do return nil
     scene_manager := ctx_scene_manager()
+    if scene_manager == nil do return nil
 
     slot := -1
     for i in 0 ..< scene_manager.count {
@@ -385,6 +392,7 @@ _variant_materialize_root :: proc(s: ^Scene, root_ns: ^NestedScene, file_root_li
 
 _scene_load_additive :: proc(scene_file: ^SceneFile, scene_asset_guid: Asset_GUID = {}) -> ^Scene {
     scene_manager := ctx_scene_manager()
+    if scene_manager == nil do return nil
     s := scene_new()
     s.asset_guid = scene_asset_guid
 
@@ -508,14 +516,16 @@ scene_rebind_unbound_refs :: proc(s: ^Scene) {
 
 sm_shutdown :: proc() {
     scene_manager := ctx_scene_manager()
-    for i in 0..<scene_manager.count {
-        if scene_manager.loaded[i] != nil {
-            scene_destroy(scene_manager.loaded[i])
-            scene_manager.loaded[i] = nil
+    if scene_manager != nil {
+        for i in 0..<scene_manager.count {
+            if scene_manager.loaded[i] != nil {
+                scene_destroy(scene_manager.loaded[i])
+                scene_manager.loaded[i] = nil
+            }
         }
+        scene_manager.count = 0
+        scene_manager.active_scene = -1
     }
-    scene_manager.count = 0
-    scene_manager.active_scene = -1
     scene_migration_shutdown()
     navmesh_clear_active()
 }

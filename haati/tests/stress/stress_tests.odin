@@ -6,6 +6,7 @@ import "core:encoding/endian"
 import "core:encoding/json"
 import "core:encoding/uuid"
 import "core:fmt"
+import "core:hash"
 import "core:math"
 import "core:math/rand"
 import "core:mem"
@@ -206,8 +207,9 @@ stress_jolt_csg_and_entity_churn_soak :: proc(t: ^testing.T) {
 //    Code Studio's in-RAM Odin AST / scratch / call-site parsers.
 @(test)
 stress_fuzz_htscn001_binary_scene_and_odin_ast_parsers :: proc(t: ^testing.T) {
-	rng_state := rand.create(0xC0FFEE_2026)
-	rng := rand.default_random_generator(&rng_state)
+	rng_state_a := rand.create(0xC0FFEE_2026)
+	rng_a := rand.default_random_generator(&rng_state_a)
+	rng := rng_a
 
 	// Part A: HTSCN001 Binary Scene Fuzzer (500 rounds)
 	prefab_id, _ := uuid.read("22222222-3333-4444-8555-666666666666")
@@ -271,7 +273,7 @@ stress_fuzz_htscn001_binary_scene_and_odin_ast_parsers :: proc(t: ^testing.T) {
 		free_all(context.temp_allocator)
 
 		mut: []byte
-		switch round % 4 {
+		switch round % 5 {
 		case 0:
 			// Truncation fuzzing across header + payload boundaries
 			cut := int(rand.uint64(rng) % u64(len(bin)))
@@ -307,6 +309,19 @@ stress_fuzz_htscn001_binary_scene_and_odin_ast_parsers :: proc(t: ^testing.T) {
 			for i in 0 ..< nlen {
 				mut[i] = u8(rand.uint64(rng) & 0xFF)
 			}
+		case 4:
+			// Mutate TLV payload WITH recomputed CRC32 so scene_binary_decode TLV loops are fuzz-exercised!
+			mut = make([]byte, len(bin), context.temp_allocator)
+			copy(mut, bin)
+			if payload_off + 8 < len(mut) {
+				span := len(mut) - payload_off
+				flips := 1 + int(rand.uint64(rng) % 4)
+				for _ in 0 ..< flips {
+					pos := payload_off + int(rand.uint64(rng) % u64(span))
+					mut[pos] ~= u8(1 + (rand.uint64(rng) % 254))
+				}
+				endian.put_u32(mut[28:32], .Little, hash.crc32(mut[payload_off:]))
+			}
 		}
 
 		_, _ = engine.scene_extract_summary(mut, context.temp_allocator)
@@ -315,7 +330,18 @@ stress_fuzz_htscn001_binary_scene_and_odin_ast_parsers :: proc(t: ^testing.T) {
 		engine.scene_file_destroy(&dec)
 	}
 
-	// Part B: Odin AST / Scratch / Call-Site Parser Fuzzer (400 rounds)
+	// Deterministic regression check for unclosed '[' + invalid UTF-8 bypassing custom-unmarshaler is_valid()
+	bad_bracket_vec := [?]u8{0x5b, 0xf8, 0x00, '{', '"'}
+	_, sum_bad_ok := engine.scene_extract_summary(bad_bracket_vec[:], context.temp_allocator)
+	testing.expect(t, !sum_bad_ok, "malformed [0x5b, 0xf8] vector must be rejected immediately by scene_extract_summary")
+	bad_sf: engine.SceneFile
+	testing.expect(t, engine.scene_file_unmarshal(bad_bracket_vec[:], &bad_sf) != nil, "malformed [0x5b, 0xf8] vector must fail scene_file_unmarshal immediately")
+	engine.scene_file_destroy(&bad_sf)
+
+	// Part B: Odin AST / Scratch / Call-Site Parser Fuzzer (400 rounds + NUL/control-char determinism pass)
+	rng_state_b := rand.create(0xBEEF_2026)
+	rng_b := rand.default_random_generator(&rng_state_b)
+	rng = rng_b
 	orig_alloc := context.allocator
 	corpus := [?]string{
 		"package fuzz\ntarget_fn :: proc(a: int, b: f32) -> (ok: bool) {\n\tfor i in 0 ..< 10 {\n\t\tif a > 0 { target_fn(i, 1.0) }\n\t}\n\treturn true\n}\n",

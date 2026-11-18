@@ -97,6 +97,9 @@ ghost_icon_button :: proc(
 // Composite Roboto + Phosphor font handle populated at startup by `editor_fonts_init`.
 phosphor_font: ^im.Font
 
+// Monospace vector font + Material Symbols icon merge populated at startup by `editor_fonts_init`.
+mono_font: ^im.Font
+
 // Pushes the Phosphor Regular composite font so `icons.ICON_PH_*` glyphs render cleanly.
 // Always pair with `pop_phosphor_font()`.
 push_phosphor_font :: proc(size: f32 = 0) {

@@ -449,8 +449,8 @@ savegame_decode :: proc(data: []u8, allocator := context.allocator) -> (sg: Save
 savegame_write_atomic :: proc(path: string, sg: ^Save_Game, allocator := context.allocator) -> bool {
 	if path == "" || sg == nil do return false
 
-	norm, _ := strings.replace_all(path, "\\", "/", allocator)
-	defer delete(norm, allocator)
+	norm, was_alloc := strings.replace_all(path, "\\", "/", allocator)
+	defer if was_alloc do delete(norm, allocator)
 	catalog.ensure_parent_dirs(norm)
 
 	blob, eok := savegame_encode(sg, allocator)

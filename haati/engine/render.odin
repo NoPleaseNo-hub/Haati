@@ -288,9 +288,10 @@ _Mesh_Collect_Item :: struct {
 
 @(private = "file")
 _Mesh_Collect_Ctx :: struct {
-	view:    Render_View,
-	items:   []_Mesh_Collect_Item,
-	buckets: [MAX_WORKER_THREADS + 1][dynamic]Render_Command,
+	view:           Render_View,
+	items:          []_Mesh_Collect_Item,
+	buckets:        [MAX_WORKER_THREADS + 1][dynamic]Render_Command,
+	active_workers: int,
 }
 
 @(private = "file")
@@ -326,8 +327,8 @@ _build_mesh_render_command :: proc(view: Render_View, item: _Mesh_Collect_Item) 
 _collect_mesh_worker :: proc(start_idx, end_idx: int, user_data: rawptr) {
 	ctx := (^_Mesh_Collect_Ctx)(user_data)
 	slot := job_current_worker_index()
-	if slot < 0 || slot >= MAX_WORKER_THREADS {
-		slot = MAX_WORKER_THREADS
+	if slot < 0 || slot > ctx.active_workers {
+		slot = ctx.active_workers
 	}
 	bucket := &ctx.buckets[slot]
 	for i in start_idx ..< end_idx {
@@ -374,19 +375,22 @@ _collect_mesh_renderers :: proc(view: Render_View, out: ^[dynamic]Render_Command
 		return
 	}
 
+	active_workers := clamp(job_system_worker_count(), 1, MAX_WORKER_THREADS)
+	slot_count := min(active_workers + 1, MAX_WORKER_THREADS + 1)
 	cctx: _Mesh_Collect_Ctx
 	cctx.view = view
 	cctx.items = items[:]
-	for bi in 0 ..< len(cctx.buckets) {
+	cctx.active_workers = active_workers
+	for bi in 0 ..< slot_count {
 		cctx.buckets[bi] = make([dynamic]Render_Command, 0, 32, runtime.default_allocator())
 	}
-	defer for bi in 0 ..< len(cctx.buckets) {
+	defer for bi in 0 ..< slot_count {
 		delete(cctx.buckets[bi])
 	}
 
 	job_parallel_for(len(items), 16, _collect_mesh_worker, &cctx)
 
-	for bi in 0 ..< len(cctx.buckets) {
+	for bi in 0 ..< slot_count {
 		for cmd in cctx.buckets[bi] {
 			append(out, cmd)
 		}
@@ -552,6 +556,15 @@ render_execute :: proc(view: Render_View, commands: []Render_Command, render_sha
 		extra:  []^gfx.Texture, // sampler bindings 1+ (binding 0 is the quad's own texture)
 	}
 	quad_mats := make(map[Asset_GUID]Quad_Mat, context.temp_allocator)
+	Mesh_Mat :: struct {
+		shader:       string,
+		gpu_tex:      ^gfx.Texture,
+		color:        [4]f32,
+		mat_data:     []u8,
+		extra_tex:    []^gfx.Texture,
+		double_sided: bool,
+	}
+	mesh_mats := make(map[Asset_GUID]Mesh_Mat, 64, context.temp_allocator)
 
 	for &cmd in commands {
 		switch d in cmd.variant {
@@ -594,8 +607,20 @@ render_execute :: proc(view: Render_View, commands: []Render_Command, render_sha
 				} else {
 					mat_guid: Asset_GUID
 					if i < len(d.materials) do mat_guid = d.materials[i]
-					shader, gpu_tex, color, mat_data, extra_tex, double_sided := _resolve_material_ex(mat_guid, .Lit)
-					gfx.draw_mesh(gpu, gpu_tex, d.model, color, shader, sub.first_index, sub.index_count, mat_data, extra_tex, no_shadow = d.no_shadow, bounds_center = bounds_center, bounds_radius = bounds_radius, double_sided = double_sided)
+					mm, cached := mesh_mats[mat_guid]
+					if !cached {
+						shader, gpu_tex, color, mat_data, extra_tex, double_sided := _resolve_material_ex(mat_guid, .Lit)
+						mm = Mesh_Mat{
+							shader       = shader,
+							gpu_tex      = gpu_tex,
+							color        = color,
+							mat_data     = mat_data,
+							extra_tex    = extra_tex,
+							double_sided = double_sided,
+						}
+						mesh_mats[mat_guid] = mm
+					}
+					gfx.draw_mesh(gpu, mm.gpu_tex, d.model, mm.color, mm.shader, sub.first_index, sub.index_count, mm.mat_data, mm.extra_tex, no_shadow = d.no_shadow, bounds_center = bounds_center, bounds_radius = bounds_radius, double_sided = mm.double_sided)
 				}
 			}
 			if d.wire_mesh != nil && d.wire_mesh.index_count > 0 && d.wire_color.a > 0.001 {

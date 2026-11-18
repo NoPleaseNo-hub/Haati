@@ -10,6 +10,7 @@ package code_studio
 //   2. Exact AST procedure body slicing & splicing so any `.odin` procedure can
 //      be edited safely inside the Scoped Function-Body Popup Micro-IDE!
 
+import "core:fmt"
 import "core:mem"
 import "core:odin/ast"
 import "core:odin/parser"
@@ -298,6 +299,13 @@ parse_odin_in_arena :: proc(
 	used_src = is_scoped_body \
 		? strings.concatenate({"package _mh_scoped\n_mh_body :: proc(api: ^hot.Engine_Hot_API, self: hot.Hot_Entity, dt: f32) {\n", code, "\n}\n"}, arena_alloc) \
 		: code
+	if strings.index_byte(used_src, 0) >= 0 {
+		clean_buf := make([]byte, len(used_src), arena_alloc)
+		for i in 0 ..< len(used_src) {
+			clean_buf[i] = used_src[i] == 0 ? ' ' : used_src[i]
+		}
+		used_src = string(clean_buf)
+	}
 	used_src = _sanitize_partial_for_headers(used_src, arena_alloc, err_cb)
 	file = ast.File{
 		src      = used_src,
@@ -1032,4 +1040,192 @@ analyze_odin_scratch_snippet :: proc(src: string, allocator := context.temp_allo
 	}
 
 	return .Unknown, "", "", ""
+}
+
+// =============================================================================
+// TOKENIZED DELIMITER BALANCE & MATCHING BRACKET QUERIES
+// =============================================================================
+
+Delimiter_Mismatch :: struct {
+	line:       int,
+	column:     int,
+	end_column: int,
+	message:    string,
+}
+
+@(private = "file")
+_matching_open_for_close :: proc(k: tokenizer.Token_Kind) -> (open_k: tokenizer.Token_Kind, open_ch, close_ch: string, is_close: bool) {
+	#partial switch k {
+	case .Close_Brace:   return .Open_Brace,   "{", "}", true
+	case .Close_Paren:   return .Open_Paren,   "(", ")", true
+	case .Close_Bracket: return .Open_Bracket, "[", "]", true
+	}
+	return .Invalid, "", "", false
+}
+
+@(private = "file")
+_close_char_for_open :: proc(k: tokenizer.Token_Kind) -> (open_ch, close_ch: string, is_open: bool) {
+	#partial switch k {
+	case .Open_Brace:   return "{", "}", true
+	case .Open_Paren:   return "(", ")", true
+	case .Open_Bracket: return "[", "]", true
+	}
+	return "", "", false
+}
+
+// Checks balanced `{}`/`()`/`[]` pairs using Odin's tokenizer (`flags = {}`), ignoring comments & strings.
+check_odin_delimiter_balance :: proc(src: string, allocator := context.temp_allocator) -> []Delimiter_Mismatch {
+	out := make([dynamic]Delimiter_Mismatch, 0, 4, allocator)
+	if len(src) == 0 do return out[:]
+
+	_Open_Delim :: struct {
+		kind: tokenizer.Token_Kind,
+		line: int,
+		col:  int,
+	}
+
+	stack := make([dynamic]_Open_Delim, 0, 16, context.temp_allocator)
+	tok: tokenizer.Tokenizer
+	tokenizer.init(&tok, src, "buffer.odin", _silent_tok_err)
+	tok.flags = {}
+
+	for {
+		cur := tokenizer.scan(&tok)
+		if cur.kind == .EOF do break
+
+		if _, _, is_open := _close_char_for_open(cur.kind); is_open {
+			append(&stack, _Open_Delim{kind = cur.kind, line = max(cur.pos.line, 1), col = max(cur.pos.column, 1)})
+			continue
+		}
+
+		exp_open, exp_open_ch, close_ch, is_close := _matching_open_for_close(cur.kind)
+		if !is_close do continue
+
+		line := max(cur.pos.line, 1)
+		col  := max(cur.pos.column, 1)
+		if len(stack) == 0 {
+			if len(out) < 8 {
+				append(&out, Delimiter_Mismatch{
+					line       = line,
+					column     = col,
+					end_column = col + 1,
+					message    = fmt.aprintf("Unmatched closing '%s' (no matching '%s')", close_ch, exp_open_ch, allocator = allocator),
+				})
+			}
+			continue
+		}
+
+		top := stack[len(stack) - 1]
+		if top.kind == exp_open {
+			pop(&stack)
+			continue
+		}
+
+		// Find matching opener deeper on stack so a single missing closer doesn't cascade.
+		match_idx := -1
+		for i := len(stack) - 1; i >= 0; i -= 1 {
+			if stack[i].kind == exp_open {
+				match_idx = i
+				break
+			}
+		}
+		if match_idx >= 0 {
+			for i := len(stack) - 1; i > match_idx; i -= 1 {
+				op := stack[i]
+				och, cch, _ := _close_char_for_open(op.kind)
+				if len(out) < 8 {
+					append(&out, Delimiter_Mismatch{
+						line       = op.line,
+						column     = op.col,
+						end_column = op.col + 1,
+						message    = fmt.aprintf("Unclosed '%s' before '%s' at line %d (expected '%s')", och, close_ch, line, cch, allocator = allocator),
+					})
+				}
+			}
+			resize(&stack, match_idx)
+		} else if len(out) < 8 {
+			och, _, _ := _close_char_for_open(top.kind)
+			append(&out, Delimiter_Mismatch{
+				line       = line,
+				column     = col,
+				end_column = col + 1,
+				message    = fmt.aprintf("Mismatched delimiter '%s' (innermost open is '%s' at line %d:%d)", close_ch, och, top.line, top.col, allocator = allocator),
+			})
+		}
+	}
+
+	for op in stack {
+		if len(out) >= 8 do break
+		och, cch, _ := _close_char_for_open(op.kind)
+		append(&out, Delimiter_Mismatch{
+			line       = op.line,
+			column     = op.col,
+			end_column = op.col + 1,
+			message    = fmt.aprintf("Unclosed '%s' (missing matching '%s')", och, cch, allocator = allocator),
+		})
+	}
+	return out[:]
+}
+
+// Finds matching `{}`/`()`/`[]` byte offsets around `byte_pos`, skipping comments & string literals via `core:odin/tokenizer`.
+find_matching_bracket_tokenized :: proc(src: string, byte_pos: int) -> (p1, p2: int, ok: bool) {
+	if len(src) == 0 do return 0, 0, false
+
+	_Tok_Bracket :: struct {
+		kind:         tokenizer.Token_Kind,
+		offset:       int,
+		match_offset: int,
+	}
+
+	brackets := make([dynamic]_Tok_Bracket, 0, 32, context.temp_allocator)
+	open_stack := make([dynamic]int, 0, 16, context.temp_allocator)
+
+	tok: tokenizer.Tokenizer
+	tokenizer.init(&tok, src, "buffer.odin", _silent_tok_err)
+	tok.flags = {}
+
+	for {
+		cur := tokenizer.scan(&tok)
+		if cur.kind == .EOF do break
+
+		if _, _, is_open := _close_char_for_open(cur.kind); is_open {
+			idx := len(brackets)
+			append(&brackets, _Tok_Bracket{kind = cur.kind, offset = cur.pos.offset, match_offset = -1})
+			append(&open_stack, idx)
+			continue
+		}
+
+		exp_open, _, _, is_close := _matching_open_for_close(cur.kind)
+		if !is_close do continue
+
+		match_s := -1
+		for i := len(open_stack) - 1; i >= 0; i -= 1 {
+			if brackets[open_stack[i]].kind == exp_open {
+				match_s = i
+				break
+			}
+		}
+		if match_s >= 0 {
+			oi := open_stack[match_s]
+			brackets[oi].match_offset = cur.pos.offset
+			append(&brackets, _Tok_Bracket{kind = cur.kind, offset = cur.pos.offset, match_offset = brackets[oi].offset})
+			resize(&open_stack, match_s)
+		} else {
+			append(&brackets, _Tok_Bracket{kind = cur.kind, offset = cur.pos.offset, match_offset = -1})
+		}
+	}
+
+	for b in brackets {
+		if b.offset == byte_pos && b.match_offset >= 0 {
+			return b.offset, b.match_offset, true
+		}
+	}
+	if byte_pos > 0 {
+		for b in brackets {
+			if b.offset == byte_pos - 1 && b.match_offset >= 0 {
+				return b.offset, b.match_offset, true
+			}
+		}
+	}
+	return 0, 0, false
 }

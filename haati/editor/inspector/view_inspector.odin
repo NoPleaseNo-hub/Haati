@@ -1071,10 +1071,8 @@ draw_struct_field_at :: proc(ptr: rawptr, tid: typeid, i: int, path_prefix: stri
 
     field_name := names[i]
     display_name := label_override != "" ? label_override : field_name
-    c_field_name := strings.clone_to_cstring(field_name)
-    defer delete(c_field_name)
-    c_display_name := strings.clone_to_cstring(display_name)
-    defer delete(c_display_name)
+    c_field_name := widgets.temp_cstr(field_name)
+    c_display_name := widgets.temp_cstr(display_name)
     field_type := types[i]
     field_val := reflect.struct_field_value(xAny, field_info)
 
@@ -1108,9 +1106,8 @@ draw_struct_field_at :: proc(ptr: rawptr, tid: typeid, i: int, path_prefix: stri
     // Only rows with a decorator pay for the snapshot.
     pre_before: []byte
     if decorators, has := decorator_registry[tid]; has && i < len(decorators) && decorators[i] != nil {
-        pre_before = undo.capture_json(field_ptr, field_type.id)
+        pre_before = undo.capture_json(field_ptr, field_type.id, context.temp_allocator)
     }
-    defer if pre_before != nil do delete(pre_before)
 
     // Grouped for the same reason field_edit_row groups its drawer: a
     // decorator that draws the row (color, range) may emit several items,

@@ -129,29 +129,8 @@ _is_exec_wire_hot :: proc(bb: ^engine.VG_Runtime_Blackboard, src_uid, dst_uid: i
 }
 
 @(private)
-_dist_point_to_segment :: proc(pt, a, b: im.Vec2) -> f32 {
-	ab := b - a
-	l2 := ab.x * ab.x + ab.y * ab.y
-	if l2 < 1e-4 do return linalg.length(pt - a)
-	t := clamp(((pt.x - a.x) * ab.x + (pt.y - a.y) * ab.y) / l2, 0.0, 1.0)
-	return linalg.length(pt - (a + ab * t))
-}
-
-@(private)
 _dist_point_to_wire :: proc(pt, p0, p1: im.Vec2, zm: f32) -> f32 {
-	tang := max(abs(p1.x - p0.x) * 0.45, 42.0 * zm)
-	c1 := im.Vec2{p0.x + tang, p0.y}
-	c2 := im.Vec2{p1.x - tang, p1.y}
-	best := f32(1e9)
-	prev := p0
-	for s in 1 ..= 8 {
-		t := f32(s) / 8.0
-		u := 1.0 - t
-		cur := p0 * (u*u*u) + c1 * (3.0*u*u*t) + c2 * (3.0*u*t*t) + p1 * (t*t*t)
-		best = min(best, _dist_point_to_segment(pt, prev, cur))
-		prev = cur
-	}
-	return best
+	return nc.canvas_dist_point_to_wire(pt, p0, p1, _vs.canvas.wire_style, zm)
 }
 
 @(private)
@@ -1262,6 +1241,7 @@ draw_visual_script_studio_window :: proc() {
 						dl             := im.GetWindowDrawList()
 						zm             := _vs.canvas.zoom
 						canvas_hovered := im.IsWindowHovered(im.HoveredFlags_ChildWindows)
+						hot_st_cv, _, _, _, hot_stderr_cv := engine.hot_cartridge_status()
 						if !im.IsMouseDown(.Left) {
 							_vs.drag_undo_armed = false
 						}
@@ -1278,6 +1258,9 @@ draw_visual_script_studio_window :: proc() {
 
 						// Interactive Comment Boxes (`C` shortcut)
 						nc.canvas_update_and_draw_comments(&_vs.canvas, pos_arr, 0)
+						if _sync_canvas_to_graph_comments(&_vs.graph) {
+							_vs.dirty_unbaked = true
+						}
 						comment_moved := false
 						for &n, i in _vs.graph.nodes {
 							if _is_node_visible_in_subgraph(&n) && (abs(pos_arr[i].x - n.pos.x) > 0.001 || abs(pos_arr[i].y - n.pos.y) > 0.001) {
@@ -1732,11 +1715,11 @@ draw_visual_script_studio_window :: proc() {
 
 							nc.canvas_bp_node_end(&b)
 
-							// Hit-test node card rect for Stationary Idle-Delay Function Doc-Comment Tooltip!
+							// Hit-test node card rect & highlight runtime loop-fuse / compile / syntax error borders!
 							card_sz_c := nc.canvas_get_node_size(&_vs.canvas, ni, {min_card_w, 90.0})
 							card_min  := nc.canvas_to_screen(&_vs.canvas, npos)
 							card_max  := card_min + card_sz_c * zm
-							if dbg_bb != nil && dbg_bb.loop_fuse_tripped_uid == n.uid {
+							if (dbg_bb != nil && dbg_bb.loop_fuse_tripped_uid == n.uid) || _vs_node_has_error(&n, hot_st_cv, hot_stderr_cv) {
 								im.DrawList_AddRect(dl, card_min - {3, 3}, card_max + {3, 3}, im.GetColorU32ImVec4(p.status_error), 6.0 * zm, 3.0 * zm)
 							}
 							if canvas_hovered && !_vs.dragging_wire && !im.IsMouseDown(.Left) &&

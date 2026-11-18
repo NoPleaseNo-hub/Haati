@@ -19,6 +19,7 @@ package node_canvas
 // port, so an edge lands on the row it feeds rather than at some fraction of
 // the node's height — that is what makes a mixer with six inputs readable.
 
+import "base:runtime"
 import "core:fmt"
 import "core:math"
 import im "haati:external/odin-imgui"
@@ -36,8 +37,8 @@ set_global_wire_style :: proc(style: Canvas_Wire_Style, notify := true) {
 }
 
 draw_wire_style_combo :: proc(id: cstring = "##nc_global_wire_style", width: f32 = 152.0) -> bool {
-	names := [3]cstring{"Wires: Smooth Bezier", "Wires: 45° Subway", "Wires: Electric"}
-	cur := clamp(i32(global_wire_style), 0, 2)
+	names := [4]cstring{"Wires: Smooth Bezier", "Wires: 45° Subway", "Wires: Electric", "Wires: 90° Orthogonal"}
+	cur := clamp(i32(global_wire_style), 0, 3)
 	im.SetNextItemWidth(width)
 	changed := false
 	if im.BeginCombo(id, names[cur]) {
@@ -73,6 +74,7 @@ Canvas_Wire_Style :: enum {
 	Smooth_Bezier,
 	Electronic_45,
 	Electric_Jagged,
+	Orthogonal_90,
 }
 
 // One body row. `value` is right-aligned in the value column, `label` left in
@@ -97,7 +99,7 @@ Node_Canvas :: struct {
 	pan:                   im.Vec2, // canvas-unit offset of the origin
 	zoom:                  f32,
 	sel:                   int, // primary selected node id, -1 = none
-	selected_mask:         u64, // multi-selection bitmask for node ids 0..63
+	selected_ids:          map[int]bool, // unbounded multi-selection set (runtime.default_allocator)
 	marquee_active:        bool,
 	marquee_start:         im.Vec2,
 	marquee_end:           im.Vec2,
@@ -109,8 +111,9 @@ Node_Canvas :: struct {
 	rmb_pan_travel:        f32,
 	wire_style:            Canvas_Wire_Style,
 	lock_local_wire_style: bool,
-	node_collapsed:        u64, // per-node collapse bitmask for Niagara module blocks (ids 0..63)
-	node_sizes:            [64]im.Vec2, // live measured canvas-unit sizes per node id (ids 0..63)
+	default_collapsed:     bool, // bulk collapse default toggled by `canvas_set_all_collapsed`
+	collapsed_ids:         map[int]bool, // per-node collapse overrides (unbounded ids)
+	node_sizes:            map[int]im.Vec2, // live measured canvas-unit sizes (unbounded ids)
 	comments:              [8]Canvas_Comment_Box,
 
 	// Per-frame, set by canvas_begin.
@@ -121,20 +124,33 @@ Node_Canvas :: struct {
 canvas_init :: proc(cv: ^Node_Canvas) {
 	cv.zoom = 1
 	cv.sel = -1
-	cv.selected_mask = 0
+	clear(&cv.selected_ids)
 	cv.marquee_active = false
 	cv.ctx_hovered_id = -1
 	cv.rmb_pressed_in_canvas = false
 	cv.rmb_pressed_node_id = -1
 	cv.rmb_pan_travel = 0
-	cv.node_collapsed = 0
-	cv.node_sizes = {}
+	cv.default_collapsed = false
+	clear(&cv.collapsed_ids)
+	clear(&cv.node_sizes)
+}
+
+canvas_destroy :: proc(cv: ^Node_Canvas) {
+	if cv == nil do return
+	prev := context.allocator
+	context.allocator = runtime.default_allocator()
+	defer context.allocator = prev
+	delete(cv.selected_ids)
+	delete(cv.collapsed_ids)
+	delete(cv.node_sizes)
+	cv.selected_ids  = nil
+	cv.collapsed_ids = nil
+	cv.node_sizes    = nil
 }
 
 canvas_get_node_size :: proc(cv: ^Node_Canvas, id: int, fallback: im.Vec2 = {CANVAS_NODE_W, 96}) -> im.Vec2 {
-	if cv != nil && id >= 0 && id < len(cv.node_sizes) {
-		sz := cv.node_sizes[id]
-		if sz.x > 1.0 && sz.y > 1.0 {
+	if cv != nil && id >= 0 && cv.node_sizes != nil {
+		if sz, ok := cv.node_sizes[id]; ok && sz.x > 1.0 && sz.y > 1.0 {
 			return sz
 		}
 	}
@@ -142,54 +158,68 @@ canvas_get_node_size :: proc(cv: ^Node_Canvas, id: int, fallback: im.Vec2 = {CAN
 }
 
 canvas_set_node_size :: proc(cv: ^Node_Canvas, id: int, sz_canvas: im.Vec2) {
-	if cv != nil && id >= 0 && id < len(cv.node_sizes) {
-		cv.node_sizes[id] = sz_canvas
+	if cv == nil || id < 0 do return
+	if cv.node_sizes == nil {
+		cv.node_sizes = make(map[int]im.Vec2, 32, runtime.default_allocator())
 	}
+	cv.node_sizes[id] = sz_canvas
 }
 
 canvas_is_collapsed :: proc(cv: ^Node_Canvas, id: int) -> bool {
-	if cv == nil || id < 0 || id >= 64 do return false
-	return (cv.node_collapsed & (u64(1) << u64(id))) != 0
+	if cv == nil || id < 0 do return false
+	if cv.collapsed_ids != nil {
+		if collapsed, ok := cv.collapsed_ids[id]; ok {
+			return collapsed
+		}
+	}
+	return cv.default_collapsed
 }
 
 canvas_set_collapsed :: proc(cv: ^Node_Canvas, id: int, collapsed: bool) {
-	if cv == nil || id < 0 || id >= 64 do return
-	bit := u64(1) << u64(id)
-	if collapsed {
-		cv.node_collapsed |= bit
-	} else {
-		cv.node_collapsed &= ~bit
+	if cv == nil || id < 0 do return
+	if collapsed == cv.default_collapsed {
+		if cv.collapsed_ids != nil {
+			delete_key(&cv.collapsed_ids, id)
+		}
+		return
 	}
+	if cv.collapsed_ids == nil {
+		cv.collapsed_ids = make(map[int]bool, 16, runtime.default_allocator())
+	}
+	cv.collapsed_ids[id] = collapsed
 }
 
 canvas_set_all_collapsed :: proc(cv: ^Node_Canvas, collapsed: bool) {
 	if cv == nil do return
-	cv.node_collapsed = collapsed ? ~u64(0) : 0
+	cv.default_collapsed = collapsed
+	clear(&cv.collapsed_ids)
 }
 
 canvas_is_selected :: proc(cv: ^Node_Canvas, id: int) -> bool {
 	if cv == nil do return false
 	if cv.sel == id do return true
-	if id >= 0 && id < 64 {
-		return (cv.selected_mask & (u64(1) << u64(id))) != 0
+	if id >= 0 && cv.selected_ids != nil {
+		return cv.selected_ids[id] or_else false
 	}
 	return false
 }
 
 canvas_set_selected :: proc(cv: ^Node_Canvas, id: int, selected: bool) {
 	if cv == nil do return
-	if id >= 0 && id < 64 {
-		bit := u64(1) << u64(id)
+	if id >= 0 {
 		if selected {
-			cv.selected_mask |= bit
+			if cv.selected_ids == nil {
+				cv.selected_ids = make(map[int]bool, 16, runtime.default_allocator())
+			}
+			cv.selected_ids[id] = true
 			cv.sel = id
 		} else {
-			cv.selected_mask &= ~bit
+			if cv.selected_ids != nil {
+				delete_key(&cv.selected_ids, id)
+			}
 			if cv.sel == id do cv.sel = -1
 		}
-	} else if selected {
-		cv.sel = id
-	} else if cv.sel == id {
+	} else if !selected && cv.sel == id {
 		cv.sel = -1
 	}
 }
@@ -197,15 +227,15 @@ canvas_set_selected :: proc(cv: ^Node_Canvas, id: int, selected: bool) {
 canvas_clear_selection :: proc(cv: ^Node_Canvas) {
 	if cv == nil do return
 	cv.sel = -1
-	cv.selected_mask = 0
+	clear(&cv.selected_ids)
 }
 
 canvas_selected_count :: proc(cv: ^Node_Canvas) -> int {
 	if cv == nil do return 0
 	cnt := 0
-	for i in 0 ..< 64 {
-		if (cv.selected_mask & (u64(1) << u64(i))) != 0 {
-			cnt += 1
+	if cv.selected_ids != nil {
+		for _, sel in cv.selected_ids {
+			if sel do cnt += 1
 		}
 	}
 	if cnt == 0 && cv.sel >= 0 && cv.sel < 9000 {
@@ -471,6 +501,10 @@ canvas_draw_default_context_menu_items :: proc(cv: ^Node_Canvas, node_positions:
 	if im.MenuItem("Electric Jagged Wires", nil, cv.wire_style == .Electric_Jagged) {
 		cv.wire_style = .Electric_Jagged
 		if !cv.lock_local_wire_style do set_global_wire_style(.Electric_Jagged, true)
+	}
+	if im.MenuItem("Orthogonal 90° Wires", nil, cv.wire_style == .Orthogonal_90) {
+		cv.wire_style = .Orthogonal_90
+		if !cv.lock_local_wire_style do set_global_wire_style(.Orthogonal_90, true)
 	}
 	im.Separator()
 	if im.MenuItem("Reset Canvas View (Pan & Zoom)") {
@@ -889,6 +923,65 @@ _electronic_45_pts :: proc(p1, p2: im.Vec2) -> [4]im.Vec2 {
 }
 
 @(private = "file")
+_orthogonal_90_pts :: proc(p1, p2: im.Vec2) -> [4]im.Vec2 {
+	mid_x := (p1.x + p2.x) * 0.5
+	if p2.x < p1.x + 24.0 {
+		mid_x = p1.x + 24.0
+	}
+	return {p1, {mid_x, p1.y}, {mid_x, p2.y}, p2}
+}
+
+@(private = "file")
+_seg_dist :: proc(pt, a, b: im.Vec2) -> f32 {
+	ab := b - a
+	len_sq := ab.x * ab.x + ab.y * ab.y
+	if len_sq < 0.0001 {
+		d := pt - a
+		return math.hypot(d.x, d.y)
+	}
+	t := clamp(((pt.x - a.x) * ab.x + (pt.y - a.y) * ab.y) / len_sq, 0.0, 1.0)
+	proj := a + ab * t
+	d := pt - proj
+	return math.hypot(d.x, d.y)
+}
+
+// Minimum screen distance from `pt` to the routed wire curve/polyline between `from` and `to`.
+canvas_dist_point_to_wire :: proc(pt, from, to: im.Vec2, style: Canvas_Wire_Style, zoom: f32) -> f32 {
+	zm := max(zoom, 0.25)
+	switch style {
+	case .Electronic_45:
+		pts := _electronic_45_pts(from, to)
+		best := f32(1e9)
+		for s in 0 ..< 3 {
+			best = min(best, _seg_dist(pt, pts[s], pts[s + 1]))
+		}
+		return best
+	case .Orthogonal_90:
+		pts := _orthogonal_90_pts(from, to)
+		best := f32(1e9)
+		for s in 0 ..< 3 {
+			best = min(best, _seg_dist(pt, pts[s], pts[s + 1]))
+		}
+		return best
+	case .Electric_Jagged:
+		return _seg_dist(pt, from, to)
+	case .Smooth_Bezier:
+		d := clamp(abs(to.x - from.x) * 0.5, 30 * zm, 120 * zm)
+		c1 := from + im.Vec2{d, 0}
+		c2 := to - im.Vec2{d, 0}
+		best := f32(1e9)
+		prev := from
+		for s in 1 ..= 8 {
+			cur := _bezier(from, c1, c2, to, f32(s) / 8.0)
+			best = min(best, _seg_dist(pt, prev, cur))
+			prev = cur
+		}
+		return best
+	}
+	return _seg_dist(pt, from, to)
+}
+
+@(private = "file")
 _sample_polyline4 :: proc(pts: [4]im.Vec2, t: f32) -> im.Vec2 {
 	l0 := math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y)
 	l1 := math.hypot(pts[2].x - pts[1].x, pts[2].y - pts[1].y)
@@ -929,6 +1022,7 @@ canvas_draw_wire :: proc(
 	c1 := from + im.Vec2{d, 0}
 	c2 := to - im.Vec2{d, 0}
 	e_pts := _electronic_45_pts(from, to)
+	o_pts := _orthogonal_90_pts(from, to)
 
 	switch style {
 	case .Smooth_Bezier:
@@ -941,6 +1035,13 @@ canvas_draw_wire :: proc(
 		}
 		im.DrawList_AddCircleFilled(dl, e_pts[1], th * 0.85, col)
 		im.DrawList_AddCircleFilled(dl, e_pts[2], th * 0.85, col)
+	case .Orthogonal_90:
+		for s in 0 ..< 3 {
+			im.DrawList_AddLine(dl, o_pts[s], o_pts[s + 1], halo_col, th + 3.2 * zoom)
+			im.DrawList_AddLine(dl, o_pts[s], o_pts[s + 1], col, th)
+		}
+		im.DrawList_AddCircleFilled(dl, o_pts[1], th * 0.80, col)
+		im.DrawList_AddCircleFilled(dl, o_pts[2], th * 0.80, col)
 	case .Electric_Jagged:
 		segments :: 14
 		prev_pt := from
@@ -969,8 +1070,8 @@ canvas_draw_wire :: proc(
 	}
 
 	if draw_arrow {
-		// Compute incoming direction right at `to` so arrowhead aligns with Bezier/45-deg stub
-		prev := style == .Electronic_45 ? _sample_polyline4(e_pts, 0.92) : _bezier(from, c1, c2, to, 0.92)
+		// Compute incoming direction right at `to` so arrowhead aligns with Bezier/45-deg/90-deg stub
+		prev := style == .Electronic_45 ? _sample_polyline4(e_pts, 0.92) : (style == .Orthogonal_90 ? _sample_polyline4(o_pts, 0.92) : _bezier(from, c1, c2, to, 0.92))
 		dir := to - prev
 		dl_len := math.hypot(dir.x, dir.y)
 		if dl_len < 0.001 {
@@ -1002,6 +1103,8 @@ canvas_draw_wire :: proc(
 				pt = _bezier(from, c1, c2, to, t)
 			case .Electronic_45:
 				pt = _sample_polyline4(e_pts, t)
+			case .Orthogonal_90:
+				pt = _sample_polyline4(o_pts, t)
 			case .Electric_Jagged:
 				pt = from + (to - from) * t
 			}
@@ -1012,7 +1115,7 @@ canvas_draw_wire :: proc(
 
 	if label != nil {
 		p := thm.palette()
-		mid := style == .Electronic_45 ? _sample_polyline4(e_pts, 0.5) : _bezier(from, c1, c2, to, 0.5)
+		mid := style == .Electronic_45 ? _sample_polyline4(e_pts, 0.5) : (style == .Orthogonal_90 ? _sample_polyline4(o_pts, 0.5) : _bezier(from, c1, c2, to, 0.5))
 		font_sz := max(im.GetFontSize() * zoom * 0.9, 7)
 		ts := im.CalcTextSize(label) * (font_sz / max(im.GetFontSize(), 1.0))
 		lpos := mid + im.Vec2{-ts.x * 0.5, -font_sz - 4 * zoom}

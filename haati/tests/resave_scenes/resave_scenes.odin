@@ -22,24 +22,16 @@ import common "haati:tests/common"
 // lookups resolve within the same root the editor would use.
 ROOTS :: []string{
 	"haati/packages/app/assets",
-	"haati/packages/essentials/assets",
-	"haati/packages/plugin_example/assets",
-	"haati/packages/prefabs_example/assets",
+	"haati/packages/animation_sample/assets",
+	"haati/packages/timeline_sample/assets",
+	"haati/packages/particles_sample/assets",
 	"haati/packages/physics2d/samples/physics2d_sample/assets",
 	"haati/packages/physics3d/samples/physics3d_sample/assets",
-	"haati/tests/fixtures/nested_scenes",
+	"haati/tests/fixtures/prefabs_chain",
 }
 
-// Scenes whose committed bytes are load-bearing, so a re-save would break the
-// test that reads them. These are hand-authored baselines, deliberately NOT at
-// the serializer's fixed point: test_apply_override_clears_shadowing_intermediate
-// writes a TestD override into TestC.scene during the run and then asserts a
-// shallower Apply clears it. Re-saving bakes that override into the committed
-// file, so the test starts from the state it means to produce and its assertion
-// no longer proves anything.
-//
-// A migration that must reach these has to be applied by hand, keeping whatever
-// property the test depends on intact.
+// Scenes whose committed bytes are load-bearing baselines for migration or
+// shallow-override tests stay JSON and out of re-save roots.
 SKIP :: []string{
 	"haati/tests/fixtures/nested_scenes/TestC.scene",
 	"haati/tests/fixtures/nested_scenes/TestD.scene",

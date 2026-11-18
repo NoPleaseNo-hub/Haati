@@ -126,7 +126,7 @@ _ensure_initialized :: proc() {
 	_folder_colors = make([dynamic]Folder_Color_Entry, runtime.default_allocator())
 
 	// Default Unreal/Godot-style folder color markings
-	set_folder_color("void_odin",     {0.75, 0.45, 1.0, 1.0})  // Royal Purple (Our Game)
+	set_folder_color("scripts",       {0.75, 0.45, 1.0, 1.0})  // Royal Purple (Gameplay Scripts)
 	set_folder_color("physics3d",     {0.20, 0.85, 0.95, 1.0}) // Cyan (Jolt Physics)
 	set_folder_color("input_manager", {0.30, 0.92, 0.50, 1.0}) // Emerald Green (Input)
 	set_folder_color("control_rig",   {1.00, 0.60, 0.20, 1.0}) // Amber Orange (Control Rig)

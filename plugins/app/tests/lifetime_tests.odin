@@ -8,7 +8,6 @@ package app_tests
 import app "haati:packages/app"
 import "haati:engine"
 import common "haati:tests/common"
-import "core:fmt"
 import "core:strings"
 import "core:testing"
 
@@ -32,10 +31,13 @@ test_lifetime_serializes :: proc(t: ^testing.T) {
 	if !ok do return
 	defer delete(data)
 
-	text := string(data)
-	fmt.printf("has guid: %v, has duration: %v\n",
-		strings.contains(text, "c3a1e4f2-7b8d-4a2e-9c5f-1d6e3b0f7a8c"),
-		strings.contains(text, "4.5"))
+	json_bytes, jok := engine.scene_bytes_to_json_if_binary(data, context.temp_allocator)
+	testing.expect(t, jok, "HTSCN001 serialized scene must decode back to JSON")
+	if !jok do return
+
+	text := string(json_bytes)
 	testing.expect(t, strings.contains(text, "c3a1e4f2-7b8d-4a2e-9c5f-1d6e3b0f7a8c"),
 		"serialized scene should contain the Lifetime ext record")
+	testing.expect(t, strings.contains(text, "4.5"),
+		"serialized scene should contain Lifetime duration 4.5")
 }

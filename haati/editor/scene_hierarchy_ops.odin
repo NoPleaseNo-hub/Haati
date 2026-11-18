@@ -113,6 +113,7 @@ _hierarchy_open_ancestors :: proc(tH: engine.Transform_Handle) {
 @(private)
 _begin_rename :: proc(tH: engine.Transform_Handle) {
 	_hierarchy_rename_target = tH
+	engine.hierarchy_request_rename(tH)
 }
 
 hierarchy_apply_pending_select :: proc() {

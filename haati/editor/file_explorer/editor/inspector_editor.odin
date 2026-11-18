@@ -1,6 +1,6 @@
 package file_explorer_editor
 
-// Void Inspector: Modern, unified, Godot 4 & Unreal Engine 5 inspired entity & asset inspector.
+// Inspector: entity & asset inspector.
 // Features:
 // 1. Unified Identity Card: Entity icon, active toggle, instant inline rename, layer/ID badges, and quick scene actions.
 // 2. Proportional Transform Widget: Color-coded X (red), Y (green), Z (blue) inputs, quick [R] zero/reset buttons,
@@ -56,8 +56,8 @@ _vi_add_comp_open_pending: bool = false
 @(private = "file")
 _vi_search_buf: [128]byte
 
-@(editor_window={id="void_inspector", title="Void Inspector", icon="TUNE", width=420, height=720})
-void_inspector_window :: proc() {
+@(editor_window={id="inspector", title="Inspector", icon="TUNE", width=420, height=720})
+inspector_window :: proc() {
 	inspector.field_edit_frame_begin(im.IsAnyItemActive())
 
 	im.PushStyleVarImVec2(.WindowPadding, {10, 10})
@@ -193,11 +193,19 @@ _draw_top_bar :: proc(tH: engine.Transform_Handle, asset_mode: bool = false) {
 		im.SameLine()
 		// Duplicate
 		if im.Button(fmt.ctprintf("%s##ViDup", icons.ICON_MD_CONTENT_COPY), {btn_w, 24}) {
+			w_dup := engine.ctx_world()
+			t_cur := w_dup != nil ? engine.pool_get(&w_dup.transforms, engine.Handle(tH)) : nil
+			parentH := t_cur != nil ? engine.Transform_Handle(t_cur.parent.handle) : {}
+			g := undo.group_begin("Duplicate Object")
+			defer undo.group_end(&g)
+			undo.record_selection_snapshot()
 			new_h := engine.scene_duplicate_subtree(tH)
 			if new_h != {} {
+				undo.record_create(new_h, parentH)
 				engine.transform_ensure_unique_name(new_h)
 				if s := engine.sm_scene_get_active(); s != nil do s.dirty = true
-				engine.inspector_set_active_selection(new_h)
+				undo.group_commit(&g)
+				_vh_select_node(new_h, true)
 			}
 		}
 		widgets.tooltip("Duplicate Object (Ctrl+D)")
@@ -205,9 +213,8 @@ _draw_top_bar :: proc(tH: engine.Transform_Handle, asset_mode: bool = false) {
 		im.SameLine()
 		// Delete
 		if im.Button(fmt.ctprintf("%s##ViDel", icons.ICON_MD_DELETE), {btn_w, 24}) {
-			undo.record_delete(tH)
-			if s := engine.sm_scene_get_active(); s != nil do s.dirty = true
-			engine.inspector_set_active_selection({})
+			targets := [1]engine.Transform_Handle{tH}
+			_vh_delete_handles(targets[:])
 		}
 		widgets.tooltip("Delete Object (Del)")
 	} else if asset_mode {
@@ -236,7 +243,7 @@ _draw_empty_selection_card :: proc() {
 	im.TextColored(p.text_secondary, "No GameObject Selected")
 
 	im.Spacing()
-	im.TextWrapped("Select an object in the Scene Viewport or Void Hierarchy to inspect its properties.")
+	im.TextWrapped("Select an object in the Scene Viewport or Hierarchy to inspect its properties.")
 
 	im.Spacing()
 	im.Separator()
@@ -244,21 +251,35 @@ _draw_empty_selection_card :: proc() {
 
 	im.TextDisabled("Quick Creation:")
 	if im.Button(fmt.ctprintf("%s  Create Empty Node", icons.ICON_MD_ADD), {-1, 30}) {
-		h := engine.transform_new("GameObject")
-		if s := engine.sm_scene_get_active(); s != nil {
-			s.dirty = true
+		s := engine.sm_scene_get_active()
+		parentH := s != nil ? engine.Transform_Handle(s.root.handle) : {}
+		g := undo.group_begin("Create Empty Node")
+		defer undo.group_end(&g)
+		undo.record_selection_snapshot()
+		h := engine.transform_new("GameObject", parentH)
+		if h != {} {
+			undo.record_create(h, parentH)
+			if s != nil do s.dirty = true
 			engine.transform_ensure_unique_name(h)
+			undo.group_commit(&g)
+			_vh_select_node(h, true)
 		}
-		engine.inspector_set_active_selection(h)
 	}
 	if im.Button(fmt.ctprintf("%s  Create Armature Deformed Mesh", icons.ICON_MD_ANIMATION), {-1, 30}) {
-		h := engine.transform_new("ArmatureDeformedMesh")
-		engine.transform_add_comp(h, .ArmatureDeformedMesh)
-		if s := engine.sm_scene_get_active(); s != nil {
-			s.dirty = true
+		s := engine.sm_scene_get_active()
+		parentH := s != nil ? engine.Transform_Handle(s.root.handle) : {}
+		g := undo.group_begin("Create Armature Deformed Mesh")
+		defer undo.group_end(&g)
+		undo.record_selection_snapshot()
+		h := engine.transform_new("ArmatureDeformedMesh", parentH)
+		if h != {} {
+			undo.record_create(h, parentH)
+			engine.transform_add_comp(h, .ArmatureDeformedMesh)
+			if s != nil do s.dirty = true
 			engine.transform_ensure_unique_name(h)
+			undo.group_commit(&g)
+			_vh_select_node(h, true)
 		}
-		engine.inspector_set_active_selection(h)
 	}
 }
 
@@ -954,7 +975,7 @@ _draw_components_list :: proc(t: ^engine.Transform, tH: engine.Transform_Handle)
 			im.Indent(8)
 			im.Spacing()
 
-			// Draw reflected fields using MoonHug's property drawer system
+			// Draw reflected fields using Haati's property drawer system
 			undo.push_component_owner(comp.handle)
 			inspector.draw_inspector(any{pComp, tid})
 			undo.pop_owner()
@@ -1049,7 +1070,7 @@ _draw_add_component_section :: proc(t: ^engine.Transform, tH: engine.Transform_H
 	}
 	im.PopStyleVar()
 	im.PopStyleColor(3)
-	widgets.tooltip("Search and attach any engine or Void gameplay component to this Node")
+	widgets.tooltip("Search and attach any engine or custom gameplay component to this Node")
 
 	im.SameLine(0, 6)
 	im.PushStyleColorImVec4(im.Col.Button, p.bg_elevated)
@@ -1064,7 +1085,7 @@ _draw_add_component_section :: proc(t: ^engine.Transform, tH: engine.Transform_H
 	im.PopStyleColor(2)
 	widgets.tooltip("Create a new Odin @(component) script in your project and open it in your IDE")
 
-	// ── Inline "Create New Odin Component (.odin)" drawer inside Void Inspector ──
+	// ── Inline "Create New Odin Component (.odin)" drawer inside Inspector ──
 	if _vi_inline_new_script_open {
 		im.Spacing()
 		im.PushStyleColorImVec4(.ChildBg, p.bg_elevated)
@@ -1155,8 +1176,9 @@ _draw_add_component_section :: proc(t: ^engine.Transform, tH: engine.Transform_H
 
 	if im.BeginPopupModal("Add Component Catalog", &_vi_add_comp_open, {}) {
 		if _vi_catalog_new_script_mode {
+			root_label := engine.has_active_project() ? engine.active_project_name() : "assets/scripts"
 			im.TextColoredUnformatted({0.25, 0.95, 0.58, 1.0}, fmt.ctprintf("%s  Create New Odin Gameplay Component (.odin)", icons.ICON_MD_CODE))
-			im.TextDisabled("Creates a new @(component) struct in plugins/void_odin/ and opens it in your IDE.")
+			im.TextDisabled("%s", fmt.ctprintf("Creates a new @(component) struct in %s/ and opens it in your IDE.", root_label))
 			im.Separator()
 			im.Spacing()
 
@@ -1213,7 +1235,7 @@ _draw_add_component_section :: proc(t: ^engine.Transform, tH: engine.Transform_H
 
 		sr := widgets.search_bar(_vi_search_buf[:], widgets.Search_Bar_Opts{
 			id         = "##CompFilter",
-			hint       = "Type to search components (e.g. SpringArm, Sphere, Camera, Void)...",
+			hint       = "Type to search components (e.g. SpringArm, Sphere, Camera, Custom)...",
 			mode       = .Popup,
 			width      = 460,
 			auto_focus = im.IsWindowAppearing(),
@@ -1224,8 +1246,8 @@ _draw_add_component_section :: proc(t: ^engine.Transform, tH: engine.Transform_H
 		filter_str := sr.query
 
 		// Quick Category Filter Pills
-		cat_labels := []string{"All", "Void Scripts", "Physics 3D", "3D & Render", "Anim & Rig", "Audio", "2D & UI"}
-		cat_targets := []string{"", "Void / Custom Scripts", "Physics 3D", "3D & Rendering", "Animation & Control Rig", "Audio", "2D"}
+		cat_labels := []string{"All", "Custom Scripts", "Physics 3D", "3D & Render", "Anim & Rig", "Audio", "2D & UI"}
+		cat_targets := []string{"", "Custom Scripts", "Physics 3D", "3D & Rendering", "Animation & Control Rig", "Audio", "2D"}
 		im.Spacing()
 		for lbl, c_idx in cat_labels {
 			if c_idx > 0 do im.SameLine(0, 4)

@@ -661,7 +661,7 @@ _s2d_build_quickmenu_canvas_template :: proc(view_size: im.Vec2) {
 		if _, img := engine.transform_get_comp(sidebar_h, mhgui.Image); img != nil {
 			img.color = {0.06, 0.08, 0.12, 0.94}
 		}
-		hdr_h := _s2d_create_widget("Menu_Title", sidebar_h, {.RectTransform, .CanvasRenderer, .Text}, {300, 44}, "VOID // QUICK MENU", {0, 290})
+		hdr_h := _s2d_create_widget("Menu_Title", sidebar_h, {.RectTransform, .CanvasRenderer, .Text}, {300, 44}, "HAATI // QUICK MENU", {0, 290})
 		if _, txt := engine.transform_get_comp(hdr_h, text_pkg.Text); txt != nil {
 			txt.font_size = 24
 			txt.horizontal_alignment = .Center

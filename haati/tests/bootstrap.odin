@@ -8,6 +8,7 @@ package tests
 // a package's tests live WITH the package and die with it on uninstall.
 
 import common "common"
+import _ "prefabs_chain"
 
 TestCtx :: common.TestCtx
 setup :: common.setup

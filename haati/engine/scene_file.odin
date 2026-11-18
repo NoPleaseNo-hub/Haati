@@ -1132,6 +1132,7 @@ _inner_chain_to_native :: proc(s: ^Scene, inner_m: ^NestedScene) -> ([dynamic]PP
 scene_serialize :: proc(s: ^Scene) -> ([]byte, bool) {
 	if s == nil do return nil, false
 	w := ctx_world()
+	world_scrub_non_finite_transforms(w)
 
 	// Per docs/PrefabsSpec.md §3.2, overrides live at the root scene level only.
 	// Capture writes directly onto each chain's native NS; inner-NS records
@@ -1456,7 +1457,9 @@ scene_create_variant_file :: proc(base_path: string, out_path: string) -> bool {
 	for ns_lid == 0 || ns_lid == base_root_lid {
 		ns_lid = Local_ID(rand.uint64()) & AUTHORED_LID_MASK
 	}
-	vf := SceneFile{}
+	vf := SceneFile{
+		schema_version = SCENE_SCHEMA_VERSION,
+	}
 	vf.root = base_root_lid
 	append(&vf.nested_scenes, NestedScene{
 		local_id           = ns_lid,
@@ -1607,10 +1610,17 @@ scene_file_unmarshal :: proc(data: []byte, sf: ^SceneFile) -> json.Unmarshal_Err
 		}
 		return nil
 	}
+	trimmed := strings.trim_left_space(string(data))
+	if len(trimmed) == 0 || trimmed[0] != '{' || !json.is_valid(data, json.DEFAULT_SPECIFICATION, true) {
+		return json.Unmarshal_Data_Error.Invalid_Data
+	}
 	payload := data
 	migrated, _, _, mok := scene_migrate_json_bytes(data, context.temp_allocator)
 	if mok && len(migrated) > 0 {
 		payload = migrated
+	}
+	if !json.is_valid(payload, json.DEFAULT_SPECIFICATION, true) {
+		return json.Unmarshal_Data_Error.Invalid_Data
 	}
 	err := json.unmarshal(payload, sf)
 	if err != nil {
@@ -1903,7 +1913,8 @@ scene_save_subtrees_to_file :: proc(
 	}
 
 	sf := SceneFile{
-		root = root_lid,
+		schema_version = SCENE_SCHEMA_VERSION,
+		root           = root_lid,
 	}
 	defer scene_file_destroy_shallow(&sf)
 
@@ -2017,7 +2028,8 @@ scene_save_empty_to_file :: proc(root_name: string, out_path: string) -> bool {
 	root_lid := Local_ID(rand.uint64()) & AUTHORED_LID_MASK
 	if root_lid == 0 do root_lid = 1
 	sf := SceneFile{
-		root = root_lid,
+		schema_version = SCENE_SCHEMA_VERSION,
+		root           = root_lid,
 	}
 	defer scene_file_destroy_shallow(&sf)
 

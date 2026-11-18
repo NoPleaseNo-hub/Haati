@@ -13,6 +13,7 @@ import "base:runtime"
 import "core:bytes"
 import "core:strings"
 import "haati:engine"
+import crash_journal "haati:engine/crash_journal"
 import "haati:engine/log"
 import input "haati:engine/input"
 import "haati:editor/undo"
@@ -82,6 +83,19 @@ _selection: [dynamic]engine.Local_ID
 
 // Set by step, consumed by the next tick: advance one frame, then hold.
 _step_pending: bool
+
+// Last runtime assertion/VEH fault caught inside Play/Simulate `tick`.
+_has_play_fault:  bool
+_last_play_fault: crash_journal.Sandbox_Fault_Info
+
+// Returns and clears the most recent runtime fault caught inside Play/Simulate.
+take_last_play_fault :: proc() -> (crash_journal.Sandbox_Fault_Info, bool) {
+    if !_has_play_fault do return {}, false
+    f := _last_play_fault
+    _last_play_fault = {}
+    _has_play_fault  = false
+    return f, true
+}
 
 install :: proc(hooks: Hooks, hosts: []Host) {
     _hooks = hooks
@@ -302,15 +316,55 @@ tick :: proc(dt: f32) {
     step_dt := engine.fixed_dt() * (g_scale if g_scale > 0.0 else 1.0)
     fdt     := step_dt if step else engine.scaled_fixed_dt()
     steps   := 1 if step else engine.fixed_frame_ticks(dt)
+
+    _Sim_Step_Thunk :: struct {
+        parent_ctx: runtime.Context,
+        fn:         proc(dt: f32),
+        dt:         f32,
+    }
+    _sim_step_thunk_proc :: proc "c" (arg: rawptr) {
+        th := (^_Sim_Step_Thunk)(arg)
+        ctx := th.parent_ctx
+        ctx.assertion_failure_proc = crash_journal.sandbox_assertion_failure_proc
+        context = ctx
+        th.fn(th.dt)
+    }
+
     for _ in 0 ..< steps {
         engine.fixed_tick_begin()
         input.fixed_latch()
-        if host.fixed_update != nil do host.fixed_update(fdt)
+        if host.fixed_update != nil {
+            thunk := _Sim_Step_Thunk{parent_ctx = context, fn = host.fixed_update, dt = fdt}
+            fault, ok := crash_journal.sandbox_exec(_sim_step_thunk_proc, &thunk)
+            if !ok {
+                _last_play_fault = fault
+                _has_play_fault  = true
+                log.errorf("[Watchdog Hound] Caught fixed_update fault (%s:%d %s): %s — stopping Play and rolling back scene",
+                    crash_journal.sandbox_fault_file(&fault), fault.line,
+                    crash_journal.sandbox_fault_proc(&fault), crash_journal.sandbox_fault_reason(&fault))
+                stop()
+                return
+            }
+        }
+        engine.world_scrub_non_finite_transforms()
         engine.fixed_tick_advance()
     }
     if host.update != nil {
         engine.sim_update_begin()
-        host.update(step_dt if step else engine.scaled_dt(dt))
+        step_update_dt := step_dt if step else engine.scaled_dt(dt)
+        thunk := _Sim_Step_Thunk{parent_ctx = context, fn = host.update, dt = step_update_dt}
+        fault, ok := crash_journal.sandbox_exec(_sim_step_thunk_proc, &thunk)
+        if !ok {
+            engine.sim_update_end()
+            _last_play_fault = fault
+            _has_play_fault  = true
+            log.errorf("[Watchdog Hound] Caught update fault (%s:%d %s): %s — stopping Play and rolling back scene",
+                crash_journal.sandbox_fault_file(&fault), fault.line,
+                crash_journal.sandbox_fault_proc(&fault), crash_journal.sandbox_fault_reason(&fault))
+            stop()
+            return
+        }
+        engine.world_scrub_non_finite_transforms()
         engine.sim_update_end()
     }
 }

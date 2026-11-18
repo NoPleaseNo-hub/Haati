@@ -30,6 +30,7 @@ import "core:os"
 import "core:path/filepath"
 import "core:strconv"
 import "core:strings"
+import "crash_journal"
 import hot "hot_api"
 import "input"
 
@@ -287,6 +288,13 @@ VG_Wire :: struct {
 	to_pin:   int,
 }
 
+VG_Comment_Box :: struct {
+	title: string,
+	pos:   [2]f32,
+	size:  [2]f32,
+	color: [4]f32,
+}
+
 Visual_Graph :: struct {
 	name:           string,
 	domain:         VG_Graph_Domain, // Content filter domain (`Gameplay_Ability`, `Anim_Motion`, `Particle_VFX`, `Material_Shader`)
@@ -299,6 +307,7 @@ Visual_Graph :: struct {
 	variables:      [dynamic]VG_Var_Decl,
 	nodes:          [dynamic]VG_Node,
 	wires:          [dynamic]VG_Wire,
+	comments:       [dynamic]VG_Comment_Box,
 }
 
 // Runtime Blackboard held per entity (or preview session) for Tier-1 & Tier-2 execution.
@@ -2405,6 +2414,8 @@ vg_destroy_graph :: proc(g: ^Visual_Graph) {
 	for &n in g.nodes do vg_destroy_node(&n)
 	delete(g.nodes)
 	delete(g.wires)
+	for &c in g.comments do delete(c.title)
+	delete(g.comments)
 	g^ = {}
 }
 
@@ -2454,6 +2465,7 @@ vg_clone_graph :: proc(src: ^Visual_Graph, allocator := context.allocator) -> Vi
 		variables      = make([dynamic]VG_Var_Decl, len(src.variables), allocator),
 		nodes          = make([dynamic]VG_Node, len(src.nodes), allocator),
 		wires          = make([dynamic]VG_Wire, len(src.wires), allocator),
+		comments       = make([dynamic]VG_Comment_Box, len(src.comments), allocator),
 	}
 	for s, i in src.using_spaces {
 		dst.using_spaces[i] = s != "" ? strings.clone(s, allocator) : ""
@@ -2519,6 +2531,11 @@ vg_clone_graph :: proc(src: ^Visual_Graph, allocator := context.allocator) -> Vi
 		dst.nodes[ni] = cn
 	}
 	copy(dst.wires[:], src.wires[:])
+	for &c, ci in src.comments {
+		dc := c
+		dc.title = c.title != "" ? strings.clone(c.title, allocator) : ""
+		dst.comments[ci] = dc
+	}
 	return dst
 }
 
@@ -2527,7 +2544,7 @@ vg_graphs_equal :: proc(a, b: ^Visual_Graph) -> bool {
 	if a.domain != b.domain || a.next_uid != b.next_uid || a.name != b.name || a.package_target != b.package_target {
 		return false
 	}
-	if len(a.using_spaces) != len(b.using_spaces) || len(a.delegates) != len(b.delegates) || len(a.enums) != len(b.enums) || len(a.structs) != len(b.structs) || len(a.variables) != len(b.variables) || len(a.nodes) != len(b.nodes) || len(a.wires) != len(b.wires) {
+	if len(a.using_spaces) != len(b.using_spaces) || len(a.delegates) != len(b.delegates) || len(a.enums) != len(b.enums) || len(a.structs) != len(b.structs) || len(a.variables) != len(b.variables) || len(a.nodes) != len(b.nodes) || len(a.wires) != len(b.wires) || len(a.comments) != len(b.comments) {
 		return false
 	}
 	for i in 0 ..< len(a.using_spaces) do if a.using_spaces[i] != b.using_spaces[i] do return false
@@ -2575,6 +2592,10 @@ vg_graphs_equal :: proc(a, b: ^Visual_Graph) -> bool {
 	}
 	for i in 0 ..< len(a.wires) {
 		if a.wires[i] != b.wires[i] do return false
+	}
+	for i in 0 ..< len(a.comments) {
+		ca, cb := &a.comments[i], &b.comments[i]
+		if ca.title != cb.title || ca.pos != cb.pos || ca.size != cb.size || ca.color != cb.color do return false
 	}
 	return true
 }
@@ -5535,7 +5556,42 @@ vg_eval_custom_proc_live :: proc(
 	return false
 }
 
-// Evaluates `Event_Tick` in Tier-1 Safe In-RAM Mode (`0.00 ms` when `Event_Tick` is absent!).
+@(private = "file")
+_VG_Live_Exec_Thunk :: struct {
+	parent_ctx: runtime.Context,
+	g:          ^Visual_Graph,
+	bb:         ^VG_Runtime_Blackboard,
+	tH:         Transform_Handle,
+	raw_dt:     f32,
+}
+
+@(private = "file")
+_vg_live_exec_thunk_proc :: proc "c" (arg: rawptr) {
+	th := (^_VG_Live_Exec_Thunk)(arg)
+	ctx := th.parent_ctx
+	ctx.assertion_failure_proc = crash_journal.sandbox_assertion_failure_proc
+	context = ctx
+	vg_eval_event_live(th.g, th.bb, th.tH, th.raw_dt, .Event_Tick)
+}
+
+// Evaluates `Event_Tick` in Tier-1 Safe In-RAM Mode (`0.00 ms` when `Event_Tick` is absent!)
+// behind the Watchdog assertion + VEH sandbox so faulting live graphs trip cleanly without crashing.
 vg_eval_graph_live :: proc(g: ^Visual_Graph, bb: ^VG_Runtime_Blackboard, tH: Transform_Handle, raw_dt: f32) {
-	vg_eval_event_live(g, bb, tH, raw_dt, .Event_Tick)
+	if g == nil || (bb != nil && bb.loop_fuse_tripped_uid != 0) do return
+	thunk := _VG_Live_Exec_Thunk{
+		parent_ctx = context,
+		g          = g,
+		bb         = bb,
+		tH         = tH,
+		raw_dt     = raw_dt,
+	}
+	fault, ok := crash_journal.sandbox_exec(_vg_live_exec_thunk_proc, &thunk)
+	if !ok {
+		if bb != nil {
+			bb.loop_fuse_tripped_uid = -1
+		}
+		reason := crash_journal.sandbox_fault_reason(&fault)
+		ffile  := crash_journal.sandbox_fault_file(&fault)
+		fmt.printfln("[Watchdog Sandbox] Live Blueprint '%s' faulted (%s:%d): %s", g.name, ffile, fault.line, reason)
+	}
 }

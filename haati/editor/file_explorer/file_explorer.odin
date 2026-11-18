@@ -1,6 +1,6 @@
 package file_explorer
 
-// Godot & Unreal Engine 5 style File Explorer & Content Browser for MoonHug.
+// Godot & Unreal Engine 5 style File Explorer & Content Browser for Haati.
 // Provides grid/thumbnail cards, details list, recursive directory tree,
 // Quick Access bookmarks (Game project, Assets, Godot import, Plugins),
 // instant search, Windows Explorer reveal, and one-click level/script creation.
@@ -134,7 +134,7 @@ File_Explorer_Settings :: struct {
 	ide_executable:    string `inspect:"-"`,
 }
 
-@(project_settings={name="Void File Explorer"})
+@(project_settings={name="File Explorer"})
 settings := File_Explorer_Settings{
 	show_hidden      = false,
 	grid_card_size   = CARD_SIZE_DEFAULT,
@@ -375,7 +375,7 @@ classify_file :: proc(name: string, is_dir: bool) -> (kind: File_Type_Kind, type
 	ext := strings.to_lower(filepath.ext(name), context.temp_allocator)
 	switch ext {
 	case ".scene":
-		return .Scene, "Moonhug Scene", "\uf720", {0.82, 0.45, 1.0, 1.0}
+		return .Scene, "Haati Scene", "\uf720", {0.82, 0.45, 1.0, 1.0}
 	case ".tscn", ".scn":
 		return .Scene, "Godot Scene", "\uf720", {0.72, 0.40, 0.95, 1.0}
 	case ".level":
@@ -1464,7 +1464,7 @@ format_new_component_scaffold :: proc(pkg_name, struct_name: string, allocator :
 		u64((h2 >> 16) & 0xffffffffffff),
 	)
 	return fmt.aprintf(
-		"package %s\n\nimport \"haati:engine\"\n\n@" + "(component={{menu=\"Void/%s\"}})\n@" + "(typ_guid={{guid = \"%s\"}})\n%s :: struct {{\n\tusing base: engine.CompData,\n\t// Tip: Use engine.Ref_Local to reference a Scene Node,\n\t// or f32, int, bool, [3]f32 for tunable Inspector variables.\n}}\n\nreset_%s :: proc(c: ^%s) {{\n}}\n",
+		"package %s\n\nimport \"haati:engine\"\n\n@" + "(component={{menu=\"Custom/%s\"}})\n@" + "(typ_guid={{guid = \"%s\"}})\n%s :: struct {{\n\tusing base: engine.CompData,\n\t// Tip: Use engine.Ref_Local to reference a Scene Node,\n\t// or f32, int, bool, [3]f32 for tunable Inspector variables.\n}}\n\nreset_%s :: proc(c: ^%s) {{\n}}\n",
 		pkg_name,
 		struct_name,
 		guid_str,

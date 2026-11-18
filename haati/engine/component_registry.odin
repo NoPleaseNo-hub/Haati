@@ -168,12 +168,73 @@ _ext_value_into :: proc(desc: Component_Desc, v: json.Value, ptr: rawptr) -> boo
 	return true
 }
 
+@(private = "file")
+_scrub_non_finite_json_tokens :: proc(raw: []byte, allocator := context.temp_allocator) -> string {
+	is_tok_char :: #force_inline proc(c: byte) -> bool {
+		return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+	}
+	b := strings.builder_make(0, len(raw), allocator)
+	in_str := false
+	escaped := false
+	i := 0
+	for i < len(raw) {
+		c := raw[i]
+		if in_str {
+			strings.write_byte(&b, c)
+			if escaped {
+				escaped = false
+			} else if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				in_str = false
+			}
+			i += 1
+			continue
+		}
+		if c == '"' {
+			in_str = true
+			strings.write_byte(&b, c)
+			i += 1
+			continue
+		}
+		prev_ok := i == 0 || !is_tok_char(raw[i - 1])
+		if prev_ok {
+			rem := string(raw[i:])
+			tok_len := 0
+			if strings.has_prefix(rem, "NaN") && (len(rem) == 3 || !is_tok_char(rem[3])) {
+				tok_len = 3
+			} else if (strings.has_prefix(rem, "+Inf") || strings.has_prefix(rem, "-Inf")) && (len(rem) == 4 || !is_tok_char(rem[4])) {
+				tok_len = 4
+			} else if strings.has_prefix(rem, "Inf") && (len(rem) == 3 || !is_tok_char(rem[3])) {
+				tok_len = 3
+			}
+			if tok_len > 0 {
+				strings.write_string(&b, "0.0")
+				i += tok_len
+				continue
+			}
+		}
+		strings.write_byte(&b, c)
+		i += 1
+	}
+	return strings.to_string(b)
+}
+
 // typed component memory -> fresh json.Value.
 _ext_value_from :: proc(desc: Component_Desc, ptr: rawptr) -> (json.Value, bool) {
 	bytes, merr := json.marshal(any{ptr, desc.tid}, {spec = .JSON}, context.temp_allocator)
 	if merr != nil do return nil, false
 	v, perr := json.parse(bytes, .JSON, true)
-	if perr != nil do return nil, false
+	if perr != nil {
+		scrubbed := _scrub_non_finite_json_tokens(bytes, context.temp_allocator)
+		v2, perr2 := json.parse(transmute([]byte)scrubbed, .JSON, true)
+		if perr2 != nil {
+			log.errorf("[Scene] Failed to serialize component %s: %v", desc.tid, perr)
+			return nil, false
+		}
+		log.warningf("[Watchdog Scrubber] Sanitized NaN/Inf float in component %s before save", desc.tid)
+		return v2, true
+	}
 	return v, true
 }
 

@@ -78,6 +78,8 @@ InspectorState :: struct {
     // Ping (reveal + highlight flash, does NOT change selection) — the
     // hierarchy view consumes it. {} means "no pending request".
     pending_ping_tH:       Transform_Handle,
+    // Cross-package "rename this transform" request (e.g. Edit -> Rename F2).
+    pending_rename_tH:     Transform_Handle,
     // Same channel shape for assets: the project view navigates to and
     // selects the asset ("ping"). {} means "no pending request".
     pending_ping_asset:    Asset_GUID,
@@ -97,7 +99,8 @@ ctx_world :: proc() -> ^World {
 }
 
 ctx_scene_manager :: proc() -> ^SceneManager {
-    return &ctx_get().scene_manager
+    uc := ctx_get()
+    return uc != nil ? &uc.scene_manager : nil
 }
 
 inspector_push_readonly :: proc() {
@@ -274,6 +277,21 @@ inspector_take_pending_ping :: proc() -> (Transform_Handle, bool) {
     tH := uc.inspector.pending_ping_tH
     if tH == {} do return {}, false
     uc.inspector.pending_ping_tH = {}
+    return tH, true
+}
+
+hierarchy_request_rename :: proc(tH: Transform_Handle) {
+    uc := ctx_get()
+    if uc == nil do return
+    uc.inspector.pending_rename_tH = tH
+}
+
+hierarchy_take_pending_rename :: proc() -> (Transform_Handle, bool) {
+    uc := ctx_get()
+    if uc == nil do return {}, false
+    tH := uc.inspector.pending_rename_tH
+    if tH == {} do return {}, false
+    uc.inspector.pending_rename_tH = {}
     return tH, true
 }
 

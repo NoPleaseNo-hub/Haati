@@ -1,6 +1,7 @@
 package engine
 
 import "base:runtime"
+import "core:math"
 import "core:math/linalg"
 import "core:strings"
 import "core:fmt"
@@ -734,5 +735,61 @@ transform_find_descendant_by_name :: proc(root: Transform_Handle, name: string, 
         }
     }
     return {}, false
+}
+
+@(private = "file")
+_scrub_warned_count: int
+
+// Repairs any NaN / Inf TRS lanes (or zero/non-finite quaternions) across the active World
+// before physics stepping or serialization so user divide-by-zero / bad math cannot crash Jolt
+// or silently corrupt saved scenes.
+world_scrub_non_finite_transforms :: proc(w: ^World = nil) -> int {
+    world := w != nil ? w : ctx_world()
+    if world == nil do return 0
+
+    repaired := 0
+    it := pool_iterator(&world.transforms)
+    for t, _ in pool_next(&it) {
+        bad := false
+        pos := t.position
+        for i in 0 ..< 3 {
+            if math.is_nan(pos[i]) || math.is_inf(pos[i]) {
+                pos[i] = 0
+                bad = true
+            }
+        }
+        rot := t.rotation
+        rot_bad := false
+        for i in 0 ..< 4 {
+            if math.is_nan(rot[i]) || math.is_inf(rot[i]) {
+                rot_bad = true
+                break
+            }
+        }
+        len2 := rot[0]*rot[0] + rot[1]*rot[1] + rot[2]*rot[2] + rot[3]*rot[3]
+        if rot_bad || len2 < 1e-8 {
+            rot = QUAT_IDENTITY
+            bad = true
+        }
+        scl := t.scale
+        for i in 0 ..< 3 {
+            if math.is_nan(scl[i]) || math.is_inf(scl[i]) {
+                scl[i] = 1
+                bad = true
+            }
+        }
+        if bad {
+            t.position = pos
+            t.rotation = rot
+            t.scale = scl
+            t._world_ver += 1
+            repaired += 1
+        }
+    }
+    if repaired > 0 && _scrub_warned_count < 8 {
+        _scrub_warned_count += 1
+        fmt.printfln("[Watchdog Scrubber] Repaired non-finite TRS on %d transform(s)", repaired)
+    }
+    return repaired
 }
 

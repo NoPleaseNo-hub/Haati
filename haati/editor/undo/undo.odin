@@ -1342,10 +1342,10 @@ make_raw_target :: proc(ptr: rawptr, offset: uintptr, tid: typeid) -> Property_T
 	}
 }
 
-capture_json :: proc(ptr: rawptr, tid: typeid) -> []byte {
+capture_json :: proc(ptr: rawptr, tid: typeid, allocator := context.allocator) -> []byte {
 	if ptr == nil || tid == nil do return nil
 	opts := json.Marshal_Options{spec = .JSON, pretty = false}
-	data, err := json.marshal(any{ptr, tid}, opts)
+	data, err := json.marshal(any{ptr, tid}, opts, allocator)
 	if err != nil {
 		log.error(fmt.tprintf("undo: marshal failed for %v: %v", tid, err))
 		return nil
@@ -1601,7 +1601,8 @@ _undo_delete_subtree :: proc(v: Delete_Subtree_Command) {
 _paste_subtree_preserve_ids :: proc(payload: []byte, parent: engine.Transform_Handle, sibling_index: int) -> engine.Transform_Handle {
 	if payload == nil || len(payload) == 0 do return {}
 	sf: engine.SceneFile
-	if err := json.unmarshal(payload, &sf); err != nil {
+	if err := engine.scene_file_unmarshal(payload, &sf); err != nil {
+		engine.scene_file_destroy(&sf)
 		log.error(fmt.tprintf("undo: unmarshal subtree failed: %v", err))
 		return {}
 	}

@@ -344,11 +344,15 @@ _is_guid :: proc(s: string) -> bool {
 }
 
 // Create every missing parent segment of a FILE path — os.make_directory is
-// non-recursive.
+// non-recursive. Uses temp normalization so Windows `\` paths work and never leak.
 ensure_parent_dirs :: proc(path: string) {
-	dir := filepath.dir(path)
+	norm, _ := strings.replace_all(path, "\\", "/", context.temp_allocator)
+	last_sep := strings.last_index_byte(norm, '/')
+	if last_sep <= 0 do return
+	dir := norm[:last_sep]
 	for i := 0; i <= len(dir); i += 1 {
 		if i == len(dir) || dir[i] == '/' {
+			if i == 2 && dir[1] == ':' do continue // skip Windows drive letter `C:`
 			if i > 0 do os.make_directory(dir[:i])
 		}
 	}

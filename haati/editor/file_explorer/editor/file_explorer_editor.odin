@@ -21,6 +21,7 @@ import wnd "haati:editor/window"
 import icons "haati:editor/icons"
 import thm "haati:editor/theme"
 import undo "haati:editor/undo"
+import clip "haati:editor/clipboard"
 import engine "haati:engine"
 import file_exp "haati:editor/file_explorer"
 import editor_visuals "haati:editor/editor_visuals"
@@ -624,10 +625,7 @@ owns_keyboard_shortcuts :: proc() -> bool {
 @(private = "file") _color_picker_folder_len:    int = 0
 @(private = "file") _color_picker_current_col:   [4]f32 = {0.25, 0.65, 1.0, 1.0}
 
-// Clipboard state (Fixed Buffers)
-@(private = "file") _clipboard_path_buf:      [512]u8
-@(private = "file") _clipboard_path_len:      int = 0
-@(private = "file") _clipboard_has_item:      bool = false
+// Clipboard scroll-to helper state
 @(private = "file") _scroll_to_selected:      bool = false
 
 _set_selection_by_path :: proc(path: string) {
@@ -672,47 +670,98 @@ _open_rename_modal_for_selected :: proc() {
 	_show_rename_modal = true
 }
 
-_copy_selected_to_clipboard :: proc() {
+_copy_or_cut_selected_to_clipboard :: proc(cut: bool) {
 	if !_has_selection do return
-	if len(_selected_paths) > 1 {
+	paths := make([dynamic]string, context.temp_allocator)
+	if len(_selected_paths) > 0 {
+		for p in _selected_paths {
+			if p != "" do append(&paths, p)
+		}
+	} else if sel := _get_selected_path(); sel != "" {
+		append(&paths, sel)
+	}
+	if len(paths) == 0 do return
+
+	clip.copy_files(paths[:], cut)
+	if len(paths) > 1 {
 		b := strings.builder_make(context.temp_allocator)
-		for p, i in _selected_paths {
+		for p, i in paths {
 			if i > 0 do strings.write_string(&b, "\n")
 			strings.write_string(&b, p)
 		}
-		combined := strings.to_string(b)
-		im.SetClipboardText(strings.clone_to_cstring(combined, context.temp_allocator))
-		fmt.printfln("[Void Explorer] Copied %d items to clipboard", len(_selected_paths))
+		im.SetClipboardText(strings.clone_to_cstring(strings.to_string(b), context.temp_allocator))
+		fmt.printfln("[File Explorer] %s %d items to clipboard", cut ? "Cut" : "Copied", len(paths))
 	} else {
-		target_path := _get_selected_path()
-		_clipboard_path_len = copy(_clipboard_path_buf[:], target_path)
-		_clipboard_has_item = true
-		im.SetClipboardText(strings.clone_to_cstring(target_path, context.temp_allocator))
-		fmt.printfln("[Void Explorer] Copied: %s", target_path)
+		im.SetClipboardText(strings.clone_to_cstring(paths[0], context.temp_allocator))
+		fmt.printfln("[File Explorer] %s: %s", cut ? "Cut" : "Copied", paths[0])
 	}
 }
 
+_copy_selected_to_clipboard :: proc() {
+	_copy_or_cut_selected_to_clipboard(false)
+}
+
+_cut_selected_to_clipboard :: proc() {
+	_copy_or_cut_selected_to_clipboard(true)
+}
+
+_has_file_clipboard :: proc() -> bool {
+	if len(clip.files()) > 0 do return true
+	clip_txt := im.GetClipboardText()
+	if clip_txt != nil {
+		s := strings.trim_space(string(clip_txt))
+		if s != "" && os.exists(s) do return true
+	}
+	return false
+}
+
 _paste_from_clipboard :: proc() {
-	src_path := ""
-	if _clipboard_has_item && _clipboard_path_len > 0 {
-		src_path = string(_clipboard_path_buf[:_clipboard_path_len])
+	dest_dir := _get_current_dir()
+	last_new_path := ""
+	pasted_count := 0
+
+	clip_files := clip.files()
+	is_cut := clip.files_cut()
+	if len(clip_files) > 0 {
+		for src_path in clip_files {
+			if src_path == "" || !os.exists(src_path) do continue
+			new_path: string
+			ok: bool
+			if is_cut {
+				new_path, ok = file_exp.move_entry(src_path, dest_dir)
+			} else {
+				new_path, ok = file_exp.copy_entry(src_path, dest_dir)
+			}
+			if ok {
+				last_new_path = new_path
+				pasted_count += 1
+			}
+		}
+		if is_cut && pasted_count > 0 {
+			clip.clear_files()
+		}
 	} else {
-		clip := im.GetClipboardText()
-		if clip != nil {
-			clip_str := string(clip)
-			if os.exists(clip_str) {
-				src_path = clip_str
+		clip_txt := im.GetClipboardText()
+		if clip_txt != nil {
+			raw := string(clip_txt)
+			lines := strings.split_lines(raw, context.temp_allocator)
+			for line in lines {
+				src_path := strings.trim_space(line)
+				if src_path == "" || !os.exists(src_path) do continue
+				if new_path, ok := file_exp.copy_entry(src_path, dest_dir); ok {
+					last_new_path = new_path
+					pasted_count += 1
+				}
 			}
 		}
 	}
-	if src_path != "" && os.exists(src_path) {
-		dest_dir := _get_current_dir()
-		new_path, ok := file_exp.copy_entry(src_path, dest_dir)
-		if ok {
-			_refresh_items()
-			_set_selection_by_path(new_path)
-			fmt.printfln("[Void Explorer] Pasted: %s", new_path)
+
+	if pasted_count > 0 {
+		_refresh_items()
+		if last_new_path != "" {
+			_set_selection_by_path(last_new_path)
 		}
+		fmt.printfln("[File Explorer] %s %d item(s) -> %s", is_cut ? "Moved" : "Pasted", pasted_count, last_new_path)
 	}
 }
 
@@ -796,6 +845,14 @@ _handle_keyboard_shortcuts :: proc() {
 		}
 	}
 
+	// 3b. Ctrl+X -> Cut selected item
+	if ctrl_down && im.IsKeyPressed(.X, false) {
+		if _has_selection {
+			_cut_selected_to_clipboard()
+			return
+		}
+	}
+
 	// 4. Ctrl+V -> Paste item into current directory
 	if ctrl_down && im.IsKeyPressed(.V, false) {
 		_paste_from_clipboard()
@@ -854,7 +911,10 @@ _ensure_init :: proc() {
 
 	start_dir := "."
 	if !engine.has_active_project() {
-		start_dir = file_exp.resolve_workspace_path("plugins/void_odin", context.temp_allocator)
+		start_dir = file_exp.resolve_workspace_path("assets", context.temp_allocator)
+		if !os.exists(start_dir) {
+			start_dir = file_exp.resolve_workspace_path("haati/assets", context.temp_allocator)
+		}
 		if !os.exists(start_dir) {
 			start_dir = file_exp.get_workspace_root()
 		}
@@ -892,7 +952,7 @@ _navigate_to :: proc(target_path: string, push_history: bool = true, scroll_tree
 		_trigger_tree_reveal(scroll = scroll_tree)
 	}
 	if engine.overwatch_hooks_extended() {
-		engine.overwatch_record_event(.User_Action, "VoidExplorer", fmt.tprintf("Navigated to folder '%s'", filepath.base(norm)))
+		engine.overwatch_record_event(.User_Action, "FileExplorer", fmt.tprintf("Navigated to folder '%s'", filepath.base(norm)))
 	}
 }
 
@@ -1177,9 +1237,9 @@ _accept_folder_drop_target :: proc(target_dir: string) {
 					_scope_index_dirty = true
 					_needs_refresh = true
 					if len(last_moved) > 0 {
-						fmt.printfln("[Void Explorer] Moved -> %s", last_moved)
+						fmt.printfln("[File Explorer] Moved -> %s", last_moved)
 						if engine.overwatch_hooks_extended() {
-							engine.overwatch_record_event(.User_Action, "VoidExplorer", fmt.tprintf("Moved item into '%s' (-> %s)", filepath.base(target_dir), filepath.base(last_moved)))
+							engine.overwatch_record_event(.User_Action, "FileExplorer", fmt.tprintf("Moved item into '%s' (-> %s)", filepath.base(target_dir), filepath.base(last_moved)))
 						}
 					}
 				}
@@ -2456,7 +2516,7 @@ _draw_right_pane :: proc() {
 			file_exp.reveal_in_os(_get_current_dir())
 		}
 		im.Separator()
-		has_clip := _clipboard_has_item || (im.GetClipboardText() != nil && os.exists(string(im.GetClipboardText())))
+		has_clip := _has_file_clipboard()
 		if im.MenuItem(fmt.ctprintf("%s  Paste", icons.ICON_MD_CONTENT_PASTE), "Ctrl+V", false, has_clip) {
 			_paste_from_clipboard()
 		}
@@ -2525,7 +2585,7 @@ _open_file_item :: proc(path: string) {
 
 	ext := strings.to_lower(filepath.ext(norm_p), context.temp_allocator)
 
-	// 1. Scene files (.scene) -> Open in MoonHug Editor
+	// 1. Scene files (.scene) -> Open in Haati Editor
 	if ext == ".scene" {
 		_open_scene_in_editor(norm_p)
 		return
@@ -2545,7 +2605,7 @@ _open_file_item :: proc(path: string) {
 	if ext == ".mat" {
 		_show_inspector_pane = true
 		_connect_material_editor_to_mat(norm_p)
-		wnd.open("void_material_editor")
+		wnd.open("material_editor")
 		return
 	}
 
@@ -2950,7 +3010,24 @@ _get_or_build_asset_preview :: proc(item: file_exp.File_Item, force_load: bool =
 	} else if ext == ".scene" {
 		entry.kind = .Scene
 		if data, rerr := os.read_entire_file(item.path, context.temp_allocator); rerr == nil {
-			entry.scene_obj_count = max(1, strings.count(string(data), "\"components\""))
+			count := 0
+			if summary, sok := engine.scene_extract_summary(data, context.temp_allocator); sok {
+				if idx := strings.index(summary, "transforms="); idx >= 0 {
+					rest := summary[idx + len("transforms="):]
+					end := 0
+					for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+						end += 1
+					}
+					if end > 0 {
+						if parsed, pok := strconv.parse_int(rest[:end]); pok {
+							count = parsed
+						}
+					}
+				}
+			} else {
+				count = strings.count(string(data), "\"components\"")
+			}
+			entry.scene_obj_count = max(1, count)
 		}
 	} else if ext == ".odin" || ext == ".json" || ext == ".glsl" || ext == ".vert" || ext == ".frag" || ext == ".md" || ext == ".txt" {
 		entry.kind = .Code
@@ -3890,7 +3967,7 @@ _draw_asset_inspector_pane :: proc() {
 				im.Spacing()
 				if im.Button(fmt.ctprintf("%s  Open in Material Shader Graph", icons.ICON_MD_PALETTE), {-1, 24}) {
 					_connect_material_editor_to_mat(item.path)
-					wnd.open("void_material_editor")
+					wnd.open("material_editor")
 				}
 			}
 		} else {
@@ -4124,7 +4201,10 @@ _draw_item_context_menu :: proc(item: file_exp.File_Item) {
 	if im.MenuItem(fmt.ctprintf("%s  Copy (Ctrl+C)", icons.ICON_MD_CONTENT_COPY)) {
 		_copy_selected_to_clipboard()
 	}
-	if im.MenuItem(fmt.ctprintf("%s  Paste (Ctrl+V)", icons.ICON_MD_CONTENT_PASTE)) {
+	if im.MenuItem(fmt.ctprintf("%s  Cut (Ctrl+X)", icons.ICON_MD_CONTENT_CUT)) {
+		_cut_selected_to_clipboard()
+	}
+	if im.MenuItem(fmt.ctprintf("%s  Paste (Ctrl+V)", icons.ICON_MD_CONTENT_PASTE), "", false, _has_file_clipboard()) {
 		_paste_from_clipboard()
 	}
 	if im.MenuItem(fmt.ctprintf("%s  Duplicate (Ctrl+D)", icons.ICON_MD_CONTENT_COPY)) {
@@ -4151,7 +4231,7 @@ _draw_item_context_menu :: proc(item: file_exp.File_Item) {
 // MAIN WINDOW ENTRY POINT
 // ─────────────────────────────────────────────────────────────
 
-@(editor_window={id="void_file_explorer", title="Void File Explorer", icon="FOLDER", width=980, height=640})
+@(editor_window={id="file_explorer", title="File Explorer", icon="FOLDER", width=980, height=640})
 file_explorer_window_draw :: proc() {
 	_ensure_init()
 	_previews_loaded_this_frame = 0
@@ -4269,10 +4349,16 @@ file_explorer_window_draw :: proc() {
 		}
 	}
 
-	if _clipboard_has_item && _clipboard_path_len > 0 {
-		clip_name := filepath.base(string(_clipboard_path_buf[:_clipboard_path_len]))
+	clip_files := clip.files()
+	if len(clip_files) > 0 {
+		clip_name := filepath.base(clip_files[0])
+		clip_mode := clip.files_cut() ? "Cut" : "Clipboard"
 		im.SameLine(0, 20)
-		im.TextColoredUnformatted({0.95, 0.75, 0.3, 1.0}, fmt.ctprintf("Clipboard: %s (Ctrl+V to Paste)", clip_name))
+		if len(clip_files) > 1 {
+			im.TextColoredUnformatted({0.95, 0.75, 0.3, 1.0}, fmt.ctprintf("%s: %d items (Ctrl+V to Paste)", clip_mode, len(clip_files)))
+		} else {
+			im.TextColoredUnformatted({0.95, 0.75, 0.3, 1.0}, fmt.ctprintf("%s: %s (Ctrl+V to Paste)", clip_mode, clip_name))
+		}
 	}
 }
 

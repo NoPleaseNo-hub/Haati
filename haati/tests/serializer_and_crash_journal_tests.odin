@@ -309,7 +309,7 @@ test_crash_journal_symbolicated_and_last_log :: proc(t: ^testing.T) {
 	txt_p := string(data_p)
 	txt_lp := string(data_lp)
 	testing.expect_value(t, txt_p, txt_lp)
-	testing.expect(t, strings.contains(txt_p, "MoonHug crash"), "expected crash journal header")
+	testing.expect(t, strings.contains(txt_p, "Haati crash"), "expected crash journal header")
 	testing.expect(t, strings.contains(txt_p, "hardening breadcrumb"), "expected breadcrumb in crash journal")
 	testing.expect(t, strings.contains(txt_p, "TEST (zero-heap symbolicated)"), "expected reason in crash journal")
 	testing.expect(t, strings.contains(txt_p, "stack:"), "expected stack section in crash journal")

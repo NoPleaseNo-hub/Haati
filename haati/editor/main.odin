@@ -217,9 +217,9 @@ _run_editor_session :: proc() {
         if len(editor_settings.open_window_ids) > 0 {
             wnd.open_saved(editor_settings.open_window_ids[:])
         } else {
-            wnd.open("void_file_explorer")
-            wnd.open("void_hierarchy")
-            wnd.open("void_inspector")
+            wnd.open("file_explorer")
+            wnd.open("hierarchy")
+            wnd.open("inspector")
         }
 
         // Guarantee all docked windows in imgui.ini are reopened so ImGui doesn't drop or collapse tabs

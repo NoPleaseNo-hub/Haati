@@ -76,14 +76,14 @@ window_menu_scene_2d :: proc() { _open_window(&show_scene_2d, icons.TITLE_SCENE_
 @(menu_item={path="Window/General/Game", order=2, shortcut="Ctrl+2"})
 window_menu_game :: proc() { _open_window(&show_game, icons.TITLE_GAME) }
 
-@(menu_item={path="Window/General/Void Inspector", order=2, shortcut="Ctrl+3"})
-window_menu_inspector :: proc() { wnd.open("void_inspector") }
+@(menu_item={path="Window/General/Inspector", order=2, shortcut="Ctrl+3"})
+window_menu_inspector :: proc() { wnd.open("inspector") }
 
-@(menu_item={path="Window/General/Void Hierarchy", order=4, shortcut="Ctrl+4"})
-window_menu_hierarchy :: proc() { wnd.open("void_hierarchy") }
+@(menu_item={path="Window/General/Hierarchy", order=4, shortcut="Ctrl+4"})
+window_menu_hierarchy :: proc() { wnd.open("hierarchy") }
 
-@(menu_item={path="Window/General/Void File Explorer", order=5, shortcut="Ctrl+5"})
-window_menu_project :: proc() { wnd.open("void_file_explorer") }
+@(menu_item={path="Window/General/File Explorer", order=5, shortcut="Ctrl+5"})
+window_menu_project :: proc() { wnd.open("file_explorer") }
 
 @(menu_item={path="Window/General/Console", order=7, shortcut="Ctrl+Shift+C"})
 window_menu_console :: proc() { _open_window(&show_console, icons.TITLE_CONSOLE) }

@@ -282,7 +282,7 @@ active_project_slug :: proc(allocator := context.temp_allocator) -> string {
         }
         return project_slug_from_name(base, allocator)
     }
-    r, _ := strings.clone("void_odin", allocator)
+    r, _ := strings.clone("", allocator)
     return r
 }
 

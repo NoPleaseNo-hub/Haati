@@ -1,13 +1,13 @@
 package theme
 
-// Unified Semantic Editor Theme Engine for MoonHug.
+// Unified Semantic Editor Theme Engine for Haati.
 //
 // Designed around the Antigravity clean, calm, minimal IDE visual language:
 //   - Soft charcoal / alabaster tonal surface hierarchy (canvas -> panel -> elevated -> hover)
 //   - Whisper-thin 1px hairline borders instead of heavy contrasting boxes
 //   - Quiet tonal pill buttons at rest; saturated hues reserved for primary actions & semantic badges
 //   - Clean active-tab overline indicator with seamless tab-to-panel surface continuity
-//   - Full dark & light mode semantic tokens exported to all built-in views and Void plugin panels
+//   - Full dark & light mode semantic tokens exported to all built-in views and project plugin panels
 //
 // Zero editor-internal package dependencies (imports only odin-imgui + core) so `menu`, `widgets`,
 // `node_canvas`, `inspector`, `editor`, and all plugins can import `moonhug:editor/theme` cycle-free.

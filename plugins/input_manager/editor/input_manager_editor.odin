@@ -956,7 +956,7 @@ input_manager_window_draw :: proc() {
 		im.Separator()
 		im.Spacing()
 
-		full_code := `// --- MoonHug Input Manager Integration Boilerplate ---
+		full_code := `// --- Haati Input Manager Integration Boilerplate ---
 // 1. Claim discrete actions (callbacks return true if consumed)
 input_mgr.claim_action(.Jump, priority = 10, callback = proc(action: input_mgr.Action_Type, phase: input_mgr.Action_Phase, owner: rawptr) -> bool {
 	// Handle Jump...

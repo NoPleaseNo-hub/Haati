@@ -8366,8 +8366,8 @@ _draw_csg_drawer_kitbash :: proc(avail_w, half_w: f32) {
 	// ------------------------------------------------------------------------
 	im.SeparatorText("1. Attach Mesh Instance into CSG Volume")
 
-	// Drag-and-Drop Target Slot (accepts `.glb`, `.gltf`, `.obj`, `.fmesh` from Void File Explorer!)
-	drop_lbl: cstring = "[ Drop Mesh (.glb / .obj / .fmesh) from Void Explorer Here ]"
+	// Drag-and-Drop Target Slot (accepts `.glb`, `.gltf`, `.obj`, `.fmesh` from File Explorer!)
+	drop_lbl: cstring = "[ Drop Mesh (.glb / .obj / .fmesh) from File Explorer Here ]"
 	if vol.is_faker_mesh && !engine.asset_guid_is_empty(vol.faker_mesh_guid) {
 		if m_path, pok := engine.asset_db_get_path(auto_cast vol.faker_mesh_guid); pok && len(m_path) > 0 {
 			drop_lbl = fmt.ctprintf("Instance: %s (Drop to Replace)", m_path)
@@ -8379,7 +8379,7 @@ _draw_csg_drawer_kitbash :: proc(avail_w, half_w: f32) {
 	im.PushStyleColorImVec4(.ButtonHovered, {0.20, 0.62, 0.48, 1.00})
 	_ = im.Button(drop_lbl, {avail_w, 30})
 	im.PopStyleColor(2)
-	widgets.tooltip("Drag any .glb, .gltf, .obj, or .fmesh asset card from the Void File Explorer and drop it here to attach it as the GPU Mesh Instance inside this CSGVolume!")
+	widgets.tooltip("Drag any .glb, .gltf, .obj, or .fmesh asset card from the File Explorer and drop it here to attach it as the GPU Mesh Instance inside this CSGVolume!")
 
 	if im.BeginDragDropTarget() {
 		if payload := im.AcceptDragDropPayload("ASSET_PATH"); payload != nil && payload.Data != nil && payload.DataSize > 0 {
@@ -9868,11 +9868,11 @@ _draw_csg_drawer_materials_and_deform :: proc(avail_w, half_w, third_w: f32) {
 	im.TextColored({0.95, 0.58, 1.0, 1.0}, "Material DataTable, Texture Studio & Soft Deformer")
 
 	im.PushStyleColorImVec4(.Button, {0.58, 0.24, 0.72, 0.98})
-	if im.Button(fmt.ctprintf("%s Open Unified Void Material Editor & Node Graph", icons.ICON_MD_PALETTE), {avail_w, 26}) {
-		wnd.open("void_material_editor")
+	if im.Button(fmt.ctprintf("%s Open Material Editor & Node Graph", icons.ICON_MD_PALETTE), {avail_w, 26}) {
+		wnd.open("material_editor")
 	}
 	im.PopStyleColor(1)
-	widgets.tooltip("Opens the Unified Void Material Editor (Material Inspector, Unreal/Blender Visual Node Graph & Physical CSG Material Studio)!")
+	widgets.tooltip("Opens the Material Editor (Material Inspector, Visual Node Graph & Physical CSG Material Studio)!")
 
 	vol, _ := _resolve_active_volume(false)
 

@@ -441,6 +441,14 @@ mesh_remove_procedural :: proc(guid: Asset_GUID) {
     mesh_unload(guid)
 }
 
+mesh_local_bounds :: proc(guid: Asset_GUID, part: i32 = 0) -> (bmin, bmax: [3]f32, ok: bool) {
+    if !_mesh_cache_ready && len(mesh_cache) == 0 do return {}, {}, false
+    if m, mok := &mesh_cache[Mesh_Key{guid, part}]; mok {
+        return m.aabb_min, m.aabb_max, true
+    }
+    return {}, {}, false
+}
+
 // Reads CPU vertices and triangle indices for any `MeshFilter` (both procedural in-memory meshes
 // and disk-backed glTF mesh artifacts) so the CAD Mesh Editor and Mesh->CSG Compliance Checker
 // can inspect, edit, and convert any mesh in the scene.

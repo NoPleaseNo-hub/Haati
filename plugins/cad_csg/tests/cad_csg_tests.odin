@@ -689,11 +689,13 @@ cad_csg_two_tunnels_four_pillars_roundtrip_and_blender_unreal_ops_test :: proc(t
 	testing.expect(t, mr_b != nil && mr_b.enabled, "Tool Mesh B must remain active and visible in the scene (NO automatic hiding)")
 
 	// 5. Test Save Mesh to Disk (`mesh_op_save_to_disk` -> `.glb` + `.obj`):
+	defer {
+		os.remove("assets/meshes/UnitTest_CAD_SavedMesh.glb")
+		os.remove("assets/meshes/UnitTest_CAD_SavedMesh.obj")
+	}
 	glb_path, save_ok := cad_ed.mesh_op_save_to_disk("UnitTest_CAD_SavedMesh")
 	testing.expect(t, save_ok && glb_path == "assets/meshes/UnitTest_CAD_SavedMesh.glb", "mesh_op_save_to_disk should return valid .glb path")
 	testing.expect(t, os.exists("assets/meshes/UnitTest_CAD_SavedMesh.glb") && os.exists("assets/meshes/UnitTest_CAD_SavedMesh.obj"), "Both .glb and .obj files must be written to disk")
-	os.remove("assets/meshes/UnitTest_CAD_SavedMesh.glb")
-	os.remove("assets/meshes/UnitTest_CAD_SavedMesh.obj")
 }
 
 @(test)
@@ -989,12 +991,12 @@ poly_glass_spiderweb_shatter_and_faker_mesh_test :: proc(t: ^testing.T) {
 
 	// Verify Binary `.fmesh` Save & Spawn (including serialized CSG hulls & rotation!)
 	fmesh_path := "assets/meshes/unit_test_faker.fmesh"
+	defer os.remove(fmesh_path)
 	saved_bin := cad_csg.csg_save_faker_mesh_binary(faker_vol, fmesh_path)
 	testing.expect(t, saved_bin && os.exists(fmesh_path), "csg_save_faker_mesh_binary must write a raw binary .fmesh file without JSON")
 	spawned_bin_h := cad_csg.csg_spawn_faker_mesh_from_binary({4.0, 1.5, 0.0}, fmesh_path)
 	_, spawned_bin_vol := engine.transform_get_comp(spawned_bin_h, cad_csg.CSGVolume)
 	testing.expect(t, spawned_bin_vol != nil && spawned_bin_vol.is_faker_mesh && spawned_bin_vol.faker_mesh_guid == faker_vol.faker_mesh_guid && abs(spawned_bin_vol.faker_mesh_rot_deg.y - 45.0) < 1e-3, "csg_spawn_faker_mesh_from_binary must restore mesh GUID, rotation, and CSG hulls")
-	os.remove(fmesh_path)
 
 	// 3. Verify 2-Point Clip Plane Slicer (`csg_volume_clip_by_plane` with `.Split_Both`) splits a CSGVolume into TWO separate GameObjects!
 	slice_box_h := cad_ed.spawn_separate_csg_primitive_volume(.Box, {4.0, 2.0, 2.0}, {0, 5.0, 0})

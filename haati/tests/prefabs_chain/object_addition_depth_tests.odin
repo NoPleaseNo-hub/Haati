@@ -12,12 +12,17 @@ package prefabs_chain_tests
 // "Transform" rows) are exactly what mis-targeted the capture.
 
 import engine "haati:engine"
+import "core:os"
 import "core:strings"
 import "core:testing"
 import common "haati:tests/common"
 
 @(test)
 test_object_addition_survives_at_every_depth :: proc(t: ^testing.T) {
+	tmp_dir :: "haati/tests/_tmp_prefabs_chain_depth"
+	_ = os.make_directory(tmp_dir)
+	defer _ = os.remove_all(tmp_dir)
+
 	cases := []struct{ scene, parent: string }{
 		{"host.scene", "Root/blobs_Variant"},
 		{"host.scene", "Root/blobs_Variant/Transform"},
@@ -31,10 +36,16 @@ test_object_addition_survives_at_every_depth :: proc(t: ^testing.T) {
 
 	for c in cases {
 		engine.asset_db_init("haati/tests/fixtures/prefabs_chain")
+		defer engine.asset_db_shutdown()
+		defer engine.scene_lib_shutdown()
 
 		tc_mem := new(common.TestCtx)
-		common.setup(tc_mem, "haati/tests/fixtures/_test_depth_added.scene")
+		common.setup(tc_mem, "haati/tests/_tmp_prefabs_chain_depth/_test_depth_added.scene")
 		context.user_ptr = &tc_mem.uc
+		defer {
+			common.teardown(tc_mem)
+			free(tc_mem)
+		}
 
 		src := strings.concatenate(
 			{"haati/tests/fixtures/prefabs_chain/", c.scene},
@@ -66,11 +77,6 @@ test_object_addition_survives_at_every_depth :: proc(t: ^testing.T) {
 				}
 			}
 		}
-
-		common.teardown(tc_mem)
-		free(tc_mem)
-		engine.asset_db_shutdown()
-		engine.scene_lib_shutdown()
 	}
 }
 

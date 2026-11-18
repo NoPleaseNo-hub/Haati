@@ -1835,6 +1835,9 @@ bake_graph_to_odin_file :: proc(g: ^engine.Visual_Graph, mhgraph_save_path: stri
 			dir_g = filepath.dir(abs_g)
 		}
 		_ = os.make_directory_all(dir_g)
+		if g == &_vs.graph {
+			_sync_canvas_to_graph_comments(g)
+		}
 		if strings.has_suffix(strings.to_lower(abs_g, context.temp_allocator), ".bodin") {
 			_ = engine.vg_save_bodin_file(g, abs_g, bodin_odin)
 		} else {
